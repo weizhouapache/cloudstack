@@ -321,4 +321,7 @@
         <property name="affinityGroupProcessors"
                   value="#{affinityProcessorsRegistry.registered}" />
     </bean>
+
+    <bean id="applianceAgentService" class="org.apache.cloudstack.agent.ApplianceAgentManagerImpl" />
+
 </beans>
