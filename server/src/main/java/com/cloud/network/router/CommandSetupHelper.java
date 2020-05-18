@@ -109,6 +109,7 @@ import com.cloud.network.dao.VpnUserDao;
 import com.cloud.network.lb.LoadBalancingRule;
 import com.cloud.network.lb.LoadBalancingRule.LbDestination;
 import com.cloud.network.lb.LoadBalancingRule.LbStickinessPolicy;
+import com.cloud.network.lb.LoadBalancerConfigManager;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.FirewallRule.Purpose;
 import com.cloud.network.rules.FirewallRuleVO;
@@ -212,6 +213,9 @@ public class CommandSetupHelper {
     @Autowired
     @Qualifier("networkHelper")
     protected NetworkHelper _networkHelper;
+
+    @Inject
+    private LoadBalancerConfigManager _lbConfigMgr;
 
     public void createVmDataCommand(final VirtualRouter router, final UserVm vm, final NicVO nic, final String publicKey, final Commands cmds) {
         if (vm != null && router != null && nic != null) {
@@ -353,6 +357,7 @@ public class CommandSetupHelper {
             final LoadBalancerTO lb = new LoadBalancerTO(uuid, srcIp, srcPort, protocol, algorithm, revoked, false, inline, destinations, stickinessPolicies);
             lb.setCidrList(rule.getCidrList());
             lb.setLbProtocol(lb_protocol);
+            lb.setLbConfigs(_lbConfigMgr.getRuleLbConfigs(rule.getId()));
             lbs[i++] = lb;
         }
         String routerPublicIp = null;
@@ -380,6 +385,7 @@ public class CommandSetupHelper {
         final LoadBalancerConfigCommand cmd = new LoadBalancerConfigCommand(lbs, routerPublicIp, _routerControlHelper.getRouterIpInNetwork(guestNetworkId, router.getId()),
                 router.getPrivateIpAddress(), _itMgr.toNicTO(nicProfile, router.getHypervisorType()), router.getVpcId(), maxconn, offering.isKeepAliveEnabled());
 
+        cmd.setNetworkLbConfigs(_lbConfigMgr.getNetworkLbConfigs(guestNetworkId));
         cmd.lbStatsVisibility = _configDao.getValue(Config.NetworkLBHaproxyStatsVisbility.key());
         cmd.lbStatsUri = _configDao.getValue(Config.NetworkLBHaproxyStatsUri.key());
         cmd.lbStatsAuth = _configDao.getValue(Config.NetworkLBHaproxyStatsAuth.key());
