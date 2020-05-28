@@ -177,3 +177,8 @@ class CsFile:
         result = (isinstance(o, self.__class__) and self.config == o.config)
         logging.debug("Comparison of CsFiles content is ==> %s" % result)
         return result
+
+    def compareOrder(self, o):
+        result = (isinstance(o, self.__class__) and list(self.config) == list(o.config))
+        logging.debug("Comparison of CsFiles content (and order) is ==> %s" % result)
+        return result
