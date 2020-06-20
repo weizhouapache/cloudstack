@@ -2266,7 +2266,8 @@ public class LoadBalancingRulesManagerImpl<Type> extends ManagerBase implements 
         boolean success = _lbDao.update(lbRuleId, lb);
 
         // If algorithm is changed, have to reapply the lb config
-        if ((algorithm != null) && (tmplbVo.getAlgorithm().compareTo(algorithm) != 0)){
+        if ((algorithm != null && tmplbVo.getAlgorithm().compareTo(algorithm) != 0)
+                || (lbProtocol != null && ! tmplbVo.getLbProtocol().equalsIgnoreCase(lbProtocol))) {
             try {
                 lb.setState(FirewallRule.State.Add);
                 _lbDao.persist(lb);
@@ -2286,6 +2287,9 @@ public class LoadBalancingRulesManagerImpl<Type> extends ManagerBase implements 
                     }
                     if (lbBackup.getAlgorithm() != null) {
                         lb.setAlgorithm(lbBackup.getAlgorithm());
+                    }
+                    if (lbBackup.getLbProtocol() != null) {
+                        lb.setLbProtocol(lbBackup.getLbProtocol());
                     }
                     lb.setState(lbBackup.getState());
                     _lbDao.update(lb.getId(), lb);
