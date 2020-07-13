@@ -484,8 +484,11 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
         return sb.toString();
     }
 
-    private String getCustomizedSslConfigs(HashMap<String, String> lbConfigsMap){
+    private String getCustomizedSslConfigs(HashMap<String, String> lbConfigsMap, final LoadBalancerConfigCommand lbCmd){
         String lbSslConfiguration = lbConfigsMap.get(LoadBalancerConfigKey.LbSslConfiguration.key());
+        if (lbSslConfiguration == null) {
+            lbSslConfiguration = lbCmd.lbSslConfiguration;
+        }
         if ("old".equalsIgnoreCase(lbSslConfiguration)) {
             return sslConfigurationOld;
         } else if ("intermediate".equalsIgnoreCase(lbSslConfiguration)) {
@@ -494,7 +497,7 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
         return "";
     }
 
-    private List<String> getRulesForPool(final LoadBalancerTO lbTO, boolean keepAliveEnabled, final String networkCidr, HashMap<String, String> networkLbConfigsMap) {
+    private List<String> getRulesForPool(final LoadBalancerTO lbTO, final LoadBalancerConfigCommand lbCmd, HashMap<String, String> networkLbConfigsMap) {
         StringBuilder sb = new StringBuilder();
         final String poolName = sb.append(lbTO.getSrcIp().replace(".", "_")).append('-').append(lbTO.getSrcPort()).toString();
         final String publicIP = lbTO.getSrcIp();
@@ -534,7 +537,7 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
                 sb.append(" alpn h2,http/1.1");
             }
 
-            sb.append(getCustomizedSslConfigs(lbConfigsMap));
+            sb.append(getCustomizedSslConfigs(lbConfigsMap, lbCmd));
 
             sb.append("\n\thttp-request add-header X-Forwarded-Proto https");
         }
@@ -605,8 +608,9 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
                 sb.append(" check");
             }
 
-            sb.append(getCustomizedSslConfigs(lbConfigsMap));
-
+            if (sslOffloading) {
+                sb.append(getCustomizedSslConfigs(lbConfigsMap, lbCmd));
+            }
 
             if (lbConfigsMap.get(LoadBalancerConfigKey.LbServerMaxConn.key()) != null) {
                 long maxConnEach = Long.parseLong(lbConfigsMap.get(LoadBalancerConfigKey.LbServerMaxConn.key()));
@@ -669,6 +673,7 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
             http = true;
         }
 
+        boolean keepAliveEnabled = lbCmd.keepAliveEnabled;
         String cfgLbHttpKeepalive = lbConfigsMap.get(LoadBalancerConfigKey.LbHttpKeepalive.key());
         if (cfgLbHttpKeepalive != null && cfgLbHttpKeepalive.equalsIgnoreCase("true")) {
             keepAliveEnabled = true;
@@ -712,7 +717,7 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
             result.add(sb.toString());
             result.addAll(frontendConfigs);
             sb = new StringBuilder();
-            sb.append("\tacl local_subnet src ").append(networkCidr);
+            sb.append("\tacl local_subnet src ").append(lbCmd.getNetworkCidr());
             sb.append("\n\tuse_backend ").append(poolName).append("-backend-local if local_subnet");
             sb.append("\n\tdefault_backend ").append(poolName).append("-backend");
             sb.append("\n\n");
@@ -877,7 +882,7 @@ public class HAProxyConfigurator implements LoadBalancerConfigurator {
             if (lbTO.isRevoked()) {
                 continue;
             }
-            final List<String> poolRules = getRulesForPool(lbTO, lbCmd.keepAliveEnabled, lbCmd.getNetworkCidr(), networkLbConfigsMap);
+            final List<String> poolRules = getRulesForPool(lbTO, lbCmd, networkLbConfigsMap);
             result.addAll(poolRules);
             has_listener = true;
         }
