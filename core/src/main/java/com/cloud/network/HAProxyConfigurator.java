@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.Optional;
 
 import org.apache.cloudstack.network.lb.LoadBalancerConfigKey;
+import org.apache.cloudstack.network.lb.LoadBalancerConfig.SSLConfiguration;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 
@@ -39,7 +40,6 @@ import com.cloud.agent.api.to.LoadBalancerTO.DestinationTO;
 import com.cloud.agent.api.to.LoadBalancerTO.StickinessPolicyTO;
 import com.cloud.agent.api.to.PortForwardingRuleTO;
 import com.cloud.agent.resource.virtualnetwork.model.LoadBalancerRule.SslCertEntry;
-import com.cloud.network.rules.LoadBalancerConfig.SSLConfiguration;
 import com.cloud.network.lb.LoadBalancingRule.LbSslCert;
 import com.cloud.network.rules.LbStickinessMethod.StickinessMethodType;
 import com.cloud.utils.Pair;
