@@ -2968,6 +2968,7 @@ class LoadBalancerRule:
         cmd.algorithm = services["alg"]
         cmd.privateport = services["privateport"]
         cmd.publicport = services["publicport"]
+        cmd.protocol = services["protocol"]
 
         if "openfirewall" in services:
             cmd.openfirewall = services["openfirewall"]
