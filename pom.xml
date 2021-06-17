@@ -1005,6 +1005,7 @@
                             <exclude>systemvm/agent/js/jquery.js</exclude>
                             <exclude>systemvm/agent/js/jquery.flot.navigate.js</exclude>
                             <exclude>systemvm/agent/noVNC/**</exclude>
+                            <exclude>systemvm/agent/websockify/**</exclude>
                             <exclude>systemvm/debian/**</exclude>
                             <exclude>test/integration/component/test_host_ha.sh</exclude>
                             <exclude>test/systemvm/README.md</exclude>

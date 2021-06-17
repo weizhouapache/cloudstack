@@ -2381,6 +2381,19 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
 
         devices.addDevice(new WatchDogDef(_watchDogAction, _watchDogModel));
 
+        String vncPasswd = vmTO.getVncPassword();
+        String graphType = "vnc";
+        if (MapUtils.isNotEmpty(customParams) && customParams.containsKey(VmDetailConstants.WEBSOCKIFY_CONSOLE_FRONTEND)) {
+            final String websockifyConsoleFrontEnd = customParams.get(VmDetailConstants.WEBSOCKIFY_CONSOLE_FRONTEND);
+            if (StringUtils.isNotBlank(websockifyConsoleFrontEnd)) {
+                if (websockifyConsoleFrontEnd.equalsIgnoreCase("spice")) {
+                    graphType = "spice";
+                    _videoHw = "qxl";
+                } else if (websockifyConsoleFrontEnd.equalsIgnoreCase("novnc")) {
+                }
+            }
+        }
+
         final VideoDef videoCard = new VideoDef(_videoHw, _videoRam);
         devices.addDevice(videoCard);
 
@@ -2388,8 +2401,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
         devices.addDevice(console);
 
         //add the VNC port passwd here, get the passwd from the vmInstance.
-        final String passwd = vmTO.getVncPassword();
-        final GraphicDef grap = new GraphicDef("vnc", (short)0, true, vmTO.getVncAddr(), passwd, null);
+        final GraphicDef grap = new GraphicDef(graphType, (short)0, true, vmTO.getVncAddr(), vncPasswd, null);
         devices.addDevice(grap);
 
         final InputDef input = new InputDef("tablet", "usb");

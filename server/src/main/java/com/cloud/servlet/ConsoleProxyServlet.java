@@ -546,7 +546,20 @@ public class ConsoleProxyServlet extends HttpServlet {
             param.setClientTunnelSession(parsedHostInfo.third());
         }
 
-        if (param.getHypervHost() != null || !ConsoleProxyManager.NoVncConsoleDefault.value()) {
+        final UserVmDetailVO detailWebsockify = _userVmDetailsDao.findDetail(vm.getId(), VmDetailConstants.WEBSOCKIFY_CONSOLE_FRONTEND);
+        final String websockifyFrontEnd = detailWebsockify != null ? detailWebsockify.getValue(): null;
+        if (websockifyFrontEnd != null && websockifyFrontEnd.equalsIgnoreCase("spice")) {
+            sb.append("/resource/websockify/spice-html5/spice_auto.html")
+                .append("?password=" + sid)
+                .append("&port=" + ConsoleProxyManager.DEFAULT_WEBSOCKIFY_PORT)
+                .append("?token=" + encryptor.encryptObject(ConsoleProxyClientParam.class, param));
+        } else if (websockifyFrontEnd != null && websockifyFrontEnd.equalsIgnoreCase("novnc")) {
+            sb.append("/resource/websockify/noVNC/vnc_lite.html")
+                .append("?autoconnect=true")
+                .append("&password=" + sid)
+                .append("&port=" + ConsoleProxyManager.DEFAULT_WEBSOCKIFY_PORT)
+                .append("?token=" + encryptor.encryptObject(ConsoleProxyClientParam.class, param));
+        } else if (param.getHypervHost() != null || !ConsoleProxyManager.NoVncConsoleDefault.value()) {
             sb.append("/ajax?token=" + encryptor.encryptObject(ConsoleProxyClientParam.class, param));
         } else {
             sb.append("/resource/noVNC/vnc.html")

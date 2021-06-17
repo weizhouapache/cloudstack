@@ -198,16 +198,26 @@ public abstract class AgentHookBase implements AgentHook {
             String storePassword = Base64.encodeBase64String(randomBytes);
 
             byte[] ksBits = null;
+            KeystoreManager.Certificates certificates = null;
+            boolean sslEnabled = false;
+            String sslEnabledStr = _configDao.getValue("consoleproxy.sslEnabled");
+            if (sslEnabledStr != null && sslEnabledStr.equalsIgnoreCase("true")) {
+                sslEnabled = true;
+            }
             String consoleProxyUrlDomain = _configDao.getValue(Config.ConsoleProxyUrlDomain.key());
-            if (consoleProxyUrlDomain == null || consoleProxyUrlDomain.isEmpty()) {
+            if (!sslEnabled || consoleProxyUrlDomain == null || consoleProxyUrlDomain.isEmpty()) {
                 s_logger.debug("SSL is disabled for console proxy based on global config, skip loading certificates");
             } else {
                 ksBits = _ksMgr.getKeystoreBits(ConsoleProxyManager.CERTIFICATE_NAME, ConsoleProxyManager.CERTIFICATE_NAME, storePassword);
+                if (sslEnabled) {
+                    certificates = _ksMgr.getCertificates(ConsoleProxyManager.CERTIFICATE_NAME);
+                }
                 //ks manager raises exception if ksBits are null, hence no need to explicltly handle the condition
             }
 
             cmd = new StartConsoleProxyAgentHttpHandlerCommand(ksBits, storePassword);
             cmd.setEncryptorPassword(getEncryptorPassword());
+            cmd.setCertificates(certificates);
             cmd.setIsSourceIpCheckEnabled(Boolean.parseBoolean(_configDao.getValue(ConsoleProxyManager.NoVncConsoleSourceIpCheckEnabled.key())));
 
             HostVO consoleProxyHost = findConsoleProxyHost(startupCmd);

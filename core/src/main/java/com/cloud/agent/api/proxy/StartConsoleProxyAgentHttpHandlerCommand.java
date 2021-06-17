@@ -23,6 +23,8 @@ import com.cloud.agent.api.Command;
 import com.cloud.agent.api.LogLevel;
 import com.cloud.agent.api.LogLevel.Log4jLevel;
 
+import org.apache.cloudstack.framework.security.keystore.KeystoreManager.Certificates;
+
 public class StartConsoleProxyAgentHttpHandlerCommand extends Command {
     @LogLevel(Log4jLevel.Off)
     private byte[] keystoreBits;
@@ -30,6 +32,8 @@ public class StartConsoleProxyAgentHttpHandlerCommand extends Command {
     private String keystorePassword;
     @LogLevel(Log4jLevel.Off)
     private String encryptorPassword;
+    @LogLevel(Log4jLevel.Off)
+    private Certificates certificates;
 
     private Boolean isSourceIpCheckEnabled;
 
@@ -69,6 +73,14 @@ public class StartConsoleProxyAgentHttpHandlerCommand extends Command {
 
     public void setEncryptorPassword(String encryptorPassword) {
         this.encryptorPassword = encryptorPassword;
+    }
+
+    public void setCertificates(Certificates certificates) {
+        this.certificates = certificates;
+    }
+
+    public Certificates getCertificates() {
+        return certificates;
     }
 
     public Boolean isSourceIpCheckEnabled() {

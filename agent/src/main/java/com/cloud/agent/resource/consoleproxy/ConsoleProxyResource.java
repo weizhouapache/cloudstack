@@ -32,7 +32,9 @@ import java.util.Properties;
 
 import javax.naming.ConfigurationException;
 
+import org.apache.cloudstack.framework.security.keystore.KeystoreManager.Certificates;
 import org.apache.cloudstack.managed.context.ManagedContextRunnable;
+import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
 
 import com.cloud.agent.Agent.ExitStatus;
@@ -82,6 +84,11 @@ import com.google.gson.Gson;
 public class ConsoleProxyResource extends ServerResourceBase implements ServerResource {
     static final Logger s_logger = Logger.getLogger(ConsoleProxyResource.class);
 
+    static final String WEBSOCKIFY_CERT_FILE = "/usr/local/cloud/systemvm/certs/websockify.crt";
+    static final String WEBSOCKIFY_KEY_FILE = "/usr/local/cloud/systemvm/certs/websockify.key";
+    static final String WEBSOCKIFY_START_COMMAND = "/usr/local/cloud/systemvm/websockify/websockify_daemons.sh";
+    static final String WEBSOCKIFY_START_SSL_PARAM = "--secure";
+
     private final Properties _properties = new Properties();
     private Thread _consoleProxyMain = null;
 
@@ -112,9 +119,53 @@ public class ConsoleProxyResource extends ServerResourceBase implements ServerRe
     }
 
     private Answer execute(StartConsoleProxyAgentHttpHandlerCommand cmd) {
+        launchWebsockify(cmd.getCertificates());
         s_logger.info("Invoke launchConsoleProxy() in responding to StartConsoleProxyAgentHttpHandlerCommand");
         launchConsoleProxy(cmd.getKeystoreBits(), cmd.getKeystorePassword(), cmd.getEncryptorPassword(), cmd.isSourceIpCheckEnabled());
         return new Answer(cmd);
+    }
+
+    private void launchWebsockify(Certificates certificates) {
+        if (certificates != null) {
+            s_logger.info("Saving certificate data for use in CPVM");
+            saveCertDataForWebsockify(certificates);
+        }
+        startWebsockifyScript(certificates);
+    }
+
+    private void saveCertDataForWebsockify(Certificates certificates) {
+        final String websockifyCert = certificates.getPrivCert();
+        final String websockifyKey = certificates.getPrivKey();
+        if (StringUtils.isEmpty(websockifyCert) || StringUtils.isEmpty(websockifyKey) ) {
+            s_logger.debug("No certificate data");
+            return;
+        } else if (s_logger.isDebugEnabled()) {
+            s_logger.debug("Saving " + websockifyCert.length() + " + " + websockifyKey.length() + " bytes of certificate data.");
+        }
+        try (FileWriter certificateStream = new FileWriter(WEBSOCKIFY_CERT_FILE);
+             FileWriter keyStream = new FileWriter(WEBSOCKIFY_KEY_FILE);
+             BufferedWriter certificateBufferer = new BufferedWriter(certificateStream);
+             BufferedWriter keyBufferer = new BufferedWriter(keyStream);
+            ) {
+            certificateBufferer.write(websockifyCert);
+            keyBufferer.write(websockifyKey);
+        } catch (IOException e) {
+            s_logger.error("saving websockify certificates/key failed due to ", e);
+        }
+    }
+
+    private void startWebsockifyScript(Certificates certificates) {
+        Script command = new Script(WEBSOCKIFY_START_COMMAND, s_logger);
+        if (certificates != null) {
+            command.add(WEBSOCKIFY_START_SSL_PARAM);
+        }
+        s_logger.info("Starting websockify command line: " + command.toString());
+        String result = command.execute();
+        if (result != null) {
+            s_logger.warn("Error while starting the websockify daemons. err=" + result);
+        } else {
+            s_logger.info("websockify daemons are started.");
+        }
     }
 
     private void disableRpFilter() {

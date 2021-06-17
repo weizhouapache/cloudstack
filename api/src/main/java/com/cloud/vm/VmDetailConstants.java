@@ -38,6 +38,9 @@ public interface VmDetailConstants {
     String KVM_VNC_PORT = "kvm.vnc.port";
     String KVM_VNC_ADDRESS = "kvm.vnc.address";
 
+    // Websockify vm console
+    String WEBSOCKIFY_CONSOLE_FRONTEND = "websockify.console.frontend";
+
     // Mac OSX guest specific (internal)
     String SMC_PRESENT = "smc.present";
     String FIRMWARE = "firmware";

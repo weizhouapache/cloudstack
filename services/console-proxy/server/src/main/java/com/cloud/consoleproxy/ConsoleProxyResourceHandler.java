@@ -55,6 +55,7 @@ public class ConsoleProxyResourceHandler implements HttpHandler {
         s_validResourceFolders.put("css", "");
         s_validResourceFolders.put("html", "");
         s_validResourceFolders.put("noVNC", "");
+        s_validResourceFolders.put("websockify", "");
     }
 
     public ConsoleProxyResourceHandler() {

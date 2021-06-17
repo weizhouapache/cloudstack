@@ -48,6 +48,12 @@ setup_console_proxy() {
   enable_fwding 0
   enable_irqbalance 0
   rm -f /etc/logrotate.d/cloud
+
+  if [ ! `which pip` ];then
+    log_it "Installing python-numpy and python-requests"
+    export DEBIAN_FRONTEND=noninteractive
+    apt update && apt install -y python-requests python-numpy
+  fi
 }
 
 setup_console_proxy

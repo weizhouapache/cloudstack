@@ -34,6 +34,7 @@ public interface ConsoleProxyManager extends Manager, ConsoleProxyService {
     public static final int DEFAULT_PROXY_SESSION_TIMEOUT = 300000;        // 5 minutes
 
     public static final int DEFAULT_NOVNC_PORT = 8080;
+    public static final int DEFAULT_WEBSOCKIFY_PORT = 6080;
 
     public static final String ALERT_SUBJECT = "proxy-alert";
     public static final String CERTIFICATE_NAME = "CPVMCertificate";

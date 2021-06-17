@@ -67,6 +67,7 @@ public class ConsoleProxy {
     static Hashtable<String, ConsoleProxyClient> connectionMap = new Hashtable<String, ConsoleProxyClient>();
     static int httpListenPort = 80;
     static int httpCmdListenPort = 8001;
+    static int websockifyListenPort = 6081;
     static int reconnectMaxRetry = 5;
     static int readTimeoutSeconds = 90;
     static int keyboardType = KEYBOARD_RAW;
@@ -333,6 +334,8 @@ public class ConsoleProxy {
             s_logger.info("HTTP command port is disabled");
         }
 
+        startupWebsockifyVerifyTokenPort();
+
         ConsoleProxyGCThread cthread = new ConsoleProxyGCThread(connectionMap);
         cthread.setName("Console Proxy GC Thread");
         cthread.start();
@@ -376,6 +379,19 @@ public class ConsoleProxy {
             cmdServer.createContext("/cmd", new ConsoleProxyCmdHandler());
             cmdServer.setExecutor(new ThreadExecutor()); // creates a default executor
             cmdServer.start();
+        } catch (Exception e) {
+            s_logger.error(e.getMessage(), e);
+            System.exit(1);
+        }
+    }
+
+    private static void startupWebsockifyVerifyTokenPort() {
+        try {
+            s_logger.info("Listening for websockify token verification on port " + websockifyListenPort);
+            HttpServer server = HttpServer.create(new InetSocketAddress(websockifyListenPort), 2);
+            server.createContext("/verifytoken", new WebsockifyVerifyTokenHandler());
+            server.setExecutor(new ThreadExecutor()); // creates a default executor
+            server.start();
         } catch (Exception e) {
             s_logger.error(e.getMessage(), e);
             System.exit(1);
