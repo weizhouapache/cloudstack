@@ -3769,6 +3769,10 @@ public class QueryManagerImpl extends MutualExclusiveIdsManagerBase implements Q
             options.put(VmDetailConstants.WEBSOCKIFY_CONSOLE_FRONTEND, Arrays.asList("novnc", "spice"));
         }
 
+        if (HypervisorType.XenServer.equals(hypervisorType)) {
+            options.put(VmDetailConstants.WEBSOCKIFY_CONSOLE_FRONTEND, Arrays.asList("novnc", "spice"));
+        }
+
         if (HypervisorType.VMware.equals(hypervisorType)) {
             options.put(VmDetailConstants.NIC_ADAPTER, Arrays.asList("E1000", "PCNet32", "Vmxnet2", "Vmxnet3"));
             options.put(VmDetailConstants.ROOT_DISK_CONTROLLER, Arrays.asList("osdefault", "ide", "scsi", "lsilogic", "lsisas1068", "buslogic", "pvscsi"));

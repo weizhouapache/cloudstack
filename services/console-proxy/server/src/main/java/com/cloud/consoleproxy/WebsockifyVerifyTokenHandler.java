@@ -97,6 +97,9 @@ public class WebsockifyVerifyTokenHandler implements HttpHandler {
         param.setPassword(password);
         ConsoleProxy.authenticationExternally(param);
 
+        if (console_url != null && ! console_url.isEmpty()) {
+            return host + "," + port + "," + console_url + "," + console_host_session;
+        }
         return host + ":" + port;
     }
 }

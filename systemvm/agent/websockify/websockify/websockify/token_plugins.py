@@ -68,9 +68,16 @@ class BaseTokenAPI(BasePlugin):
     # in this file can be used w/o unnecessary dependencies
 
     def process_result(self, resp):
-        host, port = resp.text.split(':')
+        tunnel_url = None
+        tunnel_session = None
+        if len(resp.text.split(',')) == 2:
+            host, port = resp.text.split(',')
+        elif len(resp.text.split(',')) == 4:
+            host, port, tunnel_url, tunnel_session = resp.text.split(',')
+        elif len(resp.text.split(':')) == 2:
+            host, port = resp.text.split(':')
         port = port.encode('ascii','ignore')
-        return [ host, port ]
+        return [ host, port, tunnel_url, tunnel_session ]
 
     def lookup(self, token):
         import requests

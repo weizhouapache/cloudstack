@@ -59,13 +59,30 @@ Traffic Legend:
         if not self.server.token_plugin:
             return
 
-        host, port = self.get_target(self.server.token_plugin)
+        result = self.get_target(self.server.token_plugin)
+        tunnel_url = None
+        tunnel_session = None
+        if len(result) == 2:
+            host, port = result
+        elif len(result) == 4:
+            host, port, tunnel_url, tunnel_session = result
+
         if host == 'unix_socket':
             self.server.unix_target = port
 
         else:
             self.server.target_host = host
+            if int(port) <= 0 and tunnel_url:
+                tunnel_url_scheme = urlparse(tunnel_url)[0]
+                tunnel_url_netloc = urlparse(tunnel_url)[1]
+                if tunnel_url_scheme == "https":
+                    port = "443"
+                else:
+                    port = "80"
+                tunnel_url = tunnel_url.replace(tunnel_url_scheme + "://", "").replace(tunnel_url_netloc, "")
             self.server.target_port = port
+            self.server.tunnel_url = tunnel_url
+            self.server.tunnel_session = tunnel_session
 
     def auth_connection(self):
         if not self.server.auth_plugin:
@@ -122,6 +139,28 @@ Traffic Legend:
             self.log_message("Failed to connect to %s:%s",
                              self.server.target_host, self.server.target_port)
             raise self.CClose(1011, "Failed to connect to downstream server")
+
+        # Refer to https://github.com/openstack/nova/blob/master/nova/console/websocketproxy.py
+        # and services/console-proxy/server/src/main/java/com/cloud/consoleproxy/util/RawHTTP.java
+        # Handshake as necessary
+        if self.server.tunnel_url:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            tsock = context.wrap_socket(tsock)
+            msg = 'CONNECT %s HTTP/1.0\r\n' % self.server.tunnel_url
+            msg += 'Host: %s\r\n' % self.server.target_host
+            msg += 'Cookie: session_id=%s\r\n' % self.server.tunnel_session
+            msg += '\r\n'
+            tsock.send(msg)
+            end_token = "\r\n\r\n"
+            while True:
+                data = tsock.recv(1024).decode("utf-8")
+                token_loc = data.find(end_token)
+                if token_loc != -1:
+                    if data.split("\r\n")[0].find("200") == -1:
+                        raise Exception("Invalid tunnel info")
+                    break
 
         self.request.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
         if not self.server.wrap_cmd and not self.server.unix_target:
@@ -285,6 +324,9 @@ class WebSocketProxy(websockifyserver.WebSockifyServer):
         self.token_plugin = kwargs.pop('token_plugin', None)
         self.host_token = kwargs.pop('host_token', None)
         self.auth_plugin = kwargs.pop('auth_plugin', None)
+
+        self.tunnel_url = None
+        self.tunnel_session = None
 
         # Last 3 timestamps command was run
         self.wrap_times    = [0, 0, 0]
