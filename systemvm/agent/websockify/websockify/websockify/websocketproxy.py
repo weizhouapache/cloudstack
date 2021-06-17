@@ -30,6 +30,7 @@ try:
 except ImportError:
     from cgi import parse_qs
     from urlparse import urlparse
+import pyDes
 
 class ProxyRequestHandler(websockifyserver.WebSockifyRequestHandler):
 
@@ -168,6 +169,18 @@ Traffic Legend:
 
         self.print_traffic(self.traffic_legend)
 
+        # Start authenticating
+        try:
+            self.do_vnc_auth(tsock, self.server.vnc_password)
+        except:
+            if tsock:
+                tsock.shutdown(socket.SHUT_RDWR)
+                tsock.close()
+                if self.verbose:
+                    self.log_message("%s:%s: Closed target",
+                            self.server.target_host, self.server.target_port)
+            raise
+
         # Start proxying
         try:
             self.do_proxy(tsock)
@@ -217,6 +230,124 @@ Traffic Legend:
             return result_pair
         else:
             raise self.server.EClose("Token '%s' not found" % token)
+
+    def do_vnc_auth(self, target, password):
+        if password is None:
+            return
+
+        self.log_message("Start VNC authenticating ...")
+
+        state = "protocol_version"
+        tqueue = []
+        rlist = [target]
+
+        if self.server.heartbeat:
+            now = time.time()
+            self.heartbeat = now + self.server.heartbeat
+        else:
+            self.heartbeat = None
+
+        while True:
+            wlist = []
+            if self.heartbeat is not None:
+                now = time.time()
+                if now > self.heartbeat:
+                    self.heartbeat = now + self.server.heartbeat
+                    self.send_ping()
+
+            if tqueue: wlist.append(target)
+            try:
+                ins, outs, excepts = select.select(rlist, wlist, [], 1)
+            except (select.error, OSError):
+                exc = sys.exc_info()[1]
+                if hasattr(exc, 'errno'):
+                    err = exc.errno
+                else:
+                    err = exc[0]
+
+                if err != errno.EINTR:
+                    raise
+                else:
+                    continue
+
+            if excepts: raise Exception("Socket exception")
+
+            if target in outs:
+                # Send queued client data to the target
+                dat = tqueue.pop(0)
+                sent = target.send(dat)
+                if sent == len(dat):
+                    self.print_traffic(">")
+                    if state == "vnc_auth_done":
+                        break
+                else:
+                    # requeue the remaining data
+                    tqueue.insert(0, dat[sent:])
+                    self.print_traffic(".>")
+
+            if target in ins:
+                # Receive target data, encode it and queue for client
+                buf = target.recv(self.buffer_size)
+                if len(buf) == 0:
+                    if self.verbose:
+                        self.log_message("%s:%s: Target closed connection",
+                                self.server.target_host, self.server.target_port)
+                    raise self.CClose(1000, "Target closed")
+                if state == "protocol_version":
+                    protocol_version = str(buf).rstrip()
+                    self.log_message("Protocol version is %s" % protocol_version)
+                    if not protocol_version.startswith("RFB 003"):
+                        raise Exception("Protocol version %s is not supported" % protocol_version)
+                    tqueue.append("RFB 003.008\n")
+                    state = "security_info"
+                elif state == "security_info":
+                    security_codes = [ord(c) for c in buf]
+                    security_num_type = security_codes[0]
+                    if security_num_type == 0:
+                        raise Exception("Security failure")
+                    elif security_num_type != 1:
+                        raise Exception("Unsupported security type")
+                    rfb_auth_scheme = security_codes[1]
+                    self.log_message("Authenticating using scheme: %s" % rfb_auth_scheme)
+                    if rfb_auth_scheme == 0:
+                        raise Exception("Auth failure")
+                    elif rfb_auth_scheme == 1:
+                        self.log_message("No auth required")
+                        break
+                    elif rfb_auth_scheme == 2:
+                        tqueue.append("\x02")
+                    else:
+                        raise Exception("Authentication scheme %s unsupported" % rfb_auth_scheme)
+                    state = "vnc_auth"
+                elif state == "vnc_auth":
+                    challenge = buf
+                    key = [ord(c) for c in password[:8]]
+                    secretkey = []
+                    for key_byte in key:
+                        key_bin = bin(key_byte)
+                        key_reverse = key_bin[-1:1:-1]
+                        key_reverse = key_reverse + (8 - len(key_reverse))*'0'
+                        secretkey_int=int(key_reverse,2)
+                        secretkey.append(secretkey_int)
+                    k = pyDes.des(str(bytearray(secretkey)), pyDes.ECB, IV=None, pad=None, padmode=None)
+                    d = k.encrypt(challenge)
+                    tqueue.append(d)
+                    state = "vnc_auth_result"
+                elif state == "vnc_auth_result":
+                    vnc_auth_result = [ord(c) for c in buf]
+                    vnc_auth_code = str(vnc_auth_result[0]) + str(vnc_auth_result[1]) + str(vnc_auth_result[2]) + str(vnc_auth_result[3])
+                    if vnc_auth_code == "0000":
+                        self.log_message("Authentication OK")
+                        tqueue.append("\x01")
+                    elif vnc_auth_code == "0001":
+                        raise Exception("Authentication failed")
+                    elif vnc_auth_code == "0002":
+                        raise Exception("Too many auth attempts")
+                    else:
+                        raise Exception("Unknown Authentication result")
+                    state = "vnc_auth_done"
+
+                self.print_traffic("{")
 
     def do_proxy(self, target):
         """
@@ -315,6 +446,7 @@ class WebSocketProxy(websockifyserver.WebSockifyServer):
         # Save off proxy specific options
         self.target_host    = kwargs.pop('target_host', None)
         self.target_port    = kwargs.pop('target_port', None)
+        self.vnc_password   = kwargs.pop('vnc_password', None)
         self.wrap_cmd       = kwargs.pop('wrap_cmd', None)
         self.wrap_mode      = kwargs.pop('wrap_mode', None)
         self.unix_target    = kwargs.pop('unix_target', None)
@@ -500,6 +632,8 @@ def websockify_init():
     usage += "\n    %prog [options]"
     usage += " [source_addr:]source_port -- WRAP_COMMAND_LINE"
     parser = optparse.OptionParser(usage=usage)
+    parser.add_option("--vnc-password", default=None,
+            help="VNC password")
     parser.add_option("--verbose", "-v", action="store_true",
             help="verbose messages")
     parser.add_option("--traffic", action="store_true",
@@ -725,7 +859,7 @@ def websockify_init():
         except ValueError:
             parser.error("Error parsing target port")
 
-    if len(args) > 0 and opts.wrap_cmd == None:
+    if len(args) > 0 and opts.wrap_cmd == None and opts.vnc_password == None:
         parser.error("Too many arguments")
 
     if opts.token_plugin is not None:
