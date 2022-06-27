@@ -104,7 +104,7 @@ class CodeGenerator(object):
         subclass += self.space + "def __init__(self):\n"
         for pro in properties:
             if pro.desc is not None:
-                subclass += self.space + self.space + '""""%s"""\n' % pro.desc
+                subclass += self.space + self.space + '"""%s"""\n' % pro.desc
             if len(pro.subProperties) > 0:
                 subclass += self.space + self.space
                 subclass += 'self.%s = []\n' % pro.name
