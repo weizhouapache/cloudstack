@@ -2756,7 +2756,7 @@ class LoadBalancerRule:
         [setattr(cmd, k, v) for k, v in list(kwargs.items())]
         if 'account' in list(kwargs.keys()) and 'domainid' in list(kwargs.keys()):
             cmd.listall = True
-        return (apiclient.listLoadBalancerRules(cmd))
+        return apiclient.listLoadBalancerRules(cmd)
 
     @classmethod
     def listLoadBalancerRuleInstances(cls, apiclient, id, lbvmips=False, applied=None, **kwargs):
