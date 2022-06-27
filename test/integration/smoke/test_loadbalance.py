@@ -530,3 +530,32 @@ class TestLoadBalance(cloudstackTestCase):
                   "Check if ssh succeeded for server3"
                   )
         return
+
+
+    @attr(tags = ["advanced", "advancedns", "smoke"], required_hardware="true")
+    def test_assign_and_removal_lb(self):
+        """
+        Test for protocol use
+
+        1. Create a loadbalancer rule,
+        2. update the rule with a new protocol type
+        3. Verify the use of tehh ew different protocol.
+        """
+        lb_rule = LoadBalancerRule.create(
+            self.apiclient,
+            self.services["lbrule"],
+            self.non_src_nat_ip.ipaddress.id,
+            self.account.name
+        )
+
+        lb_rule.update(self.apiclient, protocol='UDP')
+
+        new_lb_rule = LoadBalancerRule.list(id=lb_rule.id)
+
+        self.assertEqual(
+            new_lb_rule.protocol,
+            'UDP',
+            "Protocol should be updated"
+        )
+
+    return
