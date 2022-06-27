@@ -533,7 +533,7 @@ class TestLoadBalance(cloudstackTestCase):
 
 
     @attr(tags = ["advanced", "advancedns", "smoke"], required_hardware="true")
-    def test_assign_and_removal_lb(self):
+    def test_update_protocol(self):
         """
         Test for protocol use
 
