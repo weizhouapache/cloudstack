@@ -558,4 +558,4 @@ class TestLoadBalance(cloudstackTestCase):
             "Protocol should be updated"
         )
 
-    return
+        return
