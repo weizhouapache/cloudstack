@@ -2603,6 +2603,7 @@
 "message.tooltip.reserved.system.netmask": "The network prefix that defines the pod subnet. Uses CIDR notation.",
 "message.traffic.type.to.basic.zone": "traffic type to basic zone",
 "message.update.autoscale.policy.failed": "Failed to update autoscale policy",
+"message.update.autoscale.vmgroup.failed": "Failed to update autoscale vm group",
 "message.update.autoscale.vm.profile.failed": "Failed to update autoscale vm profile",
 "message.update.condition.failed": "Failed to update condition",
 "message.update.condition.processing": "Updating condition...",
