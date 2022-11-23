@@ -27,13 +27,13 @@ public class KVMHAConfig {
     public static final ConfigKey<Long> KvmHAActivityCheckTimeout = new ConfigKey<>("Advanced", Long.class, "kvm.ha.activity.check.timeout", "60",
             "The maximum length of time, in seconds, expected for an activity check to complete.", true, ConfigKey.Scope.Cluster);
 
-    public static final ConfigKey<Long> KvmHAActivityCheckInterval = new ConfigKey<>("Advanced", Long.class, "kvm.ha.activity.check.interval", "60",
+    public static final ConfigKey<Long> KvmHAActivityCheckInterval = new ConfigKey<>("Advanced", Long.class, "kvm.ha.activity.check.interval", "10",
             "The interval, in seconds, between activity checks.", true, ConfigKey.Scope.Cluster);
 
-    public static final ConfigKey<Long> KvmHAActivityCheckMaxAttempts = new ConfigKey<>("Advanced", Long.class, "kvm.ha.activity.check.max.attempts", "10",
+    public static final ConfigKey<Long> KvmHAActivityCheckMaxAttempts = new ConfigKey<>("Advanced", Long.class, "kvm.ha.activity.check.max.attempts", "5",
             "The maximum number of activity check attempts to perform before deciding to recover or degrade a resource.", true, ConfigKey.Scope.Cluster);
 
-    public static final ConfigKey<Double> KvmHAActivityCheckFailureThreshold = new ConfigKey<>("Advanced", Double.class, "kvm.ha.activity.check.failure.ratio", "0.7",
+    public static final ConfigKey<Double> KvmHAActivityCheckFailureThreshold = new ConfigKey<>("Advanced", Double.class, "kvm.ha.activity.check.failure.ratio", "0.1",
             "The activity check failure threshold ratio. This is used with the activity check maximum attempts for deciding to recover or degrade a resource. For most environments, please keep this value above 0.5.",
             true, ConfigKey.Scope.Cluster);
 

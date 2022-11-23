@@ -40,6 +40,9 @@ import org.apache.cloudstack.ha.provider.ActivityCheckerInterface;
 import org.apache.cloudstack.ha.provider.HACheckerException;
 import org.apache.cloudstack.ha.provider.HealthCheckerInterface;
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
+import org.apache.cloudstack.outofbandmanagement.dao.OutOfBandManagementDao;
+import org.apache.cloudstack.outofbandmanagement.OutOfBandManagement.PowerState;
+import org.apache.cloudstack.outofbandmanagement.OutOfBandManagement;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.log4j.Logger;
 
@@ -64,6 +67,8 @@ public class KVMHostActivityChecker extends AdapterBase implements ActivityCheck
     private StorageManager storageManager;
     @Inject
     private ResourceManager resourceManager;
+    @Inject
+    private OutOfBandManagementDao outOfBandManagementDao;
 
     @Override
     public boolean isActive(Host r, DateTime suspectTime) throws HACheckerException {
@@ -135,11 +140,23 @@ public class KVMHostActivityChecker extends AdapterBase implements ActivityCheck
                 LOG.warn(String.format("Failed to send command CheckOnHostCommand to %s.", neighbor.toString()), e);
             }
         }
-        if (neighbourStatus == Status.Up && (hostStatus == Status.Disconnected || hostStatus == Status.Down)) {
-            hostStatus = Status.Disconnected;
+
+        final OutOfBandManagement oobm = outOfBandManagementDao.findByHost(agent.getId());
+        if(oobm.getPowerState() == PowerState.Disabled || oobm.getPowerState() == PowerState.On){
+            if (neighbourStatus == Status.Up && (hostStatus == Status.Disconnected || hostStatus == Status.Down)) {
+                hostStatus = Status.Disconnected;
+            }
+            if (neighbourStatus == Status.Down && (hostStatus == Status.Disconnected || hostStatus == Status.Down)) {
+                hostStatus = Status.Down;
+            }
         }
-        if (neighbourStatus == Status.Down && (hostStatus == Status.Disconnected || hostStatus == Status.Down)) {
-            hostStatus = Status.Down;
+        if(oobm.getPowerState() == PowerState.Off || oobm.getPowerState() == PowerState.Unknown){
+            if (neighbourStatus == Status.Up && (hostStatus == Status.Disconnected || hostStatus == Status.Down)) {
+                hostStatus = Status.Down;
+            }
+            if (neighbourStatus == Status.Down && (hostStatus == Status.Disconnected || hostStatus == Status.Down)) {
+                hostStatus = Status.Down;
+            }
         }
 
         LOG.debug(String.format("%s has the status [%s].", agent.toString(), hostStatus));

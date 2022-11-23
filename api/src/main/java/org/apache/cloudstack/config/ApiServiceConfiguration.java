@@ -21,14 +21,19 @@ import org.apache.cloudstack.framework.config.Configurable;
 
 public class ApiServiceConfiguration implements Configurable {
     public static final ConfigKey<String> ManagementServerAddresses = new ConfigKey<String>("Advanced", String.class, "host", "localhost", "The ip address of management server. This can also accept comma separated addresses.", true);
-    public static final ConfigKey<String> ApiServletPath = new ConfigKey<String>("Advanced", String.class, "endpointe.url", "http://localhost:8080/client/api",
+    public static final ConfigKey<String> ApiServletPath = new ConfigKey<String>("Advanced", String.class, "endpoint.url", "http://localhost:8080/client/api",
             "API end point. Can be used by CS components/services deployed remotely, for sending CS API requests", true);
     public static final ConfigKey<Long> DefaultUIPageSize = new ConfigKey<Long>("Advanced", Long.class, "default.ui.page.size", "20",
-            "The default pagesize to be used by UI and other clients when making list* API calls", true, ConfigKey.Scope.Global);
+                "The default pagesize to be used by UI and other clients when making list* API calls", true, ConfigKey.Scope.Global);
     public static final ConfigKey<Boolean> ApiSourceCidrChecksEnabled = new ConfigKey<>("Advanced", Boolean.class, "api.source.cidr.checks.enabled",
-            "true", "Are the source checks on API calls enabled (true) or not (false)? See api.allowed.source.cidr.list", true, ConfigKey.Scope.Global);
+                "true", "Are the source checks on API calls enabled (true) or not (false)? See api.allowed.source.cidr.list", true, ConfigKey.Scope.Global);
     public static final ConfigKey<String> ApiAllowedSourceCidrList = new ConfigKey<String>("Advanced", String.class, "api.allowed.source.cidr.list",
-            "0.0.0.0/0,::/0", "Comma separated list of IPv4/IPv6 CIDRs from which API calls can be performed. Can be set on Global and Account levels.", true, ConfigKey.Scope.Account);
+                "0.0.0.0/0,::/0", "Comma separated list of IPv4/IPv6 CIDRs from which API calls can be performed. Can be set on Global and Account levels.", true, ConfigKey.Scope.Account);
+    public static final ConfigKey<String> MonitoringWallPortalPort = new ConfigKey<String>("Advanced", String.class, "monitoring.wall.portal.port",
+                "3000", "Monitoring Service Wall Portal Port.(ex:3000)", true);
+    public static final ConfigKey<String> MonitoringWallPortalVmUri = new ConfigKey<String>("Advanced", String.class, "monitoring.wall.portal.vm.uri",
+                "/d/ldwEyoKnz/gasangmeosin-sangse-hyeonhwang", "Monitoring Service Wall Portal Uri.(ex:/d/ldwEyoKnz/gasangmeosin-sangse-hyeonhwang)", true);
+
     @Override
     public String getConfigComponentName() {
         return ApiServiceConfiguration.class.getSimpleName();
@@ -36,7 +41,7 @@ public class ApiServiceConfiguration implements Configurable {
 
     @Override
     public ConfigKey<?>[] getConfigKeys() {
-        return new ConfigKey<?>[] {ManagementServerAddresses, ApiServletPath, DefaultUIPageSize, ApiSourceCidrChecksEnabled, ApiAllowedSourceCidrList};
+        return new ConfigKey<?>[] {ManagementServerAddresses, ApiServletPath, DefaultUIPageSize, ApiSourceCidrChecksEnabled, ApiAllowedSourceCidrList, MonitoringWallPortalPort, MonitoringWallPortalVmUri};
     }
 
 }

@@ -522,7 +522,7 @@ class VirtualMachine:
                method='GET', hypervisor=None, customcpunumber=None,
                customcpuspeed=None, custommemory=None, rootdisksize=None,
                rootdiskcontroller=None, vpcid=None, macaddress=None, datadisktemplate_diskoffering_list={},
-               properties=None, nicnetworklist=None, bootmode=None, boottype=None, dynamicscalingenabled=None):
+               properties=None, nicnetworklist=None, bootmode=None, boottype=None, dynamicscalingenabled=None, userdataid=None, userdatadetails=None):
         """Create the instance"""
 
         cmd = deployVirtualMachine.deployVirtualMachineCmd()
@@ -611,6 +611,12 @@ class VirtualMachine:
 
         if "userdata" in services:
             cmd.userdata = base64.urlsafe_b64encode(services["userdata"].encode()).decode()
+
+        if userdataid is not None:
+            cmd.userdataid = userdataid
+
+        if userdatadetails is not None:
+            cmd.userdatadetails = userdatadetails
 
         if "dhcpoptionsnetworklist" in services:
             cmd.dhcpoptionsnetworklist = services["dhcpoptionsnetworklist"]
@@ -1037,6 +1043,49 @@ class VirtualMachine:
         cmd.clusterid = clusterid
         cmd.name = name
         return apiclient.listUnmanagedInstances(cmd)
+
+    @classmethod
+    def importUnmanagedInstance(cls, apiclient, clusterid, name, serviceofferingid, services, templateid=None,
+                                account=None, domainid=None, projectid=None, migrateallowed=None, forced=None):
+        """Import an unmanaged VM (currently VMware only)"""
+        cmd = importUnmanagedInstance.importUnmanagedInstanceCmd()
+        cmd.clusterid = clusterid
+        cmd.name = name
+        cmd.serviceofferingid = serviceofferingid
+        if templateid:
+            cmd.templateid = templateid
+        elif "templateid" in services:
+            cmd.templateid = services["templateid"]
+        if account:
+            cmd.account = account
+        elif "account" in services:
+            cmd.account = services["account"]
+        if domainid:
+            cmd.domainid = domainid
+        elif "domainid" in services:
+            cmd.domainid = services["domainid"]
+        if projectid:
+            cmd.projectid = projectid
+        elif "projectid" in services:
+            cmd.projectid = services["projectid"]
+        if migrateallowed:
+            cmd.migrateallowed = migrateallowed
+        elif "migrateallowed" in services:
+            cmd.migrateallowed = services["migrateallowed"]
+        if forced:
+            cmd.forced = forced
+        elif "forced" in services:
+            cmd.forced = services["forced"]
+        if "details" in services:
+            cmd.details = services["details"]
+        if "datadiskofferinglist" in services:
+            cmd.datadiskofferinglist = services["datadiskofferinglist"]
+        if "nicnetworklist" in services:
+            cmd.nicnetworklist = services["nicnetworklist"]
+        if "nicipaddresslist" in services:
+            cmd.nicipaddresslist = services["nicipaddresslist"]
+        virtual_machine = apiclient.importUnmanagedInstance(cmd)
+        return VirtualMachine(virtual_machine.__dict__, services)
 
 
 class Volume:
@@ -1622,6 +1671,18 @@ class Template:
             cmd.listall = True
         return (apiclient.listTemplates(cmd))
 
+    @classmethod
+    def linkUserDataToTemplate(cls, apiclient, templateid, userdataid=None, userdatapolicy=None):
+        "Link userdata to template "
+
+        cmd = linkUserDataToTemplate.linkUserDataToTemplateCmd()
+        cmd.templateid = templateid
+        if userdataid is not None:
+            cmd.userdataid = userdataid
+        if userdatapolicy is not None:
+            cmd.userdatapolicy = userdatapolicy
+
+        return apiclient.linkUserDataToTemplate(cmd)
 
 class Iso:
     """Manage ISO life cycle"""
@@ -2305,6 +2366,12 @@ class ServiceOffering:
         if "dynamicscalingenabled" in services:
             cmd.dynamicscalingenabled = services["dynamicscalingenabled"]
 
+        if "diskofferingstrictness" in services:
+            cmd.diskofferingstrictness = services["diskofferingstrictness"]
+
+        if "diskofferingid" in services:
+            cmd.diskofferingid = services["diskofferingid"]
+
         # Service Offering private to that domain
         if domainid:
             cmd.domainid = domainid
@@ -2417,7 +2484,6 @@ class NetworkOffering:
     @classmethod
     def create(cls, apiclient, services, **kwargs):
         """Create network offering"""
-
         cmd = createNetworkOffering.createNetworkOfferingCmd()
         cmd.displaytext = "-".join([services["displaytext"], random_gen()])
         cmd.name = "-".join([services["name"], random_gen()])
@@ -2456,6 +2522,8 @@ class NetworkOffering:
             cmd.egressdefaultpolicy = services["egress_policy"]
         if "tags" in services:
             cmd.tags = services["tags"]
+        if "internetprotocol" in services:
+            cmd.internetprotocol = services["internetprotocol"]
         cmd.details = [{}]
         if "servicepackageuuid" in services:
             cmd.details[0]["servicepackageuuid"] = services["servicepackageuuid"]
@@ -3137,7 +3205,7 @@ class Network:
                networkofferingid=None, projectid=None,
                subdomainaccess=None, zoneid=None,
                gateway=None, netmask=None, vpcid=None, aclid=None, vlan=None,
-               externalid=None, bypassvlanoverlapcheck=None):
+               externalid=None, bypassvlanoverlapcheck=None, associatednetworkid=None):
         """Create Network for account"""
         cmd = createNetwork.createNetworkCmd()
         cmd.name = services["name"]
@@ -3190,6 +3258,14 @@ class Network:
             cmd.endipv6 = services["endipv6"]
         if "routeripv6" in services:
             cmd.routeripv6 = services["routeripv6"]
+        if "dns1" in services:
+            cmd.dns1 = services["dns1"]
+        if "dns2" in services:
+            cmd.dns2 = services["dns2"]
+        if "ip6dns1" in services:
+            cmd.ip6dns1 = services["ip6dns1"]
+        if "ip6dns2" in services:
+            cmd.ip6dns2 = services["ip6dns2"]
 
         if accountid:
             cmd.account = accountid
@@ -3205,6 +3281,8 @@ class Network:
             cmd.externalid = externalid
         if bypassvlanoverlapcheck:
             cmd.bypassvlanoverlapcheck = bypassvlanoverlapcheck
+        if associatednetworkid:
+            cmd.associatednetworkid = associatednetworkid
         return Network(apiclient.createNetwork(cmd).__dict__)
 
     def delete(self, apiclient):
@@ -3239,6 +3317,14 @@ class Network:
         cmd.networkofferingid = network_offering_id
         cmd.resume = resume
         return (apiclient.migrateNetwork(cmd))
+
+    def replaceACLList(self, apiclient, aclid, gatewayid=None):
+        cmd = replaceNetworkACLList.replaceNetworkACLListCmd()
+        cmd.networkid = self.id
+        cmd.aclid = aclid
+        if gatewayid:
+            cmd.gatewayid = gatewayid
+        return (apiclient.replaceNetworkACLList(cmd))
 
     @classmethod
     def list(cls, apiclient, **kwargs):
@@ -3276,6 +3362,11 @@ class NetworkACL:
                 cmd.icmpcode = -1
         elif protocol:
             cmd.protocol = protocol
+
+        if "icmptype" in services:
+            cmd.icmptype = services["icmptype"]
+        if "icmpcode" in services:
+            cmd.icmpcode = services["icmpcode"]
 
         if "startport" in services:
             cmd.startport = services["startport"]
@@ -3618,19 +3709,30 @@ class PublicIpRange:
         self.__dict__.update(items)
 
     @classmethod
-    def create(cls, apiclient, services, account=None, domainid=None, forsystemvms=None):
+    def create(cls, apiclient, services, account=None, domainid=None, forsystemvms=None, networkid=None):
         """Create VlanIpRange"""
 
         cmd = createVlanIpRange.createVlanIpRangeCmd()
-        cmd.gateway = services["gateway"]
-        cmd.netmask = services["netmask"]
-        cmd.forvirtualnetwork = services["forvirtualnetwork"]
-        cmd.startip = services["startip"]
-        cmd.endip = services["endip"]
-        cmd.zoneid = services["zoneid"]
+        if "gateway" in services:
+            cmd.gateway = services["gateway"]
+        if "netmask" in services:
+            cmd.netmask = services["netmask"]
+        if "forvirtualnetwork" in services:
+            cmd.forvirtualnetwork = services["forvirtualnetwork"]
+        if "startip" in services:
+            cmd.startip = services["startip"]
+        if "endip" in services:
+            cmd.endip = services["endip"]
+        if "zoneid" in services:
+            cmd.zoneid = services["zoneid"]
         if "podid" in services:
             cmd.podid = services["podid"]
-        cmd.vlan = services["vlan"]
+        if "vlan" in services:
+            cmd.vlan = services["vlan"]
+        if "ip6gateway" in services:
+            cmd.ip6gateway = services["ip6gateway"]
+        if "ip6cidr" in services:
+            cmd.ip6cidr = services["ip6cidr"]
 
         if account:
             cmd.account = account
@@ -3638,6 +3740,8 @@ class PublicIpRange:
             cmd.domainid = domainid
         if forsystemvms:
             cmd.forsystemvms = forsystemvms
+        if networkid:
+            cmd.networkid = networkid
 
         return PublicIpRange(apiclient.createVlanIpRange(cmd).__dict__)
 
@@ -4608,6 +4712,8 @@ class VpcOffering:
                         'capabilitytype': ctype,
                         'capabilityvalue': value
                     })
+        if "internetprotocol" in services:
+            cmd.internetprotocol = services["internetprotocol"]
         return VpcOffering(apiclient.createVPCOffering(cmd).__dict__)
 
     def update(self, apiclient, name=None, displaytext=None, state=None):
@@ -4725,14 +4831,15 @@ class PrivateGateway:
 
     @classmethod
     def create(cls, apiclient, gateway, ipaddress, netmask, vlan, vpcid,
-               physicalnetworkid=None, aclid=None, bypassvlanoverlapcheck=None):
+               physicalnetworkid=None, aclid=None, bypassvlanoverlapcheck=None, associatednetworkid=None):
         """Create private gateway"""
 
         cmd = createPrivateGateway.createPrivateGatewayCmd()
         cmd.gateway = gateway
         cmd.ipaddress = ipaddress
         cmd.netmask = netmask
-        cmd.vlan = vlan
+        if vlan:
+            cmd.vlan = vlan
         cmd.vpcid = vpcid
         if physicalnetworkid:
             cmd.physicalnetworkid = physicalnetworkid
@@ -4740,6 +4847,8 @@ class PrivateGateway:
             cmd.aclid = aclid
         if bypassvlanoverlapcheck:
             cmd.bypassvlanoverlapcheck = bypassvlanoverlapcheck
+        if associatednetworkid:
+            cmd.associatednetworkid = associatednetworkid
 
         return PrivateGateway(apiclient.createPrivateGateway(cmd).__dict__)
 
@@ -4907,6 +5016,45 @@ class SSHKeyPair:
             cmd.listall = True
         return (apiclient.listSSHKeyPairs(cmd))
 
+class UserData:
+    """Manage Userdata"""
+
+    def __init__(self, items, services):
+        self.__dict__.update(items)
+
+    @classmethod
+    def register(cls, apiclient, name=None, account=None,
+                 domainid=None, projectid=None, userdata=None, params=None):
+        """Registers Userdata"""
+        cmd = registerUserData.registerUserDataCmd()
+        cmd.name = name
+        cmd.userdata = userdata
+        if params is not None:
+            cmd.params = params
+        if account is not None:
+            cmd.account = account
+        if domainid is not None:
+            cmd.domainid = domainid
+        if projectid is not None:
+            cmd.projectid = projectid
+
+        return (apiclient.registerUserData(cmd))
+
+    @classmethod
+    def delete(cls, apiclient, id):
+        """Delete Userdata"""
+        cmd = deleteUserData.deleteUserDataCmd()
+        cmd.id = id
+        apiclient.deleteUserData(cmd)
+
+    @classmethod
+    def list(cls, apiclient, **kwargs):
+        """List all UserData"""
+        cmd = listUserData.listUserDataCmd()
+        [setattr(cmd, k, v) for k, v in list(kwargs.items())]
+        if 'account' in list(kwargs.keys()) and 'domainid' in list(kwargs.keys()):
+            cmd.listall = True
+        return (apiclient.listUserData(cmd))
 
 class Capacities:
     """Manage Capacities"""
@@ -5095,6 +5243,11 @@ class VmSnapshot:
     def deleteVMSnapshot(cls, apiclient, vmsnapshotid):
         cmd = deleteVMSnapshot.deleteVMSnapshotCmd()
         cmd.vmsnapshotid = vmsnapshotid
+        return apiclient.deleteVMSnapshot(cmd)
+
+    def delete(self, apiclient):
+        cmd = deleteVMSnapshot.deleteVMSnapshotCmd()
+        cmd.vmsnapshotid = self.id
         return apiclient.deleteVMSnapshot(cmd)
 
 
@@ -5290,7 +5443,7 @@ class NIC:
         """Remove secondary Ip from NIC"""
         cmd = removeIpFromNic.removeIpFromNicCmd()
         cmd.id = ipaddressid
-        return (apiclient.addIpToNic(cmd))
+        return (apiclient.removeIpFromNic(cmd))
 
     @classmethod
     def list(cls, apiclient, **kwargs):
@@ -5302,6 +5455,14 @@ class NIC:
             cmd.listall = True
         return (apiclient.listNics(cmd))
 
+    @classmethod
+    def updateIp(cls, apiclient, id, ipaddress=None):
+        """Update Ip for NIC"""
+        cmd = updateVmNicIp.updateVmNicIpCmd()
+        cmd.nicid = id
+        if ipaddress:
+            cmd.ipaddress = ipaddress
+        return (apiclient.updateVmNicIp(cmd))
 
 class SimulatorMock:
     """Manage simulator mock lifecycle"""
@@ -5645,3 +5806,40 @@ class ProjectRolePermission:
         cmd.projectid = projectid
         [setattr(cmd, k, v) for k, v in list(kwargs.items())]
         return (apiclient.listProjectRolePermissions(cmd))
+
+class NetworkPermission:
+    """Manage Network Permission"""
+
+    def __init__(self, items):
+        self.__dict__.update(items)
+
+    @classmethod
+    def create(cls, apiclient, **kwargs):
+        """Creates network permissions"""
+        cmd = createNetworkPermissions.createNetworkPermissionsCmd()
+        [setattr(cmd, k, v) for k, v in list(kwargs.items())]
+        return (apiclient.createNetworkPermissions(cmd))
+
+    @classmethod
+    def remove(cls, apiclient, **kwargs):
+        """Removes the network permissions"""
+
+        cmd = removeNetworkPermissions.removeNetworkPermissionsCmd()
+        [setattr(cmd, k, v) for k, v in list(kwargs.items())]
+        return (apiclient.removeNetworkPermissions(cmd))
+
+    @classmethod
+    def reset(cls, apiclient, **kwargs):
+        """Updates the network permissions"""
+
+        cmd = resetNetworkPermissions.resetNetworkPermissionsCmd()
+        [setattr(cmd, k, v) for k, v in list(kwargs.items())]
+        return (apiclient.resetNetworkPermissions(cmd))
+
+    @classmethod
+    def list(cls, apiclient, **kwargs):
+        """List all role permissions matching criteria"""
+
+        cmd = listNetworkPermissions.listNetworkPermissionsCmd()
+        [setattr(cmd, k, v) for k, v in list(kwargs.items())]
+        return (apiclient.listNetworkPermissions(cmd))

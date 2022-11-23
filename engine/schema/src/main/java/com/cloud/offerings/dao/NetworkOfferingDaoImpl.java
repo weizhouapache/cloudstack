@@ -42,6 +42,7 @@ import com.cloud.utils.db.SearchBuilder;
 import com.cloud.utils.db.SearchCriteria;
 import com.cloud.utils.db.SearchCriteria.Op;
 import com.cloud.utils.db.TransactionLegacy;
+import com.cloud.utils.net.NetUtils;
 
 @Component
 @DB()
@@ -51,10 +52,13 @@ public class NetworkOfferingDaoImpl extends GenericDaoBase<NetworkOfferingVO, Lo
     final SearchBuilder<NetworkOfferingVO> AvailabilitySearch;
     final SearchBuilder<NetworkOfferingVO> AllFieldsSearch;
     private final GenericSearchBuilder<NetworkOfferingVO, Long> UpgradeSearch;
+
     @Inject
     NetworkOfferingDetailsDao _detailsDao;
     @Inject
     private NetworkOfferingServiceMapDao networkOfferingServiceMapDao;
+    @Inject
+    private NetworkOfferingDao networkOfferingDao;
 
     protected NetworkOfferingDaoImpl() {
         super();
@@ -253,20 +257,45 @@ public class NetworkOfferingDaoImpl extends GenericDaoBase<NetworkOfferingVO, Lo
 
     @Override
     public void persistDefaultL2NetworkOfferings() {
-        checkPersistL2NetworkOffering(NetworkOffering.DefaultL2NetworkOffering,
+        /*checkPersistL2NetworkOffering(NetworkOffering.DefaultL2NetworkOffering,
                 "Offering for L2 networks",
-                false, false);
+                false, false);*/
 
-        checkPersistL2NetworkOffering(NetworkOffering.DefaultL2NetworkOfferingVlan,
-                "Offering for L2 networks VLAN",
-                true, false);
+        if (networkOfferingDao.findByUniqueName(NetworkOffering.DefaultL2NetworkOfferingVlan) == null && networkOfferingDao.findByUniqueName("기본 L2 VLAN 네트워크오퍼링") == null) {
+            checkPersistL2NetworkOffering("기본 L2 VLAN 네트워크오퍼링",
+                    "기본 L2 VLAN 네트워크오퍼링",
+                    true, false);
+        }
 
-        checkPersistL2NetworkOffering(NetworkOffering.DefaultL2NetworkOfferingConfigDrive,
+        /*checkPersistL2NetworkOffering(NetworkOffering.DefaultL2NetworkOfferingConfigDrive,
                 "Offering for L2 networks with config drive user data",
-                false, true);
+                false, true);*/
 
-        checkPersistL2NetworkOffering(NetworkOffering.DefaultL2NetworkOfferingConfigDriveVlan,
-                "Offering for L2 networks with config drive user data VLAN",
-                true, true);
+        if (networkOfferingDao.findByUniqueName(NetworkOffering.DefaultL2NetworkOfferingConfigDriveVlan) == null && networkOfferingDao.findByUniqueName("기본 L2 VLAN 네트워크오퍼링(with ConfigDrive)") == null) {
+            checkPersistL2NetworkOffering("기본 L2 VLAN 네트워크오퍼링(with ConfigDrive)",
+                    "기본 L2 VLAN 네트워크오퍼링(with ConfigDrive)",
+                    true, true);
+        }
+    }
+
+    @Override
+    public NetUtils.InternetProtocol getNetworkOfferingInternetProtocol(long offeringId) {
+        String internetProtocolStr = _detailsDao.getDetail(offeringId, NetworkOffering.Detail.internetProtocol);
+        return NetUtils.InternetProtocol.fromValue(internetProtocolStr);
+    }
+
+    @Override
+    public NetUtils.InternetProtocol getNetworkOfferingInternetProtocol(long offeringId, NetUtils.InternetProtocol defaultProtocol) {
+        NetUtils.InternetProtocol protocol = getNetworkOfferingInternetProtocol(offeringId);
+        if (protocol == null) {
+            return defaultProtocol;
+        }
+        return protocol;
+    }
+
+    @Override
+    public boolean isIpv6Supported(long offeringId) {
+        NetUtils.InternetProtocol internetProtocol = getNetworkOfferingInternetProtocol(offeringId);
+        return NetUtils.InternetProtocol.isIpv6EnabledProtocol(internetProtocol);
     }
 }

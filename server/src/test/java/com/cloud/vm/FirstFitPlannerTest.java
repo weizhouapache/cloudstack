@@ -151,7 +151,7 @@ public class FirstFitPlannerTest {
         when(configDao.getValue(Config.ImplicitHostTags.key())).thenReturn("GPU");
 
         ComponentContext.initComponentsLifeCycle();
-        acct.setType(Account.ACCOUNT_TYPE_ADMIN);
+        acct.setType(Account.Type.ADMIN);
         acct.setAccountName("user1");
         acct.setDomainId(domainId);
         acct.setId(accountId);
@@ -209,7 +209,7 @@ public class FirstFitPlannerTest {
         List<Long> clusterList = planner.orderClusters(vmProfile, plan, avoids);
 
         assertTrue("Reordered cluster list have clusters which has hosts with specified host tag on offering", (clusterList.containsAll(matchingClusters)));
-        assertTrue("Reordered cluster list does not have clusters which dont have hosts with matching host tag on offering", (!clusterList.contains(2L)));
+        assertTrue("Reordered cluster list does not have clusters which don't have hosts with matching host tag on offering", (!clusterList.contains(2L)));
     }
 
     private List<Long> initializeForClusterListBasedOnHostTag(ServiceOffering offering) {

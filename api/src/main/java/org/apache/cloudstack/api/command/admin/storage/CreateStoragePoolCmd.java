@@ -86,10 +86,16 @@ public class CreateStoragePoolCmd extends BaseCmd {
     private Long capacityBytes;
 
     @Parameter(name = ApiConstants.HYPERVISOR,
-               type = CommandType.STRING,
-               required = false,
-               description = "hypervisor type of the hosts in zone that will be attached to this storage pool. KVM, VMware supported as of now.")
+            type = CommandType.STRING,
+            required = false,
+            description = "hypervisor type of the hosts in zone that will be attached to this storage pool. KVM, VMware supported as of now.")
     private String hypervisor;
+
+    @Parameter(name = ApiConstants.KRBD_PATH,
+            type = CommandType.STRING,
+            required = false,
+            description = "the path of Ablestack provider")
+    private String krbdpath;
 
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
@@ -146,6 +152,8 @@ public class CreateStoragePoolCmd extends BaseCmd {
     public String getHypervisor() {
         return hypervisor;
     }
+
+    public String getKrbdPath() { return krbdpath; }
 
     @Override
     public String getCommandName() {

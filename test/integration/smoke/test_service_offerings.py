@@ -19,13 +19,16 @@
 # Import Local Modules
 from marvin.codes import FAILED
 from marvin.cloudstackTestCase import cloudstackTestCase
-from marvin.cloudstackAPI import (changeServiceForVirtualMachine,
+from marvin.cloudstackAPI import (scaleVirtualMachine,
                                   updateServiceOffering)
 from marvin.lib.utils import (isAlmostEqual,
                               cleanup_resources,
                               random_gen)
 from marvin.lib.base import (ServiceOffering,
+                             Configurations,
+                             DiskOffering,
                              Account,
+                             StoragePool,
                              VirtualMachine)
 from marvin.lib.common import (list_service_offering,
                                list_virtual_machines,
@@ -67,7 +70,7 @@ class TestCreateServiceOffering(cloudstackTestCase):
             "smoke",
             "basic",
             "eip",
-            "sg"],
+            "sg", "diskencrypt"],
         required_hardware="false")
     def test_01_create_service_offering(self):
         """Test to create service offering"""
@@ -127,6 +130,11 @@ class TestCreateServiceOffering(cloudstackTestCase):
             list_service_response[0].name,
             self.services["service_offerings"]["tiny"]["name"],
             "Check name in createServiceOffering"
+        )
+        self.assertEqual(
+            list_service_response[0].encryptroot,
+            False,
+            "Ensure encrypt is false by default"
         )
         return
 
@@ -301,6 +309,53 @@ class TestCreateServiceOffering(cloudstackTestCase):
             )
         return
 
+    @attr(
+        tags=[
+            "advanced",
+            "advancedns",
+            "smoke",
+            "basic",
+            "eip",
+            "sg",
+            "diskencrypt"],
+        required_hardware="false")
+    def test_05_create_service_offering_with_root_encryption_type(self):
+        """Test to create service offering with root encryption"""
+
+        # Validate the following:
+        # 1. createServiceOfferings should return a valid information
+        #    for newly created offering
+
+        service_offering = ServiceOffering.create(
+            self.apiclient,
+            self.services["service_offerings"]["tiny"],
+            name="tiny-encrypted-root",
+            encryptRoot=True
+        )
+        self.cleanup.append(service_offering)
+
+        self.debug(
+            "Created service offering with ID: %s" %
+            service_offering.id)
+
+        list_service_response = list_service_offering(
+            self.apiclient,
+            id=service_offering.id
+        )
+
+        self.assertNotEqual(
+            len(list_service_response),
+            0,
+            "Check Service offering is created"
+        )
+
+        self.assertEqual(
+            list_service_response[0].encryptroot,
+            True,
+            "Check encrypt root is true"
+        )
+        return
+
 
 class TestServiceOfferings(cloudstackTestCase):
 
@@ -338,17 +393,17 @@ class TestServiceOfferings(cloudstackTestCase):
             cls.apiclient,
             cls.services["service_offerings"]["tiny"]
         )
-        template = get_test_template(
+        cls.template = get_test_template(
             cls.apiclient,
             cls.zone.id,
             cls.hypervisor
         )
-        if template == FAILED:
+        if cls.template == FAILED:
             assert False, "get_test_template() failed to return template"
 
         # Set Zones and disk offerings
         cls.services["small"]["zoneid"] = cls.zone.id
-        cls.services["small"]["template"] = template.id
+        cls.services["small"]["template"] = cls.template.id
 
 
         # Create VMs, NAT Rules etc
@@ -543,10 +598,10 @@ class TestServiceOfferings(cloudstackTestCase):
         except Exception as e:
             self.fail("Failed to stop VM: %s" % e)
 
-        cmd = changeServiceForVirtualMachine.changeServiceForVirtualMachineCmd()
+        cmd = scaleVirtualMachine.scaleVirtualMachineCmd()
         cmd.id = self.medium_virtual_machine.id
         cmd.serviceofferingid = self.small_offering.id
-        self.apiclient.changeServiceForVirtualMachine(cmd)
+        self.apiclient.scaleVirtualMachine(cmd)
 
         self.debug("Starting VM - ID: %s" % self.medium_virtual_machine.id)
         self.medium_virtual_machine.start(self.apiclient)
@@ -613,6 +668,243 @@ class TestServiceOfferings(cloudstackTestCase):
             "Check Memory(kb) for small offering"
         )
         return
+
+    @attr(tags=["advanced", "advancedns", "smoke"], required_hardware="true")
+    def test_05_disk_offering_strictness_true(self):
+        """Test to see change service offering is not possible when disk offering strictness is set to true
+        """
+        # Validate the following
+        # 1. Create service offering linked a disk offering and disk offering strictness is true
+        # 2. Create a VM with that service offering
+        # 3. Create another service offering with a different disk offering
+        # 4. Try change service offering for VM and it will fail since disk offering strictness is true (not allowed to change the disk offering)
+
+        if self.hypervisor.lower() == "lxc":
+            self.skipTest("Skipping this test for {} due to bug CS-38153".format(self.hypervisor))
+        offering_data = {
+            'displaytext': 'TestDiskOfferingStrictnessTrue',
+            'cpuspeed': 512,
+            'cpunumber': 2,
+            'name': 'TestDiskOfferingStrictnessTrue',
+            'memory': 1024,
+            'diskofferingstrictness': True
+        }
+
+        self.serviceOfferingWithDiskOfferingStrictnessTrue = ServiceOffering.create(
+            self.apiclient,
+            offering_data,
+        )
+        self._cleanup.append(self.serviceOfferingWithDiskOfferingStrictnessTrue)
+
+        self.virtual_machine_with_diskoffering_strictness_true = VirtualMachine.create(
+            self.apiclient,
+            self.services["small"],
+            accountid=self.account.name,
+            domainid=self.account.domainid,
+            serviceofferingid=self.serviceOfferingWithDiskOfferingStrictnessTrue.id,
+            mode=self.services["mode"]
+        )
+
+        try:
+            self.virtual_machine_with_diskoffering_strictness_true.stop(self.apiclient)
+
+            timeout = self.services["timeout"]
+
+            while True:
+                time.sleep(self.services["sleep"])
+
+                # Ensure that VM is in stopped state
+                list_vm_response = list_virtual_machines(
+                    self.apiclient,
+                    id=self.virtual_machine_with_diskoffering_strictness_true.id
+                )
+
+                if isinstance(list_vm_response, list):
+                    vm = list_vm_response[0]
+                    if vm.state == 'Stopped':
+                        self.debug("VM state: %s" % vm.state)
+                        break
+
+                if timeout == 0:
+                    raise Exception(
+                        "Failed to stop VM (ID: %s) in change service offering" % vm.id)
+
+                timeout = timeout - 1
+        except Exception as e:
+            self.fail("Failed to stop VM: %s" % e)
+
+        offering_data = {
+            'displaytext': 'TestDiskOfferingStrictnessTrue2',
+            'cpuspeed': 1000,
+            'cpunumber': 2,
+            'name': 'TestDiskOfferingStrictnessTrue2',
+            'memory': 1024,
+            'diskofferingstrictness': True
+        }
+
+        self.serviceOfferingWithDiskOfferingStrictnessTrue2 = ServiceOffering.create(
+            self.apiclient,
+            offering_data,
+        )
+        self._cleanup.append(self.serviceOfferingWithDiskOfferingStrictnessTrue2)
+        cmd = scaleVirtualMachine.scaleVirtualMachineCmd()
+        cmd.id = self.virtual_machine_with_diskoffering_strictness_true.id
+        cmd.serviceofferingid = self.serviceOfferingWithDiskOfferingStrictnessTrue2.id
+
+        with self.assertRaises(Exception) as e:
+            self.apiclient.scaleVirtualMachine(cmd)
+            self.debug("Upgrade VM with new service offering having different disk offering operation failed as expected with exception: %s" %
+                       e.exception)
+        return
+
+    @attr(tags=["advanced", "advancedns", "smoke"], required_hardware="true")
+    def test_06_disk_offering_strictness_false(self):
+        """Test to see change service offering is possible when disk offering strictness is set to false
+        """
+        # Validate the following
+        # 1. Create service offering linked a disk offering and disk offering strictness is false
+        # 2. Create a VM with that service offering
+        # 3. Create another service offering with a different disk offering and disk offering strictness is false
+        # 4. Try change service offering for VM should succeed
+
+        if self.hypervisor.lower() == "lxc":
+            self.skipTest("Skipping this test for {} due to bug CS-38153".format(self.hypervisor))
+        self.storeCloneValues = {}
+        if self.hypervisor.lower() == "vmware":
+            self.fullClone = Configurations.list(self.apiclient, name="vmware.create.full.clone")
+            assert isinstance(self.fullClone, list), "Config list not retrieved for vmware.create.full.clone"
+            allStoragePools = StoragePool.list(
+                self.apiclient
+            )
+            for pool in allStoragePools:
+                self.storeCloneValues[pool.id] = Configurations.list(self.apiclient, name="vmware.create.full.clone", storageid=pool.id)[0].value.lower()
+            self.updateVmwareCreateFullCloneSetting(False)
+
+        offering_data = {
+            'displaytext': 'TestDiskOfferingStrictnessFalse',
+            'cpuspeed': 512,
+            'cpunumber': 2,
+            'name': 'TestDiskOfferingStrictnessFalse',
+            'memory': 1024,
+            'diskofferingstrictness': False
+        }
+
+        self.serviceOfferingWithDiskOfferingStrictnessFalse = ServiceOffering.create(
+            self.apiclient,
+            offering_data,
+        )
+        self._cleanup.append(self.serviceOfferingWithDiskOfferingStrictnessFalse)
+
+        self.virtual_machine_with_diskoffering_strictness_false = VirtualMachine.create(
+            self.apiclient,
+            self.services["small"],
+            accountid=self.account.name,
+            domainid=self.account.domainid,
+            serviceofferingid=self.serviceOfferingWithDiskOfferingStrictnessFalse.id,
+            mode=self.services["mode"]
+        )
+
+        try:
+            self.virtual_machine_with_diskoffering_strictness_false.stop(self.apiclient)
+
+            timeout = self.services["timeout"]
+
+            while True:
+                time.sleep(self.services["sleep"])
+
+                # Ensure that VM is in stopped state
+                list_vm_response = list_virtual_machines(
+                    self.apiclient,
+                    id=self.virtual_machine_with_diskoffering_strictness_false.id
+                )
+
+                if isinstance(list_vm_response, list):
+                    vm = list_vm_response[0]
+                    if vm.state == 'Stopped':
+                        self.debug("VM state: %s" % vm.state)
+                        break
+
+                if timeout == 0:
+                    raise Exception(
+                        "Failed to stop VM (ID: %s) in change service offering" % vm.id)
+
+                timeout = timeout - 1
+        except Exception as e:
+            self.fail("Failed to stop VM: %s" % e)
+
+        self.disk_offering2 = DiskOffering.create(
+                                    self.apiclient,
+                                    self.services["disk_offering"],
+                                    )
+        self._cleanup.append(self.disk_offering2)
+        offering_data = {
+            'displaytext': 'TestDiskOfferingStrictnessFalse2',
+            'cpuspeed': 1000,
+            'cpunumber': 2,
+            'name': 'TestDiskOfferingStrictnessFalse2',
+            'memory': 1024,
+            'diskofferingstrictness': False,
+            'diskofferingid': self.disk_offering2.id
+        }
+
+        self.serviceOfferingWithDiskOfferingStrictnessFalse2 = ServiceOffering.create(
+            self.apiclient,
+            offering_data,
+        )
+        self._cleanup.append(self.serviceOfferingWithDiskOfferingStrictnessFalse2)
+        cmd = scaleVirtualMachine.scaleVirtualMachineCmd()
+        cmd.id = self.virtual_machine_with_diskoffering_strictness_false.id
+        cmd.serviceofferingid = self.serviceOfferingWithDiskOfferingStrictnessFalse2.id
+        self.apiclient.scaleVirtualMachine(cmd)
+
+        list_vm_response = VirtualMachine.list(
+            self.apiclient,
+            id=self.virtual_machine_with_diskoffering_strictness_false.id
+        )
+
+        vm_response = list_vm_response[0]
+        self.assertEqual(
+            vm_response.id,
+            self.virtual_machine_with_diskoffering_strictness_false.id,
+            "Check virtual machine ID of upgraded VM"
+        )
+
+        self.assertEqual(
+            vm_response.serviceofferingid,
+            self.serviceOfferingWithDiskOfferingStrictnessFalse2.id,
+            "Check service offering of the VM"
+        )
+
+        if self.hypervisor.lower() == "vmware":
+            self.updateVmwareCreateFullCloneSetting(True)
+
+        return
+
+    def updateVmwareCreateFullCloneSetting(self, tearDown):
+        if not tearDown:
+            Configurations.update(self.apiclient,
+                                  "vmware.create.full.clone",
+                                  "true")
+            allStoragePools = StoragePool.list(
+                self.apiclient
+            )
+            for pool in allStoragePools:
+                Configurations.update(self.apiclient,
+                                      storageid=pool.id,
+                                      name="vmware.create.full.clone",
+                                      value="true")
+        else:
+            Configurations.update(self.apiclient,
+                                  "vmware.create.full.clone",
+                                  self.fullClone[0].value.lower())
+            allStoragePools = StoragePool.list(
+                self.apiclient
+            )
+            for pool in allStoragePools:
+                Configurations.update(self.apiclient,
+                                      storageid=pool.id,
+                                      name="vmware.create.full.clone",
+                                      value=self.storeCloneValues[pool.id])
 
 class TestCpuCapServiceOfferings(cloudstackTestCase):
 

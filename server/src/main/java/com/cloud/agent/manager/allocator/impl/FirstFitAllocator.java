@@ -117,15 +117,22 @@ public class FirstFitAllocator extends AdapterBase implements HostAllocator {
         Account account = vmProfile.getOwner();
 
         boolean isVMDeployedWithUefi = false;
+        boolean isVMDeployedWithTpm = false;
         UserVmDetailVO userVmDetailVO = _userVmDetailsDao.findDetail(vmProfile.getId(), "UEFI");
+        UserVmDetailVO userVmTpmVO = _userVmDetailsDao.findDetail(vmProfile.getId(), "tpmversion");
         if(userVmDetailVO != null){
             if ("secure".equalsIgnoreCase(userVmDetailVO.getValue()) || "legacy".equalsIgnoreCase(userVmDetailVO.getValue())) {
                 isVMDeployedWithUefi = true;
             }
         }
         s_logger.info(" Guest VM is requested with Custom[UEFI] Boot Type "+ isVMDeployedWithUefi);
+        if(userVmTpmVO != null){
 
-
+            if ("tpmversion".equalsIgnoreCase(userVmTpmVO.getValue())){
+                isVMDeployedWithTpm = true;
+            }
+        }
+        s_logger.info(" Guest VM is requested with Custom[TPM] version "+ isVMDeployedWithTpm);
         if (type == Host.Type.Storage) {
             // FirstFitAllocator should be used for user VMs only since it won't care whether the host is capable of routing or not
             return new ArrayList<Host>();
@@ -138,6 +145,7 @@ public class FirstFitAllocator extends AdapterBase implements HostAllocator {
         String hostTagOnOffering = offering.getHostTag();
         String hostTagOnTemplate = template.getTemplateTag();
         String hostTagUefi = "UEFI";
+        String hostTagTpm = "TPM";
 
         boolean hasSvcOfferingTag = hostTagOnOffering != null ? true : false;
         boolean hasTemplateTag = hostTagOnTemplate != null ? true : false;
@@ -151,6 +159,13 @@ public class FirstFitAllocator extends AdapterBase implements HostAllocator {
             }
         }
 
+        List<HostVO> hostsMatchingTpmTag = new ArrayList<HostVO>();
+        if(isVMDeployedWithTpm){
+            hostsMatchingTpmTag = _hostDao.listByHostCapability(type, clusterId, podId, dcId, Host.HOST_TPM_ENABLE);
+            if (s_logger.isDebugEnabled()) {
+                s_logger.debug("Hosts with tag '" + hostTagTpm + "' are:" + hostsMatchingTpmTag);
+            }
+        }
 
         String haVmTag = (String)vmProfile.getParameter(VirtualMachineProfile.Param.HaTag);
         if (haVmTag != null) {
@@ -200,6 +215,9 @@ public class FirstFitAllocator extends AdapterBase implements HostAllocator {
 
         if (isVMDeployedWithUefi) {
             clusterHosts.retainAll(hostsMatchingUefiTag);
+        }
+        if (isVMDeployedWithTpm) {
+            clusterHosts.retainAll(hostsMatchingTpmTag);
         }
 
         // add all hosts that we are not considering to the avoid list

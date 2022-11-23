@@ -48,6 +48,7 @@ public class CounterDaoImpl extends GenericDaoBase<CounterVO, Long> implements C
         if (keyword != null) {
             SearchCriteria<CounterVO> ssc = createSearchCriteria();
             ssc.addOr("name", SearchCriteria.Op.LIKE, "%" + keyword + "%");
+            ssc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.addAnd("name", SearchCriteria.Op.SC, ssc);
         }
 

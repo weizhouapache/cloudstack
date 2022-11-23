@@ -21,10 +21,10 @@
       <span v-html="$config.footer" />
     </div>
     <div class="line" v-if="$store.getters.userInfo.roletype === 'Admin'">
-      CloudStack {{ $store.getters.features.cloudstackversion }}
+      ABLESTACK({{ buildVersion }})
       <a-divider type="vertical" />
-      <a href="https://github.com/apache/cloudstack/issues/new" target="_blank">
-        <a-icon type="github"/>
+      <a href="https://github.com/ablecloud-team/ablestack-cloud/issues/new" target="_blank">
+        <github-outlined />
         {{ $t('label.report.bug') }}
       </a>
     </div>
@@ -36,7 +36,17 @@ export default {
   name: 'LayoutFooter',
   data () {
     return {
+      buildVersion: this.$config.buildVersion
     }
+  },
+  created () {
+    // 젠킨스를 이용한 빌드가 아닐 경우 버전 및 빌드 날짜 표시하기 위함.
+    // if (this.buildVersion === '') {
+    //   const version = 'Bronto-v2.0.1'
+    //   const m = new Date()
+    //   const date = m.getFullYear() + ('0' + (m.getMonth() + 1)).slice(-2) + ('0' + m.getDate()).slice(-2)
+    //   this.buildVersion = version + '-' + date + '-dev'
+    // }
   }
 }
 </script>

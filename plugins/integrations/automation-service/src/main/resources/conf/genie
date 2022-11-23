@@ -1,0 +1,18 @@
+{
+	"MOLD_DEFAULT_DOMAIN_ACCOUNT":"{{ account_name }}",
+	"MOLD_DEFAULT_DOMAIN_ID":"{{ domain_uuid }}",
+	"MOLD_DEFAULT_PROTOCOL":"{{ mold_protocol }}",
+	"MOLD_DEFAULT_URL":"{{ mold_ip }}",
+	"MOLD_DEFAULT_PORT":"{{ mold_port }}",
+	"MOLD_NETWORK_UUID":"{{ network_id }}",
+	"MOLD_ZONE_ID":"{{ zone_id }}",
+	"MOLD_ZONE_NAME":"{{ zone_name }}",
+	"AC_PUBLIC_IP":"{{ ac_public_ip }}",
+	"BOOTSTRAPPED": "false",
+  "MOLD_API_URL": "{{ mold_end_point}}",
+  "MOLD_API_KEY": "{{ api_key }}",
+  "MOLD_SECRET_KEY": "{{ secret_key }}",
+  "AC_ID": "{{ automation_controller_id }}",
+  "AC_INSTANCE_NAME": "{{ automation_controller_instance_name }}",
+  "AC_NETWORK_NAME": "{{ network_name }}"
+}

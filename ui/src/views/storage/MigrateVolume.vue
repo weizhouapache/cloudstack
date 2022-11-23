@@ -16,40 +16,48 @@
 // under the License.
 
 <template>
-  <div class="form" v-ctrl-enter="handleKeyboardSubmit">
+  <a-form class="form" layout="vertical" v-ctrl-enter="handleKeyboardSubmit">
     <a-alert class="top-spaced" type="warning">
-      <span slot="message" v-html="$t('message.migrate.volume')" />
+      <template #message>
+        <span v-html="$t('message.migrate.volume')" />
+      </template>
     </a-alert>
-    <storage-pool-select-view
-      ref="storagePoolSelection"
-      :resource="resource"
-      :suitabilityEnabled="true"
-      @storagePoolsUpdated="handleStoragePoolsChange"
-      @select="handleStoragePoolSelect" />
+    <a-form-item style="margin-top: 10px;">
+      <template #label>
+        <tooltip-label :title="$t('label.storagepool')" :tooltip="$t('message.migrate.volume.tooltip')"/>
+      </template>
+      <storage-pool-select-view
+        ref="storagePoolSelection"
+        :resource="resource"
+        :suitabilityEnabled="true"
+        @change="fetchDiskOfferings"
+        @storagePoolsUpdated="handleStoragePoolsChange"
+        @select="handleStoragePoolSelect" />
+    </a-form-item>
     <div class="top-spaced" v-if="storagePools.length > 0">
-      <template v-if="this.resource.virtualmachineid">
+      <div v-if="resource.virtualmachineid">
         <p class="modal-form__label" @click="replaceDiskOffering = !replaceDiskOffering" style="cursor:pointer;">
           {{ $t('label.usenewdiskoffering') }}
         </p>
-        <a-checkbox v-model="replaceDiskOffering" />
+        <a-checkbox v-model:checked="replaceDiskOffering" />
 
         <template v-if="replaceDiskOffering">
           <p class="modal-form__label">{{ $t('label.newdiskoffering') }}</p>
           <a-select
             :loading="diskOfferingLoading"
-            v-model="selectedDiskOffering"
+            v-model:value="selectedDiskOffering"
             style="width: 100%;"
             showSearch
-            optionFilterProp="children"
+            optionFilterProp="label"
             :filterOption="(input, option) => {
-              return option.componentOptions.children[0].text.toLowerCase().indexOf(input.toLowerCase()) >= 0
+              return option.children[0].children.toLowerCase().indexOf(input.toLowerCase()) >= 0
             }" >
             <a-select-option v-for="(diskOffering, index) in diskOfferings" :value="diskOffering.id" :key="index">
               {{ diskOffering.displaytext }}
             </a-select-option>
           </a-select>
         </template>
-      </template>
+      </div>
     </div>
 
     <a-divider />
@@ -58,18 +66,19 @@
       <a-button @click="closeModal">{{ $t('label.cancel') }}</a-button>
       <a-button type="primary" ref="submit" :disabled="!selectedStoragePool" @click="submitForm">{{ $t('label.ok') }}</a-button>
     </div>
-
-  </div>
+  </a-form>
 </template>
 
 <script>
 import { api } from '@/api'
+import TooltipLabel from '@/components/widgets/TooltipLabel'
 import StoragePoolSelectView from '@/components/view/StoragePoolSelectView'
 
 export default {
   name: 'MigrateVolume',
   components: {
-    StoragePoolSelectView
+    StoragePoolSelectView,
+    TooltipLabel
   },
   props: {
     resource: {
@@ -96,22 +105,61 @@ export default {
       }
     }
   },
+  created () {
+    this.fetchStoragePools()
+  },
   methods: {
+    fetchStoragePools () {
+      if (this.resource.virtualmachineid) {
+        api('findStoragePoolsForMigration', {
+          id: this.resource.id
+        }).then(response => {
+          this.storagePools = response.findstoragepoolsformigrationresponse.storagepool || []
+          if (Array.isArray(this.storagePools) && this.storagePools.length) {
+            this.selectedStoragePool = this.storagePools[0].id || ''
+            this.fetchDiskOfferings()
+          }
+        }).catch(error => {
+          this.$notifyError(error)
+          this.closeModal()
+        })
+      } else {
+        api('listStoragePools', {
+          zoneid: this.resource.zoneid
+        }).then(response => {
+          this.storagePools = response.liststoragepoolsresponse.storagepool || []
+          this.storagePools = this.storagePools.filter(pool => { return pool.id !== this.resource.storageid })
+          if (Array.isArray(this.storagePools) && this.storagePools.length) {
+            this.selectedStoragePool = this.storagePools[0].id || ''
+            this.fetchDiskOfferings()
+          }
+        }).catch(error => {
+          this.$notifyError(error)
+          this.closeModal()
+        })
+      }
+    },
     fetchDiskOfferings () {
       this.diskOfferingLoading = true
-      api('listDiskOfferings', {
-        listall: true
-      }).then(response => {
-        this.diskOfferings = response.listdiskofferingsresponse.diskoffering
-      }).catch(error => {
-        this.$notifyError(error)
-        this.closeModal()
-      }).finally(() => {
-        this.diskOfferingLoading = false
-        if (this.diskOfferings.length > 0) {
-          this.selectedDiskOffering = this.diskOfferings[0].id
-        }
-      })
+      if (this.resource.virtualmachineid) {
+        api('listDiskOfferings', {
+          storageid: this.selectedStoragePool.id,
+          listall: true
+        }).then(response => {
+          this.diskOfferings = response.listdiskofferingsresponse.diskoffering
+          if (this.diskOfferings) {
+            this.selectedDiskOffering = this.diskOfferings[0].id
+          }
+        }).catch(error => {
+          this.$notifyError(error)
+          this.closeModal()
+        }).finally(() => {
+          this.diskOfferingLoading = false
+          if (this.diskOfferings.length > 0) {
+            this.selectedDiskOffering = this.diskOfferings[0].id
+          }
+        })
+      }
     },
     handleStoragePoolsChange (storagePools) {
       this.storagePools = storagePools

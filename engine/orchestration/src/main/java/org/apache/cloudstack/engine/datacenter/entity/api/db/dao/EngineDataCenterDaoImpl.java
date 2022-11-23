@@ -100,6 +100,7 @@ public class EngineDataCenterDaoImpl extends GenericDaoBase<EngineDataCenterVO, 
             SearchCriteria<EngineDataCenterVO> ssc = createSearchCriteria();
             ssc.addOr("name", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             ssc.addOr("description", SearchCriteria.Op.LIKE, "%" + keyword + "%");
+            ssc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.addAnd("name", SearchCriteria.Op.SC, ssc);
         }
         return listBy(sc);
@@ -113,6 +114,7 @@ public class EngineDataCenterDaoImpl extends GenericDaoBase<EngineDataCenterVO, 
             SearchCriteria<EngineDataCenterVO> ssc = createSearchCriteria();
             ssc.addOr("name", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             ssc.addOr("description", SearchCriteria.Op.LIKE, "%" + keyword + "%");
+            ssc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.addAnd("name", SearchCriteria.Op.SC, ssc);
         }
         return listBy(sc);
@@ -125,9 +127,10 @@ public class EngineDataCenterDaoImpl extends GenericDaoBase<EngineDataCenterVO, 
             SearchCriteria<EngineDataCenterVO> ssc = createSearchCriteria();
             ssc.addOr("name", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             ssc.addOr("description", SearchCriteria.Op.LIKE, "%" + keyword + "%");
+            ssc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.addAnd("name", SearchCriteria.Op.SC, ssc);
         }
-        //sc.setParameters("domainId", domainId);
+
         return listBy(sc);
     }
 
@@ -136,6 +139,7 @@ public class EngineDataCenterDaoImpl extends GenericDaoBase<EngineDataCenterVO, 
         SearchCriteria<EngineDataCenterVO> ssc = createSearchCriteria();
         ssc.addOr("name", SearchCriteria.Op.LIKE, "%" + keyword + "%");
         ssc.addOr("description", SearchCriteria.Op.LIKE, "%" + keyword + "%");
+        ssc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
         return listBy(ssc);
     }
 

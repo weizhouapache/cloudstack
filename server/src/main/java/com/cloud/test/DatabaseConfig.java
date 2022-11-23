@@ -16,31 +16,6 @@
 // under the License.
 package com.cloud.test;
 
-import com.cloud.host.Status;
-import com.cloud.service.ServiceOfferingVO;
-import com.cloud.service.dao.ServiceOfferingDaoImpl;
-import com.cloud.storage.DiskOfferingVO;
-import com.cloud.storage.Storage.ProvisioningType;
-import com.cloud.storage.dao.DiskOfferingDaoImpl;
-import com.cloud.utils.DateUtil;
-import com.cloud.utils.PropertiesUtil;
-import com.cloud.utils.component.ComponentContext;
-import com.cloud.utils.db.DB;
-import com.cloud.utils.db.Transaction;
-import com.cloud.utils.db.TransactionCallbackWithExceptionNoReturn;
-import com.cloud.utils.db.TransactionLegacy;
-import com.cloud.utils.db.TransactionStatus;
-import com.cloud.utils.net.NfsUtils;
-import org.apache.cloudstack.utils.security.DigestHelper;
-import org.apache.log4j.Logger;
-import org.apache.log4j.xml.DOMConfigurator;
-import org.w3c.dom.Document;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.Attributes;
-import org.xml.sax.SAXException;
-import org.xml.sax.helpers.DefaultHandler;
-
 import java.io.File;
 import java.io.IOException;
 import java.net.URISyntaxException;
@@ -61,6 +36,33 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
+
+import org.apache.cloudstack.utils.security.DigestHelper;
+import org.apache.cloudstack.utils.security.ParserUtils;
+import org.apache.log4j.Logger;
+import org.apache.log4j.xml.DOMConfigurator;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.Attributes;
+import org.xml.sax.SAXException;
+import org.xml.sax.helpers.DefaultHandler;
+
+import com.cloud.host.Status;
+import com.cloud.service.ServiceOfferingVO;
+import com.cloud.service.dao.ServiceOfferingDaoImpl;
+import com.cloud.storage.DiskOfferingVO;
+import com.cloud.storage.Storage.ProvisioningType;
+import com.cloud.storage.dao.DiskOfferingDaoImpl;
+import com.cloud.utils.DateUtil;
+import com.cloud.utils.PropertiesUtil;
+import com.cloud.utils.component.ComponentContext;
+import com.cloud.utils.db.DB;
+import com.cloud.utils.db.Transaction;
+import com.cloud.utils.db.TransactionCallbackWithExceptionNoReturn;
+import com.cloud.utils.db.TransactionLegacy;
+import com.cloud.utils.db.TransactionStatus;
+import com.cloud.utils.net.NfsUtils;
 
 public class DatabaseConfig {
     private static final Logger s_logger = Logger.getLogger(DatabaseConfig.class.getName());
@@ -394,7 +396,7 @@ public class DatabaseConfig {
     private void doVersionCheck() {
         try {
             String warningMsg = "\nYou are using an outdated format for server-setup.xml. Please switch to the new format.\n";
-            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+            DocumentBuilderFactory dbf = ParserUtils.getSaferDocumentBuilderFactory();
             DocumentBuilder dbuilder = dbf.newDocumentBuilder();
             File configFile = new File(_configFileName);
             Document d = dbuilder.parse(configFile);
@@ -932,30 +934,38 @@ public class DatabaseConfig {
         } else {
             useLocalStorage = false;
         }
+        DiskOfferingVO diskOfferingVO = new DiskOfferingVO(name, displayText, provisioningType, false, null, false, false, true);
 
         ServiceOfferingVO serviceOffering =
             new ServiceOfferingVO(name, cpu, ramSize, speed, null, null, ha, displayText,
-                    provisioningType, useLocalStorage, false, null, false, null, false);
+                    false, null, false);
 
         Long bytesReadRate = Long.parseLong(_currentObjectParams.get("bytesReadRate"));
         if ((bytesReadRate != null) && (bytesReadRate > 0))
-            serviceOffering.setBytesReadRate(bytesReadRate);
+            diskOfferingVO.setBytesReadRate(bytesReadRate);
         Long bytesWriteRate = Long.parseLong(_currentObjectParams.get("bytesWriteRate"));
         if ((bytesWriteRate != null) && (bytesWriteRate > 0))
-            serviceOffering.setBytesWriteRate(bytesWriteRate);
+            diskOfferingVO.setBytesWriteRate(bytesWriteRate);
         Long iopsReadRate = Long.parseLong(_currentObjectParams.get("iopsReadRate"));
         if ((iopsReadRate != null) && (iopsReadRate > 0))
-            serviceOffering.setIopsReadRate(iopsReadRate);
+            diskOfferingVO.setIopsReadRate(iopsReadRate);
         Long iopsWriteRate = Long.parseLong(_currentObjectParams.get("iopsWriteRate"));
         if ((iopsWriteRate != null) && (iopsWriteRate > 0))
-            serviceOffering.setIopsWriteRate(iopsWriteRate);
+            diskOfferingVO.setIopsWriteRate(iopsWriteRate);
 
-        ServiceOfferingDaoImpl dao = ComponentContext.inject(ServiceOfferingDaoImpl.class);
+        DiskOfferingDaoImpl DiskOfferinDao = ComponentContext.inject(DiskOfferingDaoImpl.class);
         try {
-            dao.persist(serviceOffering);
+            DiskOfferinDao.persist(diskOfferingVO);
+        } catch (Exception e) {
+            s_logger.error("error creating disk offering", e);
+        }
+
+        serviceOffering.setDiskOfferingId(diskOfferingVO.getId());
+        ServiceOfferingDaoImpl serviceOfferingDao = ComponentContext.inject(ServiceOfferingDaoImpl.class);
+        try {
+            serviceOfferingDao.persist(serviceOffering);
         } catch (Exception e) {
             s_logger.error("error creating service offering", e);
-
         }
         /*
         String insertSql = "INSERT INTO `cloud`.`service_offering` (id, name, cpu, ram_size, speed, nw_rate, mc_rate, created, ha_enabled, mirrored, display_text, guest_ip_type, use_local_storage) " +

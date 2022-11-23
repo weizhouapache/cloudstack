@@ -248,7 +248,8 @@ public class Site2SiteVpnManagerImpl extends ManagerBase implements Site2SiteVpn
 
         Site2SiteCustomerGatewayVO gw =
             new Site2SiteCustomerGatewayVO(name, accountId, owner.getDomainId(), gatewayIp, peerCidrList, ipsecPsk, ikePolicy, espPolicy, ikeLifetime, espLifetime, dpd, encap, splitConnections, ikeVersion);
-        _customerGatewayDao.persist(gw);
+        gw = _customerGatewayDao.persist(gw);
+        CallContext.current().putContextParameter(Site2SiteCustomerGateway.class, gw.getUuid());
         return gw;
     }
 
@@ -367,6 +368,11 @@ public class Site2SiteVpnManagerImpl extends ManagerBase implements Site2SiteVpn
     @Override
     public Site2SiteVpnGateway getVpnGateway(Long vpnGatewayId) {
         return _vpnGatewayDao.findById(vpnGatewayId);
+    }
+
+    @Override
+    public Site2SiteCustomerGateway getCustomerGateway(Long customerGatewayId) {
+        return _customerGatewayDao.findById(customerGatewayId);
     }
 
     @Override
@@ -648,15 +654,14 @@ public class Site2SiteVpnManagerImpl extends ManagerBase implements Site2SiteVpn
 
         sb.and("id", sb.entity().getId(), SearchCriteria.Op.EQ);
         sb.and("name", sb.entity().getName(), SearchCriteria.Op.LIKE);
-
         SearchCriteria<Site2SiteCustomerGatewayVO> sc = sb.create();
         _accountMgr.buildACLSearchCriteria(sc, domainId, isRecursive, permittedAccounts, listProjectResourcesCriteria);
 
         if (id != null) {
             sc.setParameters("id", id);
         }
-        if(keyword != null && !keyword.isEmpty())
-        {
+        if(keyword != null && !keyword.isEmpty()){
+            sc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.setParameters("name", "%" + keyword + "%");
         }
 

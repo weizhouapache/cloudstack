@@ -82,7 +82,7 @@ public interface NetworkOrchestrationService {
     ConfigKey<String> GuestDomainSuffix = new ConfigKey<String>(String.class, GuestDomainSuffixCK, "Network", "cloud.internal",
         "Default domain name for vms inside virtualized networks fronted by router", true, ConfigKey.Scope.Zone, null);
 
-    ConfigKey<Integer> NetworkThrottlingRate = new ConfigKey<Integer>("Network", Integer.class, NetworkThrottlingRateCK, "200",
+    ConfigKey<Integer> NetworkThrottlingRate = new ConfigKey<Integer>("Network", Integer.class, NetworkThrottlingRateCK, "1000",
         "Default data transfer rate in megabits per second allowed in network.", true, ConfigKey.Scope.Zone);
 
     ConfigKey<Boolean> PromiscuousMode = new ConfigKey<Boolean>("Advanced", Boolean.class, "network.promiscuous.mode", "false",
@@ -177,6 +177,8 @@ public interface NetworkOrchestrationService {
      */
     void rollbackNicForMigration(VirtualMachineProfile src, VirtualMachineProfile dst);
 
+    boolean isSharedNetworkWithoutSpecifyVlan(NetworkOffering offering);
+
     boolean shutdownNetwork(long networkId, ReservationContext context, boolean cleanupElements);
 
     boolean destroyNetwork(long networkId, ReservationContext context, boolean forced);
@@ -185,7 +187,8 @@ public interface NetworkOrchestrationService {
 
     Network createGuestNetwork(long networkOfferingId, String name, String displayText, String gateway, String cidr, String vlanId, boolean bypassVlanOverlapCheck, String networkDomain, Account owner,
                                Long domainId, PhysicalNetwork physicalNetwork, long zoneId, ACLType aclType, Boolean subdomainAccess, Long vpcId, String ip6Gateway, String ip6Cidr,
-                               Boolean displayNetworkEnabled, String isolatedPvlan, Network.PVlanType isolatedPvlanType, String externalId, String routerIp, String routerIpv6) throws ConcurrentOperationException, InsufficientCapacityException, ResourceAllocationException;
+                               Boolean displayNetworkEnabled, String isolatedPvlan, Network.PVlanType isolatedPvlanType, String externalId, String routerIp, String routerIpv6,
+                               String ip4Dns1, String ip4Dns2, String ip6Dns1, String ip6Dns2) throws ConcurrentOperationException, InsufficientCapacityException, ResourceAllocationException;
 
     UserDataServiceProvider getPasswordResetProvider(Network network);
 
@@ -251,7 +254,7 @@ public interface NetworkOrchestrationService {
 
     NetworkProfile convertNetworkToNetworkProfile(long networkId);
 
-    boolean restartNetwork(Long networkId, Account callerAccount, User callerUser, boolean cleanup) throws ConcurrentOperationException, ResourceUnavailableException,
+    boolean restartNetwork(Long networkId, Account callerAccount, User callerUser, boolean cleanup, boolean livePatch) throws ConcurrentOperationException, ResourceUnavailableException,
         InsufficientCapacityException;
 
     boolean shutdownNetworkElementsAndResources(ReservationContext context, boolean b, Network network);
@@ -274,6 +277,8 @@ public interface NetworkOrchestrationService {
     List<? extends Nic> listVmNics(long vmId, Long nicId, Long networkId, String keyword);
 
     Nic savePlaceholderNic(Network network, String ip4Address, String ip6Address, Type vmType);
+
+    Nic savePlaceholderNic(Network network, String ip4Address, String ip6Address, String ip6Cidr, String ip6Gateway, String reserver, Type vmType);
 
     DhcpServiceProvider getDhcpServiceProvider(Network network);
 

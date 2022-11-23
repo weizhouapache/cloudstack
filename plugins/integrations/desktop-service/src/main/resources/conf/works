@@ -1,0 +1,17 @@
+{
+	"mold.default.domain.account":"{{ account_name }}",
+	"mold.default.domain.id":"{{ domain_uuid }}",
+	"mold.default.api.key":"{{ api_key }}",
+	"mold.default.secret.key":"{{ secret_key }}",
+	"mold.default.protocol":"{{ mold_protocol }}",
+	"mold.default.url":"{{ mold_ip }}",
+	"mold.default.port":"{{ mold_port }}",
+	"dc.default.url":"{{ dc_ip }}",
+	"mold.network.uuid":"{{ network_id }}",
+	"mold.zone.id":"{{ zone_id }}",
+	"works.default.url":"{{ works_ip }}",
+	"samba.default.url":"{{ works_ip }}",
+	"samba.default.domain":"{{ domain_name }}",
+	"cluster.default.name":"{{ cluster_name }}",
+	"bootstrapped": "false"
+}

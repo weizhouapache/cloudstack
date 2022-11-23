@@ -22,6 +22,7 @@ import java.net.MalformedURLException;
 import java.util.Map;
 
 import org.apache.cloudstack.api.command.user.volume.AttachVolumeCmd;
+import org.apache.cloudstack.api.command.user.volume.ChangeOfferingForVolumeCmd;
 import org.apache.cloudstack.api.command.user.volume.CreateVolumeCmd;
 import org.apache.cloudstack.api.command.user.volume.DetachVolumeCmd;
 import org.apache.cloudstack.api.command.user.volume.ExtractVolumeCmd;
@@ -44,6 +45,14 @@ public interface VolumeApiService {
             , "Limits number of migrations that can be handled per datastore concurrently; default is 0 - unlimited"
             , true // not sure if this is to be dynamic
             , ConfigKey.Scope.Global);
+
+    ConfigKey<Boolean> UseHttpsToUpload = new ConfigKey<Boolean>("Advanced",
+            Boolean.class,
+            "use.https.to.upload",
+            "false",
+            "Determines the protocol (HTTPS or HTTP) ACS will use to generate links to upload ISOs, volumes, and templates. When set as 'true', ACS will use protocol HTTPS, otherwise, it will use protocol HTTP. Default value is 'true'.",
+            true,
+            ConfigKey.Scope.StoragePool);
 
     /**
      * Creates the database object for a volume based on the given criteria
@@ -152,4 +161,10 @@ public interface VolumeApiService {
     Volume destroyVolume(long volumeId, Account caller, boolean expunge, boolean forceExpunge);
 
     Volume recoverVolume(long volumeId);
+
+    boolean validateVolumeSizeInBytes(long size);
+
+    Volume changeDiskOfferingForVolume(ChangeOfferingForVolumeCmd cmd) throws ResourceAllocationException;
+
+    void publishVolumeCreationUsageEvent(Volume volume);
 }

@@ -136,6 +136,10 @@ public class HAConfigVO implements HAConfig {
         this.enabled = enabled;
     }
 
+    public void setHastate(HAState haState) {
+        this.haState = haState;
+    }
+
     public void setManagementServerId(Long managementServerId) {
         this.managementServerId = managementServerId;
     }

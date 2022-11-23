@@ -42,6 +42,9 @@ public class DiskProfile {
     private Long iopsReadRate;
     private Long iopsWriteRate;
     private String cacheMode;
+    private Long minIops;
+    private Long maxIops;
+    private boolean requiresEncryption;
 
     private HypervisorType hyperType;
 
@@ -61,6 +64,12 @@ public class DiskProfile {
         this.volumeId = volumeId;
     }
 
+    public DiskProfile(long volumeId, Volume.Type type, String name, long diskOfferingId, long size, String[] tags, boolean useLocalStorage, boolean recreatable,
+            Long templateId, boolean requiresEncryption) {
+        this(volumeId, type, name, diskOfferingId, size, tags, useLocalStorage, recreatable, templateId);
+        this.requiresEncryption = requiresEncryption;
+    }
+
     public DiskProfile(Volume vol, DiskOffering offering, HypervisorType hyperType) {
         this(vol.getId(),
             vol.getVolumeType(),
@@ -73,6 +82,7 @@ public class DiskProfile {
             null);
         this.hyperType = hyperType;
         this.provisioningType = offering.getProvisioningType();
+        this.requiresEncryption = offering.getEncrypt() || vol.getPassphraseId() != null;
     }
 
     public DiskProfile(DiskProfile dp) {
@@ -227,4 +237,24 @@ public class DiskProfile {
     public String getCacheMode() {
         return cacheMode;
     }
+
+    public Long getMinIops() {
+        return minIops;
+    }
+
+    public void setMinIops(Long minIops) {
+        this.minIops = minIops;
+    }
+
+    public Long getMaxIops() {
+        return maxIops;
+    }
+
+    public void setMaxIops(Long maxIops) {
+        this.maxIops = maxIops;
+    }
+
+    public boolean requiresEncryption() { return requiresEncryption; }
+
+    public void setEncryption(boolean encrypt) { this.requiresEncryption = encrypt; }
 }

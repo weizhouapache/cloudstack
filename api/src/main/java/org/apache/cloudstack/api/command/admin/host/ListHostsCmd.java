@@ -24,7 +24,7 @@ import java.util.Map;
 import org.apache.log4j.Logger;
 
 import org.apache.cloudstack.api.APICommand;
-import org.apache.cloudstack.api.ApiCommandJobType;
+import org.apache.cloudstack.api.ApiCommandResourceType;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.ApiConstants.HostDetails;
 import org.apache.cloudstack.api.BaseListCmd;
@@ -35,6 +35,7 @@ import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.PodResponse;
 import org.apache.cloudstack.api.response.UserVmResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
+import org.apache.cloudstack.outofbandmanagement.OutOfBandManagement;
 
 import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.host.Host;
@@ -198,8 +199,8 @@ public class ListHostsCmd extends BaseListCmd {
     }
 
     @Override
-    public ApiCommandJobType getInstanceType() {
-        return ApiCommandJobType.Host;
+    public ApiCommandResourceType getApiResourceType() {
+        return ApiCommandResourceType.Host;
     }
 
     protected ListResponse<HostResponse> getHostResponses() {
@@ -215,11 +216,13 @@ public class ListHostsCmd extends BaseListCmd {
             List<HostResponse> hostResponses = new ArrayList<HostResponse>();
             for (Host host : result.first()) {
                 HostResponse hostResponse = _responseGenerator.createHostResponse(host, getDetails());
+                OutOfBandManagement hostOobmResponse = _responseGenerator.createHostOobmResponse(host);
                 Boolean suitableForMigration = false;
                 if (hostsWithCapacity.contains(host)) {
                     suitableForMigration = true;
                 }
                 hostResponse.setSuitableForMigration(suitableForMigration);
+                hostResponse.setOutOfBandManagementResponse(hostOobmResponse);
                 hostResponse.setObjectName("host");
                 hostResponses.add(hostResponse);
             }

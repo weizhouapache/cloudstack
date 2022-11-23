@@ -122,6 +122,9 @@ public class StoragePoolVO implements StoragePool {
     @Column(name = "parent")
     private Long parent = 0L;
 
+    @Column(name = "krbd_path")
+    private String krbdpath;
+
     @Override
     public long getId() {
         return id;
@@ -131,6 +134,7 @@ public class StoragePoolVO implements StoragePool {
     public StoragePoolStatus getStatus() {
         return status;
     }
+
 
     public StoragePoolVO() {
         status = StoragePoolStatus.Initial;
@@ -152,8 +156,25 @@ public class StoragePoolVO implements StoragePool {
         setPath(hostPath);
     }
 
+    public StoragePoolVO(long poolId, String name, String uuid, StoragePoolType type, long dataCenterId, Long podId, long availableBytes, long capacityBytes,
+            String hostAddress, int port, String hostPath, String krbdpath) {
+        this.name = name;
+        id = poolId;
+        this.uuid = uuid;
+        poolType = type;
+        this.dataCenterId = dataCenterId;
+        usedBytes = availableBytes;
+        this.capacityBytes = capacityBytes;
+        this.hostAddress = hostAddress;
+        this.port = port;
+        this.podId = podId;
+        setStatus(StoragePoolStatus.Initial);
+        setPath(hostPath);
+        this.krbdpath = krbdpath;
+    }
+
     public StoragePoolVO(StoragePoolVO that) {
-        this(that.id, that.name, that.uuid, that.poolType, that.dataCenterId, that.podId, that.usedBytes, that.capacityBytes, that.hostAddress, that.port, that.path);
+        this(that.id, that.name, that.uuid, that.poolType, that.dataCenterId, that.podId, that.usedBytes, that.capacityBytes, that.hostAddress, that.port, that.path, that.krbdpath);
     }
 
     public StoragePoolVO(StoragePoolType type, String hostAddress, int port, String path) {
@@ -392,5 +413,13 @@ public class StoragePoolVO implements StoragePool {
     public boolean isInMaintenance() {
         return status == StoragePoolStatus.PrepareForMaintenance || status == StoragePoolStatus.Maintenance || status == StoragePoolStatus.ErrorInMaintenance ||
             removed != null;
+    }
+
+    public String getKrbdPath() {
+        return krbdpath;
+    }
+
+    public void setKrbdPath(String krbdpath) {
+        this.krbdpath = krbdpath;
     }
 }

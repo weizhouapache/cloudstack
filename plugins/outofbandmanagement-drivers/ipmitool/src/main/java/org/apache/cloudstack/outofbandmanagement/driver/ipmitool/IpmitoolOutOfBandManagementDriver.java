@@ -126,7 +126,7 @@ public final class IpmitoolOutOfBandManagementDriver extends AdapterBase impleme
         String result = response.getResult().trim();
 
         if (response.isSuccess()) {
-            LOG.debug(String.format("The command [%s] was successful and got the result [%s].", oneLineCommand, result));
+            LOG.debug(String.format("Successful and got the result.", oneLineCommand, result));
             if (cmd.getPowerOperation().equals(OutOfBandManagement.PowerOperation.STATUS)) {
                 response.setPowerState(IPMITOOL.parsePowerState(result));
             }

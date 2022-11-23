@@ -100,6 +100,30 @@ public class CapabilitiesResponse extends BaseResponse {
     @Param(description = "true if experimental features for Kubernetes cluster such as Docker private registry are enabled, false otherwise")
     private boolean kubernetesClusterExperimentalFeaturesEnabled;
 
+    @SerializedName("desktopserviceenabled")
+    @Param(description = "true if Desktop Service plugin is enabled, false otherwise")
+    private boolean desktopServiceEnabled;
+
+    @SerializedName("desktopworksportalport")
+    @Param(description = "Desktop Service Works Portal URL setting")
+    private String desktopWorksPortalPort;
+
+    @SerializedName("automationserviceenabled")
+    @Param(description = "true if Automation Service plugin is enabled, false otherwise")
+    private boolean automationServiceEnabled;
+
+    @SerializedName("wallportalport")
+    @Param(description = "Monitoring Service Wall Portal Port setting")
+    private String wallPortalPort;
+
+    @SerializedName("wallportalvmuri")
+    @Param(description = "Monitoring Service Wall Portal for VM Uri setting")
+    private String wallPortalVmUri;
+
+    @SerializedName("host")
+    @Param(description = "Management Server Host Ip")
+    private String host;
+
     @SerializedName("defaultuipagesize")
     @Param(description = "default page size in the UI for various views, value set in the configurations", since = "4.15.2")
     private Long defaultUiPageSize;
@@ -180,6 +204,29 @@ public class CapabilitiesResponse extends BaseResponse {
         this.kubernetesClusterExperimentalFeaturesEnabled = kubernetesClusterExperimentalFeaturesEnabled;
     }
 
+    public void setDesktopServiceEnabled(boolean desktopServiceEnabled) {
+        this.desktopServiceEnabled = desktopServiceEnabled;
+    }
+
+    public void setDesktopWorksPortalPort(String desktopWorksPortalPort) {
+        this.desktopWorksPortalPort = desktopWorksPortalPort;
+    }
+
+    public void setAutomationServiceEnabled(boolean automationServiceEnabled) {
+        this.automationServiceEnabled = automationServiceEnabled;
+    }
+
+    public void setWallPortalPort(String wallPortalPort) {
+        this.wallPortalPort = wallPortalPort;
+    }
+
+    public void setWallPortalVmUri(String wallPortalVmUri) {
+        this.wallPortalVmUri = wallPortalVmUri;
+    }
+
+    public void setHost(String host) {
+        this.host = host;
+    }
     public void setDefaultUiPageSize(Long defaultUiPageSize) {
         this.defaultUiPageSize = defaultUiPageSize;
     }

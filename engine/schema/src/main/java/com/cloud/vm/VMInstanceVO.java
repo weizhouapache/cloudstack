@@ -41,6 +41,7 @@ import javax.persistence.TemporalType;
 import javax.persistence.Transient;
 
 import org.apache.cloudstack.backup.Backup;
+import org.apache.cloudstack.utils.reflectiontostringbuilderutils.ReflectionToStringBuilderUtils;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.log4j.Logger;
 
@@ -174,9 +175,6 @@ public class VMInstanceVO implements VirtualMachine, FiniteStateObject<State, Vi
     @Column(name = "uuid")
     protected String uuid = UUID.randomUUID().toString();
 
-    @Column(name = "disk_offering_id")
-    protected Long diskOfferingId;
-
     //
     // Power state for VM state sync
     //
@@ -232,10 +230,9 @@ public class VMInstanceVO implements VirtualMachine, FiniteStateObject<State, Vi
     }
 
     public VMInstanceVO(long id, long serviceOfferingId, String name, String instanceName, Type type, Long vmTemplateId, HypervisorType hypervisorType, long guestOSId,
-                        long domainId, long accountId, long userId, boolean haEnabled, boolean limitResourceUse, Long diskOfferingId) {
+                        long domainId, long accountId, long userId, boolean haEnabled, boolean limitResourceUse) {
         this(id, serviceOfferingId, name, instanceName, type, vmTemplateId, hypervisorType, guestOSId, domainId, accountId, userId, haEnabled);
         limitCpuUse = limitResourceUse;
-        this.diskOfferingId = diskOfferingId;
     }
 
     public VMInstanceVO() {
@@ -492,8 +489,7 @@ public class VMInstanceVO implements VirtualMachine, FiniteStateObject<State, Vi
 
     public void setDetail(String name, String value) {
         assert (details != null) : "Did you forget to load the details?";
-
-        details.put(name, value);
+        this.details.put(name, value);
     }
 
     public void setDetails(Map<String, String> details) {
@@ -506,7 +502,7 @@ public class VMInstanceVO implements VirtualMachine, FiniteStateObject<State, Vi
 
     @Override
     public String toString() {
-        return String.format("VM instance {id: \"%s\", name: \"%s\", uuid: \"%s\", type=\"%s\"}", id, getInstanceName(), uuid, type);
+        return String.format("VM instance %s", ReflectionToStringBuilderUtils.reflectOnlySelectedFields(this, "id", "instanceName", "uuid", "type"));
     }
 
     @Override
@@ -533,11 +529,6 @@ public class VMInstanceVO implements VirtualMachine, FiniteStateObject<State, Vi
 
     public void setServiceOfferingId(long serviceOfferingId) {
         this.serviceOfferingId = serviceOfferingId;
-    }
-
-    @Override
-    public Long getDiskOfferingId() {
-        return diskOfferingId;
     }
 
     public void setDynamicallyScalable(boolean dynamicallyScalable) {

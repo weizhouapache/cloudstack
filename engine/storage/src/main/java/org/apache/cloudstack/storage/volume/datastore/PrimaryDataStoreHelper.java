@@ -98,6 +98,7 @@ public class PrimaryDataStoreHelper {
         dataStoreVO.setCapacityBytes(params.getCapacityBytes());
         dataStoreVO.setUsedBytes(params.getUsedBytes());
         dataStoreVO.setHypervisor(params.getHypervisorType());
+        dataStoreVO.setKrbdPath(params.getKrbdPath());
 
         Map<String, String> details = params.getDetails();
         if (params.getType() == StoragePoolType.SMB && details != null) {

@@ -101,6 +101,8 @@ public interface StoragePool extends Identity, InternalIdentity {
 
     String getStorageProviderName();
 
+    String getKrbdPath();
+
     boolean isInMaintenance();
 
     Hypervisor.HypervisorType getHypervisor();

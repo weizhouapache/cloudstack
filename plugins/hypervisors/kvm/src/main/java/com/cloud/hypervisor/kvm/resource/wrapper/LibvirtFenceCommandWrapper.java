@@ -64,6 +64,10 @@ public final class LibvirtFenceCommandWrapper extends CommandWrapper<FenceComman
             String logline = String.format("No RBD storage pools found. No way to safely fence %s on host %s", command.getVmName(), command.getHostGuid());
             s_logger.warn(logline);
             return new FenceAnswer(command, false, logline);
+        }else if (rbdpools.size() == 0) {
+            String logline = "No RBD storage pools found. No way to safely fence " + command.getVmName() + " on host " + command.getHostGuid();
+            s_logger.warn(logline);
+            return new FenceAnswer(command, false, logline);
         }
 
         final KVMHAChecker ha = new KVMHAChecker(nfspools, rbdpools, command.getHostIp());

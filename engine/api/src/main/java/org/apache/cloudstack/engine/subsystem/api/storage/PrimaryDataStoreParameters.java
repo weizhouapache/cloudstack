@@ -43,6 +43,8 @@ public class PrimaryDataStoreParameters {
     private boolean managed;
     private Long capacityIops;
 
+    private String krbdPath;
+
     /**
      * @return the userInfo
      */
@@ -277,4 +279,8 @@ public class PrimaryDataStoreParameters {
     public void setUsedBytes(long usedBytes) {
         this.usedBytes = usedBytes;
     }
+
+    public String getKrbdPath() { return krbdPath; }
+
+    public void setKrbdPath(String krbdPath) { this.krbdPath = krbdPath; }
 }

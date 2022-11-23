@@ -16,31 +16,20 @@
 // under the License.
 package org.apache.cloudstack.outofbandmanagement;
 
-import com.cloud.alert.AlertManager;
-import com.cloud.dc.ClusterDetailsDao;
-import com.cloud.dc.ClusterDetailsVO;
-import com.cloud.dc.DataCenter;
-import com.cloud.dc.DataCenterDetailVO;
-import com.cloud.dc.dao.DataCenterDetailsDao;
-import com.cloud.domain.Domain;
-import com.cloud.event.ActionEvent;
-import com.cloud.event.ActionEventUtils;
-import com.cloud.event.EventTypes;
-import com.cloud.host.Host;
-import com.cloud.host.dao.HostDao;
-import com.cloud.org.Cluster;
-import com.cloud.resource.ResourceState;
-import com.cloud.utils.component.Manager;
-import com.cloud.utils.component.ManagerBase;
-import com.cloud.utils.db.Transaction;
-import com.cloud.utils.db.TransactionCallback;
-import com.cloud.utils.db.TransactionStatus;
-import com.cloud.utils.exception.CloudRuntimeException;
-import com.cloud.utils.fsm.NoTransitionException;
-import org.apache.commons.lang3.StringUtils;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.collect.ImmutableMap;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import javax.inject.Inject;
+import javax.naming.ConfigurationException;
+
+import org.apache.cloudstack.api.ApiCommandResourceType;
 import org.apache.cloudstack.api.response.OutOfBandManagementResponse;
 import org.apache.cloudstack.context.CallContext;
 import org.apache.cloudstack.framework.config.ConfigKey;
@@ -53,20 +42,36 @@ import org.apache.cloudstack.outofbandmanagement.driver.OutOfBandManagementDrive
 import org.apache.cloudstack.poll.BackgroundPollManager;
 import org.apache.cloudstack.poll.BackgroundPollTask;
 import org.apache.cloudstack.utils.identity.ManagementServerNode;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 import org.springframework.stereotype.Component;
 
-import javax.inject.Inject;
-import javax.naming.ConfigurationException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import com.cloud.alert.AlertManager;
+import com.cloud.dc.ClusterDetailsDao;
+import com.cloud.dc.ClusterDetailsVO;
+import com.cloud.dc.DataCenter;
+import com.cloud.dc.DataCenterDetailVO;
+import com.cloud.dc.dao.DataCenterDetailsDao;
+import com.cloud.domain.Domain;
+import com.cloud.event.ActionEvent;
+import com.cloud.event.ActionEventUtils;
+import com.cloud.event.EventTypes;
+import com.cloud.host.DetailVO;
+import com.cloud.host.Host;
+import com.cloud.host.dao.HostDao;
+import com.cloud.host.dao.HostDetailsDao;
+import com.cloud.org.Cluster;
+import com.cloud.resource.ResourceState;
+import com.cloud.utils.component.Manager;
+import com.cloud.utils.component.ManagerBase;
+import com.cloud.utils.db.Transaction;
+import com.cloud.utils.db.TransactionCallback;
+import com.cloud.utils.db.TransactionStatus;
+import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.utils.fsm.NoTransitionException;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.collect.ImmutableMap;
 
 @Component
 public class OutOfBandManagementServiceImpl extends ManagerBase implements OutOfBandManagementService, Manager, Configurable {
@@ -78,6 +83,8 @@ public class OutOfBandManagementServiceImpl extends ManagerBase implements OutOf
     private DataCenterDetailsDao dataCenterDetailsDao;
     @Inject
     private OutOfBandManagementDao outOfBandManagementDao;
+    @Inject
+    private HostDetailsDao hostDetailsDao;
     @Inject
     private HostDao hostDao;
     @Inject
@@ -213,11 +220,12 @@ public class OutOfBandManagementServiceImpl extends ManagerBase implements OutOf
                 LOG.debug(message);
                 if (newPowerState == OutOfBandManagement.PowerState.Unknown) {
                     ActionEventUtils.onActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(), Domain.ROOT_DOMAIN,
-                            EventTypes.EVENT_HOST_OUTOFBAND_MANAGEMENT_POWERSTATE_TRANSITION, message);
+                            EventTypes.EVENT_HOST_OUTOFBAND_MANAGEMENT_POWERSTATE_TRANSITION, message, host.getId(), ApiCommandResourceType.Host.toString());
                 }
             }
             return result;
         } catch (NoTransitionException ignored) {
+            if(currentPowerState.toEvent() == OutOfBandManagement.PowerState.Event.Off)   return true;
             LOG.trace(String.format("Unable to transition out-of-band management power state for %s for the event: %s and current power state: %s", host, event, currentPowerState));
         }
         return false;
@@ -388,6 +396,28 @@ public class OutOfBandManagementServiceImpl extends ManagerBase implements OutOf
             throw new CloudRuntimeException(String.format("Failed to update out-of-band management config for %s in the database.", host));
         }
 
+        String mgconsoleprotocol = options.get(OutOfBandManagement.Option.MGCONSOLEPROTOCOL);
+        String mgconsoleport = options.get(OutOfBandManagement.Option.MGCONSOLEPORT);
+        if(mgconsoleprotocol.equals("http")) {
+            mgconsoleport = (mgconsoleport == null)?"80":mgconsoleport;
+        } else {
+            mgconsoleport = (mgconsoleport == null)?"443":mgconsoleport;
+        }
+
+        if (hostDetailsDao.findDetail(host.getId(), "manageconsoleport") == null) {
+            DetailVO detail = new DetailVO(host.getId(), "manageconsoleprotocol", mgconsoleprotocol);
+            hostDetailsDao.persist(detail);
+            detail = new DetailVO(host.getId(), "manageconsoleport", mgconsoleport);
+            hostDetailsDao.persist(detail);
+        } else {
+            DetailVO detail = hostDetailsDao.findDetail(host.getId(), "manageconsoleprotocol");
+            detail.setValue(mgconsoleprotocol);
+            hostDetailsDao.update(detail.getId(), detail);
+            detail = hostDetailsDao.findDetail(host.getId(), "manageconsoleport");
+            detail.setValue(mgconsoleport);
+            hostDetailsDao.update(detail.getId(), detail);
+        }
+
         String result = String.format("Out-of-band management successfully configured for %s.", host);
         LOG.debug(result);
 
@@ -426,6 +456,7 @@ public class OutOfBandManagementServiceImpl extends ManagerBase implements OutOf
             if (driverResponse.hasAuthFailure()) {
                 errorMessage = String.format("Out-of-band Management action [%s] on %s failed due to authentication error: %s. Please check configured credentials.", powerOperation, host, driverResponse.getError());
                 sendAuthError(host, errorMessage);
+                throw new CloudRuntimeException(errorMessage);
             }
             if (!powerOperation.equals(OutOfBandManagement.PowerOperation.STATUS)) {
                 LOG.debug(errorMessage);

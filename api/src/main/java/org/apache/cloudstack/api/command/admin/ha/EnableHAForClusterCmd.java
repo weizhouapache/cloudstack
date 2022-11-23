@@ -58,12 +58,19 @@ public final class EnableHAForClusterCmd extends BaseAsyncCmd {
             description = "ID of the cluster", required = true, validations = {ApiArgValidator.PositiveNumber})
     private Long clusterId;
 
+    @Parameter(name = ApiConstants.INCLUDE_HOST, type = CommandType.BOOLEAN, required = false, description = "Whether the host in the cluster has ha enabled")
+    private Boolean includeHost;
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
 
     public Long getClusterId() {
         return clusterId;
+    }
+
+    public boolean includeHost() {
+        return (includeHost != null) ? includeHost : false;
     }
 
     /////////////////////////////////////////////////////
@@ -95,7 +102,7 @@ public final class EnableHAForClusterCmd extends BaseAsyncCmd {
             throw new ServerApiException(ApiErrorCode.PARAM_ERROR, "Unable to find cluster by ID: " + getClusterId());
         }
 
-        final boolean result = haConfigManager.enableHA(cluster);
+        final boolean result = haConfigManager.enableHA(cluster, includeHost());
         CallContext.current().setEventDetails("Cluster Id:" + cluster.getId() + " HA enabled: true");
         CallContext.current().putContextParameter(Cluster.class, cluster.getUuid());
 

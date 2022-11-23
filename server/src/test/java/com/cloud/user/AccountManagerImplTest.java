@@ -89,6 +89,9 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
     @Mock
     private Project project;
 
+    @Mock
+    PasswordPolicyImpl passwordPolicyMock;
+
 
     @Before
     public void beforeTest() {
@@ -109,7 +112,7 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
     @Test
     public void disableAccountDisabled() throws ConcurrentOperationException, ResourceUnavailableException {
         AccountVO disabledAccount = new AccountVO();
-        disabledAccount.setState(State.disabled);
+        disabledAccount.setState(State.DISABLED);
         Mockito.when(_accountDao.findById(42l)).thenReturn(disabledAccount);
         Assert.assertTrue(accountManagerImpl.disableAccount(42));
     }
@@ -117,7 +120,7 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
     @Test
     public void disableAccount() throws ConcurrentOperationException, ResourceUnavailableException {
         AccountVO account = new AccountVO();
-        account.setState(State.enabled);
+        account.setState(State.ENABLED);
         Mockito.when(_accountDao.findById(42l)).thenReturn(account);
         Mockito.when(_accountDao.createForUpdate()).thenReturn(new AccountVO());
         Mockito.when(_accountDao.update(Mockito.eq(42l), Mockito.any(AccountVO.class))).thenReturn(true);
@@ -178,7 +181,7 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
 
         UserAccountVO userAccountVO = new UserAccountVO();
         userAccountVO.setSource(User.Source.UNKNOWN);
-        userAccountVO.setState(Account.State.disabled.toString());
+        userAccountVO.setState(Account.State.DISABLED.toString());
         Mockito.when(userAccountDaoMock.getUserAccount("test", 1L)).thenReturn(userAccountVO);
         Mockito.when(userAuthenticator.authenticate("test", "fail", 1L, null)).thenReturn(failureAuthenticationPair);
         Mockito.lenient().when(userAuthenticator.authenticate("test", null, 1L, null)).thenReturn(successAuthenticationPair);
@@ -356,7 +359,7 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
     @Test
     public void retrieveAndValidateAccountTestAccountTypeEqualsProjectType() {
         Mockito.doReturn(accountMockId).when(userVoMock).getAccountId();
-        Mockito.lenient().doReturn(Account.ACCOUNT_TYPE_PROJECT).when(accountMock).getType();
+        Mockito.lenient().doReturn(Account.Type.PROJECT).when(accountMock).getType();
         Mockito.doReturn(callingAccount).when(_accountDao).findById(accountMockId);
         Mockito.doNothing().when(accountManagerImpl).checkAccess(Mockito.any(Account.class), Mockito.any(AccessType.class), Mockito.anyBoolean(), Mockito.any(Account.class));
 
@@ -561,6 +564,10 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
         Mockito.doReturn(false).when(accountManagerImpl).isDomainAdmin(accountMockId);
         Mockito.lenient().doReturn(true).when(accountManagerImpl).isResourceDomainAdmin(accountMockId);
 
+        Mockito.doReturn(accountMock).when(accountManagerImpl).getAccount(Mockito.anyLong());
+
+        Mockito.lenient().doNothing().when(passwordPolicyMock).verifyIfPasswordCompliesWithPasswordPolicies(Mockito.anyString(), Mockito.anyString(), Mockito.anyLong());
+
         accountManagerImpl.validateUserPasswordAndUpdateIfNeeded("newPassword", userVoMock, "  ");
     }
 
@@ -571,6 +578,10 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
         Mockito.doReturn(false).when(accountManagerImpl).isDomainAdmin(accountMockId);
 
         Mockito.lenient().doNothing().when(accountManagerImpl).validateCurrentPassword(Mockito.eq(userVoMock), Mockito.anyString());
+
+        Mockito.doReturn(accountMock).when(accountManagerImpl).getAccount(Mockito.anyLong());
+
+        Mockito.lenient().doNothing().when(passwordPolicyMock).verifyIfPasswordCompliesWithPasswordPolicies(Mockito.anyString(), Mockito.anyString(), Mockito.anyLong());
 
         accountManagerImpl.validateUserPasswordAndUpdateIfNeeded("newPassword", userVoMock, null);
     }
@@ -586,6 +597,10 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
         String expectedUserPasswordAfterEncoded = configureUserMockAuthenticators(newPassword);
 
         Mockito.lenient().doNothing().when(accountManagerImpl).validateCurrentPassword(Mockito.eq(userVoMock), Mockito.anyString());
+
+        Mockito.doReturn(accountMock).when(accountManagerImpl).getAccount(Mockito.anyLong());
+
+        Mockito.lenient().doNothing().when(passwordPolicyMock).verifyIfPasswordCompliesWithPasswordPolicies(Mockito.anyString(), Mockito.anyString(), Mockito.anyLong());
 
         accountManagerImpl.validateUserPasswordAndUpdateIfNeeded(newPassword, userVoMock, null);
 
@@ -605,6 +620,10 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
 
         Mockito.lenient().doNothing().when(accountManagerImpl).validateCurrentPassword(Mockito.eq(userVoMock), Mockito.anyString());
 
+        Mockito.doReturn(accountMock).when(accountManagerImpl).getAccount(Mockito.anyLong());
+
+        Mockito.lenient().doNothing().when(passwordPolicyMock).verifyIfPasswordCompliesWithPasswordPolicies(Mockito.anyString(), Mockito.anyString(), Mockito.anyLong());
+
         accountManagerImpl.validateUserPasswordAndUpdateIfNeeded(newPassword, userVoMock, null);
 
         Mockito.verify(accountManagerImpl, Mockito.times(0)).validateCurrentPassword(Mockito.eq(userVoMock), Mockito.anyString());
@@ -623,10 +642,31 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
         Mockito.doNothing().when(accountManagerImpl).validateCurrentPassword(Mockito.eq(userVoMock), Mockito.anyString());
 
         String currentPassword = "theCurrentPassword";
+
+        Mockito.doReturn(accountMock).when(accountManagerImpl).getAccount(Mockito.anyLong());
+
+        Mockito.lenient().doNothing().when(passwordPolicyMock).verifyIfPasswordCompliesWithPasswordPolicies(Mockito.anyString(), Mockito.anyString(), Mockito.anyLong());
+
         accountManagerImpl.validateUserPasswordAndUpdateIfNeeded(newPassword, userVoMock, currentPassword);
 
         Mockito.verify(accountManagerImpl, Mockito.times(1)).validateCurrentPassword(userVoMock, currentPassword);
         Mockito.verify(userVoMock, Mockito.times(1)).setPassword(expectedUserPasswordAfterEncoded);
+    }
+
+    @Test (expected = InvalidParameterValueException.class)
+    public void validateUserPasswordAndUpdateIfNeededTestIfVerifyIfPasswordCompliesWithPasswordPoliciesThrowsException() {
+        String newPassword = "newPassword";
+
+        String currentPassword = "theCurrentPassword";
+
+        Mockito.doReturn(accountMock).when(accountManagerImpl).getAccount(Mockito.anyLong());
+
+        Mockito.doReturn("user").when(userVoMock).getUsername();
+
+        Mockito.doThrow(new InvalidParameterValueException("")).when(passwordPolicyMock).verifyIfPasswordCompliesWithPasswordPolicies(Mockito.anyString(), Mockito.anyString(),
+                Mockito.anyLong());
+
+        accountManagerImpl.validateUserPasswordAndUpdateIfNeeded(newPassword, userVoMock, currentPassword);
     }
 
     private String configureUserMockAuthenticators(String newPassword) {
@@ -710,4 +750,31 @@ public class AccountManagerImplTest extends AccountManagetImplTestBase {
         Mockito.verify(authenticatorMock2, Mockito.times(1)).authenticate(username, currentPassword, domainId, null);
     }
 
+    @Test
+    public void testUpdateLoginAttemptsDisableMechanism() {
+        accountManagerImpl.updateLoginAttemptsWhenIncorrectLoginAttemptsEnabled(userAccountVO, true, 0);
+        Mockito.verify(accountManagerImpl, Mockito.never()).updateLoginAttempts(Mockito.anyLong(), Mockito.anyInt(), Mockito.anyBoolean());
+    }
+
+    @Test
+    public void testUpdateLoginAttemptsEnableMechanismAttemptsLeft() {
+        int attempts = 2;
+        int allowedAttempts = 5;
+        Long accountId = 1L;
+        Mockito.when(userAccountVO.getLoginAttempts()).thenReturn(attempts);
+        Mockito.when(userAccountVO.getId()).thenReturn(accountId);
+        accountManagerImpl.updateLoginAttemptsWhenIncorrectLoginAttemptsEnabled(userAccountVO, true, allowedAttempts);
+        Mockito.verify(accountManagerImpl).updateLoginAttempts(Mockito.eq(accountId), Mockito.eq(attempts + 1), Mockito.eq(false));
+    }
+
+    @Test
+    public void testUpdateLoginAttemptsEnableMechanismNoAttemptsLeft() {
+        int attempts = 5;
+        int allowedAttempts = 5;
+        Long accountId = 1L;
+        Mockito.when(userAccountVO.getLoginAttempts()).thenReturn(attempts);
+        Mockito.when(userAccountVO.getId()).thenReturn(accountId);
+        accountManagerImpl.updateLoginAttemptsWhenIncorrectLoginAttemptsEnabled(userAccountVO, true, allowedAttempts);
+        Mockito.verify(accountManagerImpl).updateLoginAttempts(Mockito.eq(accountId), Mockito.eq(allowedAttempts), Mockito.eq(true));
+    }
 }

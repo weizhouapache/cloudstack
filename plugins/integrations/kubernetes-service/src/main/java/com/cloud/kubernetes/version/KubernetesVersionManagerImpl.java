@@ -105,6 +105,7 @@ public class KubernetesVersionManagerImpl extends ManagerBase implements Kuberne
             response.setIsoName(template.getName());
             response.setIsoState(template.getState().toString());
         }
+        response.setCreated(kubernetesSupportedVersion.getCreated());
         return response;
     }
 
@@ -266,6 +267,7 @@ public class KubernetesVersionManagerImpl extends ManagerBase implements Kuberne
             sc.addAnd("zoneId", SearchCriteria.Op.SC, scc);
         }
         if(keyword != null){
+            sc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.setParameters("keyword", "%" + keyword + "%");
         }
         List <KubernetesSupportedVersionVO> versions = kubernetesSupportedVersionDao.search(sc, searchFilter);

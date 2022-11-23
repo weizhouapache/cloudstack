@@ -36,6 +36,8 @@ import java.util.Random;
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
+import com.cloud.exception.StorageConflictException;
+import com.cloud.exception.StorageUnavailableException;
 import org.apache.cloudstack.annotation.AnnotationService;
 import org.apache.cloudstack.annotation.dao.AnnotationDao;
 import org.apache.cloudstack.api.ApiConstants;
@@ -578,6 +580,7 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
                 }
                 s_logger.info("External cluster has been successfully discovered by " + discoverer.getName());
                 success = true;
+                CallContext.current().putContextParameter(Cluster.class, cluster.getUuid());
                 return result;
             }
 
@@ -807,9 +810,18 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
             try {
                 resources = discoverer.find(dcId, podId, clusterId, uri, username, password, hostTags);
             } catch (final DiscoveryException e) {
-                throw e;
+                String errorMsg = String.format("Could not add host at [%s] with zone [%s], pod [%s] and cluster [%s] due to: [%s].",
+                        uri, dcId, podId, clusterId, e.getMessage());
+                if (s_logger.isDebugEnabled()) {
+                    s_logger.debug(errorMsg, e);
+                }
+                throw new DiscoveryException(errorMsg, e);
             } catch (final Exception e) {
-                s_logger.info("Exception in host discovery process with discoverer: " + discoverer.getName() + ", skip to another discoverer if there is any");
+                String err = "Exception in host discovery process with discoverer: " + discoverer.getName();
+                s_logger.info(err + ", skip to another discoverer if there is any");
+                if (s_logger.isDebugEnabled()) {
+                    s_logger.debug(err + ":" + e.getMessage(), e);
+                }
             }
             processResourceEvent(ResourceListener.EVENT_DISCOVER_AFTER, resources);
 
@@ -863,8 +875,9 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
             s_logger.warn(msg);
             throw new DiscoveryException(msg);
         }
-        s_logger.warn("Unable to find the server resources at " + url);
-        throw new DiscoveryException("Unable to add the host");
+        String errorMsg = "Cannot find the server resources at " + url;
+        s_logger.warn(errorMsg);
+        throw new DiscoveryException("Unable to add the host: " + errorMsg);
     }
 
     @Override
@@ -1319,7 +1332,7 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
             throw new CloudRuntimeException(err + e.getMessage());
         }
 
-        ActionEventUtils.onStartedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(), EventTypes.EVENT_MAINTENANCE_PREPARE, "starting maintenance for host " + hostId, true, 0);
+        ActionEventUtils.onStartedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(), EventTypes.EVENT_MAINTENANCE_PREPARE, "starting maintenance for host " + hostId, hostId, null, true, 0);
         _agentMgr.pullAgentToMaintenance(hostId);
 
         /* TODO: move below to listener */
@@ -1640,7 +1653,7 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
         resourceStateTransitTo(host, ResourceState.Event.InternalEnterMaintenance, _nodeId);
         ActionEventUtils.onCompletedActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(),
                 EventVO.LEVEL_INFO, EventTypes.EVENT_MAINTENANCE_PREPARE,
-                "completed maintenance for host " + host.getId(), 0);
+                "completed maintenance for host " + host.getId(), host.getId(), null, 0);
         return true;
     }
 
@@ -1816,6 +1829,9 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
         }
         final List<String> hostTags = cmd.getHostTags();
         if (hostTags != null) {
+            List<VMInstanceVO> activeVMs =  _vmDao.listByHostId(hostId);
+            s_logger.warn(String.format("The following active VMs [%s] are using the host [%s]. Updating the host tags will not affect them.", activeVMs, host));
+
             if (s_logger.isDebugEnabled()) {
                 s_logger.debug("Updating Host Tags to :" + hostTags);
             }
@@ -1825,6 +1841,11 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
         final String url = cmd.getUrl();
         if (url != null) {
             _storageMgr.updateSecondaryStorage(cmd.getId(), cmd.getUrl());
+        }
+        try {
+            _storageMgr.enableHost(hostId);
+        } catch (StorageUnavailableException | StorageConflictException e) {
+            s_logger.error(String.format("Failed to setup host %s when enabled", host));
         }
 
         final HostVO updatedHost = _hostDao.findById(hostId);
@@ -2160,7 +2181,7 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
             final List<String> implicitHostTags = ssCmd.getHostTags();
             if (!implicitHostTags.isEmpty()) {
                 if (hostTags == null) {
-                    hostTags = _hostTagsDao.gethostTags(host.getId());
+                    hostTags = _hostTagsDao.getHostTags(host.getId());
                 }
                 if (hostTags != null) {
                     implicitHostTags.removeAll(hostTags);
@@ -3172,7 +3193,7 @@ public class ResourceManagerImpl extends ManagerBase implements ResourceManager,
 
     @Override
     public String getHostTags(final long hostId) {
-        final List<String> hostTags = _hostTagsDao.gethostTags(hostId);
+        final List<String> hostTags = _hostTagsDao.getHostTags(hostId);
         if (hostTags == null) {
             return null;
         } else {

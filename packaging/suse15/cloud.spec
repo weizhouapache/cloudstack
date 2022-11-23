@@ -60,6 +60,8 @@ Requires: java-11-openjdk
 Requires: python3
 Requires: bash
 Requires: gawk
+Requires: which
+Requires: file
 Requires: bzip2
 Requires: gzip
 Requires: unzip
@@ -78,6 +80,7 @@ Requires: mkisofs
 Requires: ipmitool
 Requires: %{name}-common = %{_ver}
 Requires: qemu-tools
+Requires: rng-tools
 Requires: python3-pip
 Requires: python3-setuptools
 Requires: libgcrypt20
@@ -111,6 +114,8 @@ Requires: ipset
 Requires: perl
 Requires: python3-libvirt-python
 Requires: qemu-kvm
+Requires: cryptsetup
+Requires: rng-tools
 Requires: libgcrypt20
 Requires: qemu-tools
 Provides: cloud-agent
@@ -202,6 +207,11 @@ if [ "%{_sim}" == "SIMULATOR" -o "%{_sim}" == "simulator" ] ; then
    FLAGS="$FLAGS -Dsimulator"
 fi
 
+if [ \"%{_temp}\" != "" ]; then
+    echo "Adding flags to package requested templates"
+    FLAGS="$FLAGS `rpm --eval %{?_temp}`"
+fi
+
 mvn -Psystemvm,developer $FLAGS clean package
 cd ui && npm install && npm run build && cd ..
 
@@ -226,7 +236,7 @@ mkdir -p ${RPM_BUILD_ROOT}%{_datadir}/%{name}-common/vms
 mkdir -p ${RPM_BUILD_ROOT}%{python_sitearch}/
 mkdir -p ${RPM_BUILD_ROOT}/usr/bin
 cp -r scripts/* ${RPM_BUILD_ROOT}%{_datadir}/%{name}-common/scripts
-install -D systemvm/dist/systemvm.iso ${RPM_BUILD_ROOT}%{_datadir}/%{name}-common/vms/systemvm.iso
+install -D systemvm/dist/* ${RPM_BUILD_ROOT}%{_datadir}/%{name}-common/vms/
 install python/lib/cloud_utils.py ${RPM_BUILD_ROOT}%{python_sitearch}/cloud_utils.py
 cp -r python/lib/cloudutils ${RPM_BUILD_ROOT}%{python_sitearch}/
 python3 -m py_compile ${RPM_BUILD_ROOT}%{python_sitearch}/cloud_utils.py
@@ -341,6 +351,8 @@ install -D agent/target/transformed/cloudstack-agent-profile.sh ${RPM_BUILD_ROOT
 install -D agent/target/transformed/cloudstack-agent.logrotate ${RPM_BUILD_ROOT}%{_sysconfdir}/logrotate.d/%{name}-agent
 install -D plugins/hypervisors/kvm/target/cloud-plugin-hypervisor-kvm-%{_maventag}.jar ${RPM_BUILD_ROOT}%{_datadir}/%name-agent/lib/cloud-plugin-hypervisor-kvm-%{_maventag}.jar
 cp plugins/hypervisors/kvm/target/dependencies/*  ${RPM_BUILD_ROOT}%{_datadir}/%{name}-agent/lib
+cp plugins/storage/volume/storpool/target/*.jar  ${RPM_BUILD_ROOT}%{_datadir}/%{name}-agent/lib
+cp plugins/storage/volume/linstor/target/*.jar  ${RPM_BUILD_ROOT}%{_datadir}/%{name}-agent/lib
 
 # Usage server
 mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/%{name}/usage
@@ -395,7 +407,7 @@ install -D tools/whisker/LICENSE ${RPM_BUILD_ROOT}%{_defaultdocdir}/%{name}-inte
 
 %preun management
 /usr/bin/systemctl stop cloudstack-management || true
-/usr/bin/systemctl off cloudstack-management || true
+/usr/bin/systemctl disable cloudstack-management || true
 
 %pre management
 id cloud > /dev/null 2>&1 || /usr/sbin/useradd -M -U -c "CloudStack unprivileged user" \
@@ -424,7 +436,8 @@ fi
 # Install mysql-connector-python
 pip3 install %{_datadir}/%{name}-management/setup/wheel/six-1.15.0-py2.py3-none-any.whl %{_datadir}/%{name}-management/setup/wheel/setuptools-47.3.1-py3-none-any.whl %{_datadir}/%{name}-management/setup/wheel/protobuf-3.12.2-cp36-cp36m-manylinux1_x86_64.whl %{_datadir}/%{name}-management/setup/wheel/mysql_connector_python-8.0.20-cp36-cp36m-manylinux1_x86_64.whl
 
-/usr/bin/systemctl on cloudstack-management > /dev/null 2>&1 || true
+/usr/bin/systemctl enable cloudstack-management > /dev/null 2>&1 || true
+/usr/bin/systemctl enable --now rngd > /dev/null 2>&1 || true
 
 grep -s -q "db.cloud.driver=jdbc:mysql" "%{_sysconfdir}/%{name}/management/db.properties" || sed -i -e "\$adb.cloud.driver=jdbc:mysql" "%{_sysconfdir}/%{name}/management/db.properties"
 grep -s -q "db.usage.driver=jdbc:mysql" "%{_sysconfdir}/%{name}/management/db.properties" || sed -i -e "\$adb.usage.driver=jdbc:mysql"  "%{_sysconfdir}/%{name}/management/db.properties"
@@ -442,6 +455,13 @@ fi
 chown -R cloud:cloud /var/log/cloudstack/management
 
 systemctl daemon-reload
+
+%posttrans management
+# Print help message
+if [ -f "/usr/share/cloudstack-common/scripts/installer/cloudstack-help-text" ];then
+    sed -i "s,^ACS_VERSION=.*,ACS_VERSION=%{_maventag},g" /usr/share/cloudstack-common/scripts/installer/cloudstack-help-text
+    /usr/share/cloudstack-common/scripts/installer/cloudstack-help-text management
+fi
 
 %preun agent
 /sbin/service cloudstack-agent stop || true
@@ -467,9 +487,10 @@ if [ ! -d %{_sysconfdir}/libvirt/hooks ] ; then
 fi
 cp -a ${RPM_BUILD_ROOT}%{_datadir}/%{name}-agent/lib/libvirtqemuhook %{_sysconfdir}/libvirt/hooks/qemu
 mkdir -m 0755 -p /usr/share/cloudstack-agent/tmp
-/sbin/service libvirtd restart
-/sbin/systemctl enable cloudstack-agent > /dev/null 2>&1 || true
-/sbin/systemctl enable cloudstack-rolling-maintenance@p > /dev/null 2>&1 || true
+/usr/bin/systemctl restart libvirtd
+/usr/bin/systemctl enable cloudstack-agent > /dev/null 2>&1 || true
+/usr/bin/systemctl enable cloudstack-rolling-maintenance@p > /dev/null 2>&1 || true
+/usr/bin/systemctl enable --now rngd > /dev/null 2>&1 || true
 
 # if saved configs from upgrade exist, copy them over
 if [ -f "%{_sysconfdir}/cloud.rpmsave/agent/agent.properties" ]; then
@@ -480,6 +501,13 @@ if [ -f "%{_sysconfdir}/cloud.rpmsave/agent/agent.properties" ]; then
 fi
 
 systemctl daemon-reload
+
+%posttrans agent
+# Print help message
+if [ -f "/usr/share/cloudstack-common/scripts/installer/cloudstack-help-text" ];then
+    sed -i "s,^ACS_VERSION=.*,ACS_VERSION=%{_maventag},g" /usr/share/cloudstack-common/scripts/installer/cloudstack-help-text
+    /usr/share/cloudstack-common/scripts/installer/cloudstack-help-text agent
+fi
 
 %pre usage
 id cloud > /dev/null 2>&1 || /usr/sbin/useradd -M -U -c "CloudStack unprivileged user" \
@@ -507,6 +535,13 @@ fi
 
 if [ ! -f "%{_sysconfdir}/%{name}/usage/key" ]; then
     ln -s %{_sysconfdir}/%{name}/management/key %{_sysconfdir}/%{name}/usage/key
+fi
+
+%posttrans usage
+# Print help message
+if [ -f "/usr/share/cloudstack-common/scripts/installer/cloudstack-help-text" ];then
+    sed -i "s,^ACS_VERSION=.*,ACS_VERSION=%{_maventag},g" /usr/share/cloudstack-common/scripts/installer/cloudstack-help-text
+    /usr/share/cloudstack-common/scripts/installer/cloudstack-help-text usage
 fi
 
 %post marvin
@@ -582,7 +617,9 @@ pip install --upgrade /usr/share/cloudstack-marvin/Marvin-*.tar.gz
 %dir %attr(0755,root,root) %{_datadir}/%{name}-common/vms
 %attr(0755,root,root) %{_datadir}/%{name}-common/scripts
 %attr(0755,root,root) /usr/bin/cloudstack-sccs
-%attr(0644, root, root) %{_datadir}/%{name}-common/vms/systemvm.iso
+%attr(0644, root, root) %{_datadir}/%{name}-common/vms/agent.zip
+%attr(0644, root, root) %{_datadir}/%{name}-common/vms/cloud-scripts.tgz
+%attr(0644, root, root) %{_datadir}/%{name}-common/vms/patch-sysvms.sh
 %attr(0644,root,root) %{python_sitearch}/cloud_utils.py
 %attr(0644,root,root) %{python_sitearch}/__pycache__/*
 %attr(0644,root,root) %{python_sitearch}/cloudutils/*

@@ -28,12 +28,12 @@ import java.util.Map;
 import javax.annotation.PostConstruct;
 import javax.inject.Inject;
 
-import com.cloud.hypervisor.Hypervisor;
 import org.apache.log4j.Logger;
 import org.springframework.stereotype.Component;
 
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.Hypervisor;
 import com.cloud.server.ResourceTag.ResourceObjectType;
 import com.cloud.tags.dao.ResourceTagDao;
 import com.cloud.utils.DateUtil;
@@ -128,6 +128,9 @@ public class VMInstanceDaoImpl extends GenericDaoBase<VMInstanceVO, Long> implem
             "GROUP BY offering.service_offering_id) results GROUP BY pci, type";
 
     private static final String UPDATE_SYSTEM_VM_TEMPLATE_ID_FOR_HYPERVISOR = "UPDATE `cloud`.`vm_instance` SET vm_template_id = ? WHERE type <> 'User' AND hypervisor_type = ? AND removed is NULL";
+
+    private static final String COUNT_VMS_BY_ZONE_AND_STATE_AND_HOST_TAG = "SELECT COUNT(1) FROM vm_instance vi JOIN service_offering so ON vi.service_offering_id=so.id " +
+            "JOIN vm_template vt ON vi.vm_template_id = vt.id WHERE vi.data_center_id = ? AND vi.state = ? AND vi.removed IS NULL AND (so.host_tag = ? OR vt.template_tag = ?)";
 
     @Inject
     protected HostDao _hostDao;
@@ -808,6 +811,28 @@ public class VMInstanceDaoImpl extends GenericDaoBase<VMInstanceVO, Long> implem
     }
 
     @Override
+    public Long countByZoneAndStateAndHostTag(long dcId, State state, String hostTag) {
+        TransactionLegacy txn = TransactionLegacy.currentTxn();
+        PreparedStatement pstmt = null;
+        try {
+            pstmt = txn.prepareAutoCloseStatement(COUNT_VMS_BY_ZONE_AND_STATE_AND_HOST_TAG);
+
+            pstmt.setLong(1, dcId);
+            pstmt.setString(2, String.valueOf(state));
+            pstmt.setString(3, hostTag);
+            pstmt.setString(4, hostTag);
+
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+        } catch (Exception e) {
+            s_logger.warn(String.format("Error counting vms by host tag for dcId= %s, hostTag= %s", dcId, hostTag), e);
+        }
+        return 0L;
+    }
+
+    @Override
     public List<VMInstanceVO> listNonRemovedVmsByTypeAndNetwork(long networkId, VirtualMachine.Type... types) {
         if (NetworkTypeSearch == null) {
 
@@ -961,6 +986,23 @@ public class VMInstanceDaoImpl extends GenericDaoBase<VMInstanceVO, Long> implem
         } catch (Throwable e) {
             throw new CloudRuntimeException("Caught: " + sql, e);
         }
+    }
 
+    @Override
+    public List<VMInstanceVO> listByHostOrLastHostOrHostPod(long hostId, long podId) {
+        SearchBuilder<VMInstanceVO> sb = createSearchBuilder();
+        sb.or().op("hostId", sb.entity().getHostId(), Op.EQ);
+        sb.or("lastHostId", sb.entity().getLastHostId(), Op.EQ);
+        sb.and().op("hostIdNull", sb.entity().getHostId(), SearchCriteria.Op.NULL);
+        sb.and("lastHostIdNull", sb.entity().getHostId(), SearchCriteria.Op.NULL);
+        sb.and("podId", sb.entity().getPodIdToDeployIn(), Op.EQ);
+        sb.cp();
+        sb.cp();
+        sb.done();
+        SearchCriteria<VMInstanceVO> sc = sb.create();
+        sc.setParameters("hostId", String.valueOf(hostId));
+        sc.setParameters("lastHostId", String.valueOf(hostId));
+        sc.setParameters("podId", String.valueOf(podId));
+        return listBy(sc);
     }
 }

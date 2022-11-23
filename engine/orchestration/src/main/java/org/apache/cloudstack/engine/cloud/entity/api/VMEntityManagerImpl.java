@@ -158,6 +158,14 @@ public class VMEntityManagerImpl implements VMEntityManager {
             vmProfile.getParameters().put(VirtualMachineProfile.Param.BootMode, details.get(VirtualMachineProfile.Param.BootMode.getName()));
             vmProfile.getParameters().put(VirtualMachineProfile.Param.UefiFlag, details.get(VirtualMachineProfile.Param.UefiFlag.getName()));
         }
+        if (MapUtils.isNotEmpty(vmEntityVO.getDetails()) &&
+                vmEntityVO.getDetails().containsKey(VirtualMachineProfile.Param.TpmVersion.getName()) &&
+                "V2_0".equalsIgnoreCase(vmEntityVO.getDetails().get(VirtualMachineProfile.Param.TpmVersion.getName()))
+            )
+        {
+            Map<String, String> details = vmEntityVO.getDetails();
+            vmProfile.getParameters().put(VirtualMachineProfile.Param.TpmVersion, details.get(VirtualMachineProfile.Param.TpmVersion.getName()));
+        }
         DataCenterDeployment plan = new DataCenterDeployment(vm.getDataCenterId(), vm.getPodIdToDeployIn(), null, null, null, null);
         if (planToDeploy != null && planToDeploy.getDataCenterId() != 0) {
             plan =
@@ -221,7 +229,7 @@ public class VMEntityManagerImpl implements VMEntityManager {
                 // call retry it.
                 return UUID.randomUUID().toString();
             } else {
-                throw new InsufficientServerCapacityException("Unable to create a deployment for " + vmProfile, DataCenter.class, plan.getDataCenterId(),
+                throw new InsufficientServerCapacityException("No destination found for a deployment for " + vmProfile, DataCenter.class, plan.getDataCenterId(),
                     areAffinityGroupsAssociated(vmProfile));
             }
         }

@@ -64,7 +64,9 @@ public interface OutOfBandManagement extends StateObject<OutOfBandManagement.Pow
         ADDRESS,
         PORT,
         USERNAME,
-        PASSWORD
+        PASSWORD,
+        MGCONSOLEPROTOCOL,
+        MGCONSOLEPORT
     }
 
     /**

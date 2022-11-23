@@ -23,7 +23,6 @@ import static com.cloud.network.NetworkModel.PUBLIC_KEYS_FILE;
 import static com.cloud.network.NetworkModel.USERDATA_DIR;
 import static com.cloud.network.NetworkModel.USERDATA_FILE;
 import static com.cloud.utils.storage.S3.S3Utils.putFile;
-import static java.lang.String.format;
 import static java.util.Arrays.asList;
 
 import java.io.BufferedReader;
@@ -473,6 +472,9 @@ public class NfsSecondaryStorageResource extends ServerResourceBase implements S
 
             long templateId = dataDiskTemplate.getId();
             String templateUniqueName = dataDiskTemplate.getUniqueName();
+            if (s_logger.isDebugEnabled()) {
+                s_logger.debug(String.format("no cmd? %s", cmd.stringRepresentation()));
+            }
             String origDisk = cmd.getPath();
             long virtualSize = dataDiskTemplate.getSize();
             String diskName = origDisk.substring((origDisk.lastIndexOf(File.separator)) + 1);
@@ -802,7 +804,7 @@ public class NfsSecondaryStorageResource extends ServerResourceBase implements S
             return postProcessing(destFile, downloadPath, destPath, srcData, destData);
         } catch (Exception e) {
 
-            final String errMsg = format("Failed to download" + "due to $1%s", e.getMessage());
+            final String errMsg = String.format("Failed to download" + "due to $1%s", e.getMessage());
             s_logger.error(errMsg, e);
             return new CopyCmdAnswer(errMsg);
         }
@@ -1139,7 +1141,7 @@ public class NfsSecondaryStorageResource extends ServerResourceBase implements S
             }
             return new File(destFile.getAbsolutePath());
         } catch (IOException e) {
-            s_logger.debug("Faild to get url:" + url + ", due to " + e.toString());
+            s_logger.debug("Failed to get url: " + url + ", due to " + e.toString());
             throw new CloudRuntimeException(e);
         }
     }
@@ -2278,8 +2280,9 @@ public class NfsSecondaryStorageResource extends ServerResourceBase implements S
                 answer.setInstallPath(uploadEntity.getTmpltPath());
                 answer.setPhysicalSize(uploadEntity.getPhysicalSize());
                 answer.setDownloadPercent(100);
-                answer.setGuestOsInfo(uploadEntity.getGuestOsInfo());
-                answer.setMinimumHardwareVersion(uploadEntity.getMinimumHardwareVersion());
+                if (uploadEntity.getOvfInformationTO() != null) {
+                    answer.setOvfInformationTO(uploadEntity.getOvfInformationTO());
+                }
                 uploadEntityStateMap.remove(entityUuid);
                 return answer;
             } else if (uploadEntity.getUploadState() == UploadEntity.Status.IN_PROGRESS) {
@@ -3274,12 +3277,12 @@ public class NfsSecondaryStorageResource extends ServerResourceBase implements S
                 "accountTemplateDirSize: " + accountTemplateDirSize + " accountSnapshotDirSize: " + accountSnapshotDirSize + " accountVolumeDirSize: " + accountVolumeDirSize);
 
         int accountDirSizeInGB = getSizeInGB(accountTemplateDirSize + accountSnapshotDirSize + accountVolumeDirSize);
-        int defaultMaxAccountSecondaryStorageInGB = Integer.parseInt(cmd.getDefaultMaxAccountSecondaryStorage());
+        long defaultMaxSecondaryStorageInGB = cmd.getDefaultMaxSecondaryStorageInGB();
 
-        if (defaultMaxAccountSecondaryStorageInGB != Resource.RESOURCE_UNLIMITED && (accountDirSizeInGB + contentLengthInGB) > defaultMaxAccountSecondaryStorageInGB) {
-            s_logger.error("accountDirSizeInGb: " + accountDirSizeInGB + " defaultMaxAccountSecondaryStorageInGB: " + defaultMaxAccountSecondaryStorageInGB + " contentLengthInGB:"
+        if (defaultMaxSecondaryStorageInGB != Resource.RESOURCE_UNLIMITED && (accountDirSizeInGB + contentLengthInGB) > defaultMaxSecondaryStorageInGB) {
+            s_logger.error("accountDirSizeInGb: " + accountDirSizeInGB + " defaultMaxSecondaryStorageInGB: " + defaultMaxSecondaryStorageInGB + " contentLengthInGB:"
                     + contentLengthInGB); // extra attention
-            String errorMessage = "Maximum number of resources of type secondary_storage for account has exceeded";
+            String errorMessage = "Maximum number of resources of type secondary_storage for account/project has exceeded";
             updateStateMapWithError(cmd.getEntityUUID(), errorMessage);
             throw new InvalidParameterValueException(errorMessage);
         }
@@ -3422,12 +3425,7 @@ public class NfsSecondaryStorageResource extends ServerResourceBase implements S
                 uploadEntity.setVirtualSize(info.virtualSize);
                 uploadEntity.setPhysicalSize(info.size);
                 if (info.ovfInformationTO != null) {
-                    if (info.ovfInformationTO.getGuestOsInfo() != null) {
-                        uploadEntity.setGuestOsInfo(info.ovfInformationTO.getGuestOsInfo());
-                    }
-                    if (info.ovfInformationTO.getHardwareSection() != null) {
-                        uploadEntity.setMinimumHardwareVersion(info.ovfInformationTO.getHardwareSection().getMinimiumHardwareVersion());
-                    }
+                    uploadEntity.setOvfInformationTO(info.ovfInformationTO);
                 }
                 break;
             }

@@ -16,6 +16,8 @@
 // under the License.
 package com.cloud.kubernetes.cluster;
 
+import static com.cloud.utils.NumbersUtil.toHumanReadableSize;
+
 import java.math.BigInteger;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -32,8 +34,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
@@ -64,6 +64,7 @@ import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.managed.context.ManagedContextRunnable;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 
@@ -121,6 +122,10 @@ import com.cloud.network.dao.NetworkVO;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.FirewallRuleVO;
+import com.cloud.network.security.SecurityGroupManager;
+import com.cloud.network.security.SecurityGroupService;
+import com.cloud.network.security.SecurityGroupVO;
+import com.cloud.network.security.SecurityRule;
 import com.cloud.offering.NetworkOffering;
 import com.cloud.offering.ServiceOffering;
 import com.cloud.offerings.NetworkOfferingServiceMapVO;
@@ -164,9 +169,6 @@ import com.cloud.utils.net.NetUtils;
 import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.dao.VMInstanceDao;
-import org.apache.commons.lang3.StringUtils;
-
-import static com.cloud.utils.NumbersUtil.toHumanReadableSize;
 
 public class KubernetesClusterManagerImpl extends ManagerBase implements KubernetesClusterService {
 
@@ -238,6 +240,10 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
     protected FirewallRulesDao firewallRulesDao;
     @Inject
     private AnnotationDao annotationDao;
+    @Inject
+    private SecurityGroupManager securityGroupManager;
+    @Inject
+    public SecurityGroupService securityGroupService;
 
     private void logMessage(final Level logLevel, final String message, final Exception e) {
         if (logLevel == Level.WARN) {
@@ -428,34 +434,26 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
 
     private void validateDockerRegistryParams(final String dockerRegistryUserName,
                                               final String dockerRegistryPassword,
-                                              final String dockerRegistryUrl,
-                                              final String dockerRegistryEmail) {
+                                              final String dockerRegistryUrl) {
         // if no params related to docker registry specified then nothing to validate so return true
         if ((dockerRegistryUserName == null || dockerRegistryUserName.isEmpty()) &&
                 (dockerRegistryPassword == null || dockerRegistryPassword.isEmpty()) &&
-                (dockerRegistryUrl == null || dockerRegistryUrl.isEmpty()) &&
-                (dockerRegistryEmail == null || dockerRegistryEmail.isEmpty())) {
+                (dockerRegistryUrl == null || dockerRegistryUrl.isEmpty())) {
             return;
         }
 
         // all params related to docker registry must be specified or nothing
         if (!((dockerRegistryUserName != null && !dockerRegistryUserName.isEmpty()) &&
                 (dockerRegistryPassword != null && !dockerRegistryPassword.isEmpty()) &&
-                (dockerRegistryUrl != null && !dockerRegistryUrl.isEmpty()) &&
-                (dockerRegistryEmail != null && !dockerRegistryEmail.isEmpty()))) {
-            throw new InvalidParameterValueException("All the docker private registry parameters (username, password, url, email) required are specified");
+                (dockerRegistryUrl != null && !dockerRegistryUrl.isEmpty()))) {
+
+            throw new InvalidParameterValueException("All the docker private registry parameters (username, password, url) required are specified");
         }
 
         try {
             URL url = new URL(dockerRegistryUrl);
         } catch (MalformedURLException e) {
             throw new InvalidParameterValueException("Invalid docker registry url specified");
-        }
-
-        Pattern VALID_EMAIL_ADDRESS_REGEX = Pattern.compile("^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,6}$", Pattern.CASE_INSENSITIVE);
-        Matcher matcher = VALID_EMAIL_ADDRESS_REGEX.matcher(dockerRegistryEmail);
-        if (!matcher.find()) {
-            throw new InvalidParameterValueException("Invalid docker registry email specified");
         }
     }
 
@@ -473,26 +471,26 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             suitable_host_found = false;
             for (Map.Entry<String, Pair<HostVO, Integer>> hostEntry : hosts_with_resevered_capacity.entrySet()) {
                 Pair<HostVO, Integer> hp = hostEntry.getValue();
-                HostVO h = hp.first();
-                hostDao.loadHostTags(h);
-                if (StringUtils.isNotEmpty(offering.getHostTag()) && !(h.getHostTags() != null && h.getHostTags().contains(offering.getHostTag()))) {
+                HostVO hostVO = hp.first();
+                hostDao.loadHostTags(hostVO);
+                if (!hostVO.checkHostServiceOfferingTags(offering)) {
                     continue;
                 }
                 int reserved = hp.second();
                 reserved++;
-                ClusterVO cluster = clusterDao.findById(h.getClusterId());
+                ClusterVO cluster = clusterDao.findById(hostVO.getClusterId());
                 ClusterDetailsVO cluster_detail_cpu = clusterDetailsDao.findDetail(cluster.getId(), "cpuOvercommitRatio");
                 ClusterDetailsVO cluster_detail_ram = clusterDetailsDao.findDetail(cluster.getId(), "memoryOvercommitRatio");
                 Float cpuOvercommitRatio = Float.parseFloat(cluster_detail_cpu.getValue());
                 Float memoryOvercommitRatio = Float.parseFloat(cluster_detail_ram.getValue());
                 if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(String.format("Checking host ID: %s for capacity already reserved %d", h.getUuid(), reserved));
+                    LOGGER.debug(String.format("Checking host ID: %s for capacity already reserved %d", hostVO.getUuid(), reserved));
                 }
-                if (capacityManager.checkIfHostHasCapacity(h.getId(), cpu_requested * reserved, ram_requested * reserved, false, cpuOvercommitRatio, memoryOvercommitRatio, true)) {
+                if (capacityManager.checkIfHostHasCapacity(hostVO.getId(), cpu_requested * reserved, ram_requested * reserved, false, cpuOvercommitRatio, memoryOvercommitRatio, true)) {
                     if (LOGGER.isDebugEnabled()) {
-                        LOGGER.debug(String.format("Found host ID: %s for with enough capacity, CPU=%d RAM=%s", h.getUuid(), cpu_requested * reserved, toHumanReadableSize(ram_requested * reserved)));
+                        LOGGER.debug(String.format("Found host ID: %s for with enough capacity, CPU=%d RAM=%s", hostVO.getUuid(), cpu_requested * reserved, toHumanReadableSize(ram_requested * reserved)));
                     }
-                    hostEntry.setValue(new Pair<HostVO, Integer>(h, reserved));
+                    hostEntry.setValue(new Pair<HostVO, Integer>(hostVO, reserved));
                     suitable_host_found = true;
                     planCluster = cluster;
                     break;
@@ -542,7 +540,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             response.setKubernetesVersionName(version.getName());
         }
         Account account = ApiDBUtils.findAccountById(kubernetesCluster.getAccountId());
-        if (account.getType() == Account.ACCOUNT_TYPE_PROJECT) {
+        if (account.getType() == Account.Type.PROJECT) {
             Project project = ApiDBUtils.findProjectByProjectAccountId(account.getId());
             response.setProjectId(project.getUuid());
             response.setProjectName(project.getName());
@@ -592,6 +590,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         response.setAutoscalingEnabled(kubernetesCluster.getAutoscalingEnabled());
         response.setMinSize(kubernetesCluster.getMinSize());
         response.setMaxSize(kubernetesCluster.getMaxSize());
+        response.setCreated(kubernetesCluster.getCreated());
         return response;
     }
 
@@ -619,7 +618,6 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         final String dockerRegistryUserName = cmd.getDockerRegistryUserName();
         final String dockerRegistryPassword = cmd.getDockerRegistryPassword();
         final String dockerRegistryUrl = cmd.getDockerRegistryUrl();
-        final String dockerRegistryEmail = cmd.getDockerRegistryEmail();
         final Long nodeRootDiskSize = cmd.getNodeRootDiskSize();
         final String externalLoadBalancerIpAddress = cmd.getExternalLoadBalancerIpAddress();
 
@@ -706,7 +704,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             throw new InvalidParameterValueException("Given service offering ID: %s is not suitable for Kubernetes cluster");
         }
 
-        validateDockerRegistryParams(dockerRegistryUserName, dockerRegistryPassword, dockerRegistryUrl, dockerRegistryEmail);
+        validateDockerRegistryParams(dockerRegistryUserName, dockerRegistryPassword, dockerRegistryUrl);
 
         Network network = null;
         if (networkId != null) {
@@ -728,7 +726,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             }
         }
 
-        if (!KubernetesClusterExperimentalFeaturesEnabled.value() && !StringUtils.isAllEmpty(dockerRegistryUrl, dockerRegistryUserName, dockerRegistryEmail, dockerRegistryPassword)) {
+        if (!KubernetesClusterExperimentalFeaturesEnabled.value() && !StringUtils.isAllEmpty(dockerRegistryUrl, dockerRegistryUserName, dockerRegistryPassword)) {
             throw new CloudRuntimeException(String.format("Private registry for the Kubernetes cluster is an experimental feature. Use %s configuration for enabling experimental features", KubernetesClusterExperimentalFeaturesEnabled.key()));
         }
     }
@@ -765,7 +763,9 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
 
             try {
                 network = networkMgr.createGuestNetwork(networkOffering.getId(), clusterName + "-network", owner.getAccountName() + "-network",
-                        null, null, null, false, null, owner, null, physicalNetwork, zone.getId(), ControlledEntity.ACLType.Account, null, null, null, null, true, null, null, null, null, null);
+                        null, null, null, false, null, owner, null, physicalNetwork, zone.getId(),
+                        ControlledEntity.ACLType.Account, null, null, null, null, true, null,
+                        null, null, null, null, null, null, null, null);
             } catch (ConcurrentOperationException | InsufficientCapacityException | ResourceAllocationException e) {
                 logAndThrow(Level.ERROR, String.format("Unable to create network for the Kubernetes cluster: %s", clusterName));
             }
@@ -778,7 +778,6 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         final String dockerRegistryUserName = cmd.getDockerRegistryUserName();
         final String dockerRegistryPassword = cmd.getDockerRegistryPassword();
         final String dockerRegistryUrl = cmd.getDockerRegistryUrl();
-        final String dockerRegistryEmail = cmd.getDockerRegistryEmail();
         final boolean networkCleanup = cmd.getNetworkId() == null;
         Transaction.execute(new TransactionCallbackNoReturn() {
             @Override
@@ -793,9 +792,8 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
                 addKubernetesClusterDetailIfIsNotEmpty(details, kubernetesClusterId, ApiConstants.DOCKER_REGISTRY_USER_NAME, dockerRegistryUserName, true);
                 addKubernetesClusterDetailIfIsNotEmpty(details, kubernetesClusterId, ApiConstants.DOCKER_REGISTRY_PASSWORD, dockerRegistryPassword, false);
                 addKubernetesClusterDetailIfIsNotEmpty(details, kubernetesClusterId, ApiConstants.DOCKER_REGISTRY_URL, dockerRegistryUrl, true);
-                addKubernetesClusterDetailIfIsNotEmpty(details, kubernetesClusterId, ApiConstants.DOCKER_REGISTRY_EMAIL, dockerRegistryEmail, true);
 
-                details.add(new KubernetesClusterDetailsVO(kubernetesClusterId, ApiConstants.USERNAME, "admin", true));
+                details.add(new KubernetesClusterDetailsVO(kubernetesCluster.getId(), ApiConstants.USERNAME, "admin", true));
                 SecureRandom random = new SecureRandom();
                 String randomPassword = new BigInteger(130, random).toString(32);
                 details.add(new KubernetesClusterDetailsVO(kubernetesClusterId, ApiConstants.PASSWORD, randomPassword, false));
@@ -1052,17 +1050,39 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             logAndThrow(Level.ERROR, String.format("Creating Kubernetes cluster failed due to error while finding suitable deployment plan for cluster in zone : %s", zone.getName()));
         }
 
+        SecurityGroupVO securityGroupVO = null;
+        if (zone.isSecurityGroupEnabled()) {
+            securityGroupVO = securityGroupManager.createSecurityGroup(KubernetesClusterActionWorker.CKS_CLUSTER_SECURITY_GROUP_NAME.concat(Long.toHexString(System.currentTimeMillis())), "Security group for CKS nodes", owner.getDomainId(), owner.getId(), owner.getAccountName());
+            if (securityGroupVO == null) {
+                throw new CloudRuntimeException(String.format("Failed to create security group: %s", KubernetesClusterActionWorker.CKS_CLUSTER_SECURITY_GROUP_NAME));
+            }
+            List<String> cidrList = new ArrayList<>();
+            cidrList.add(NetUtils.ALL_IP4_CIDRS);
+            securityGroupService.authorizeSecurityGroupRule(securityGroupVO.getId(), NetUtils.TCP_PROTO,
+                    KubernetesClusterActionWorker.CLUSTER_NODES_DEFAULT_SSH_PORT_SG, KubernetesClusterActionWorker.CLUSTER_NODES_DEFAULT_SSH_PORT_SG,
+                    null, null, cidrList, null, SecurityRule.SecurityRuleType.IngressRule);
+            securityGroupService.authorizeSecurityGroupRule(securityGroupVO.getId(), NetUtils.TCP_PROTO,
+                    KubernetesClusterActionWorker.CLUSTER_API_PORT, KubernetesClusterActionWorker.CLUSTER_API_PORT,
+                    null, null, cidrList, null, SecurityRule.SecurityRuleType.IngressRule);
+            securityGroupService.authorizeSecurityGroupRule(securityGroupVO.getId(), NetUtils.ALL_PROTO,
+                    null, null, null, null, cidrList, null, SecurityRule.SecurityRuleType.EgressRule);
+        }
+
         final Network defaultNetwork = getKubernetesClusterNetworkIfMissing(cmd.getName(), zone, owner, (int)controlNodeCount, (int)clusterSize, cmd.getExternalLoadBalancerIpAddress(), cmd.getNetworkId());
         final VMTemplateVO finalTemplate = getKubernetesServiceTemplate(zone, deployDestination.getCluster().getHypervisorType());
         final long cores = serviceOffering.getCpu() * (controlNodeCount + clusterSize);
         final long memory = serviceOffering.getRamSize() * (controlNodeCount + clusterSize);
 
+        SecurityGroupVO finalSecurityGroupVO = securityGroupVO;
         final KubernetesClusterVO cluster = Transaction.execute(new TransactionCallback<KubernetesClusterVO>() {
             @Override
             public KubernetesClusterVO doInTransaction(TransactionStatus status) {
                 KubernetesClusterVO newCluster = new KubernetesClusterVO(cmd.getName(), cmd.getDisplayName(), zone.getId(), clusterKubernetesVersion.getId(),
                         serviceOffering.getId(), finalTemplate.getId(), defaultNetwork.getId(), owner.getDomainId(),
                         owner.getAccountId(), controlNodeCount, clusterSize, KubernetesCluster.State.Created, cmd.getSSHKeyPairName(), cores, memory, cmd.getNodeRootDiskSize(), "");
+                if (zone.isSecurityGroupEnabled()) {
+                    newCluster.setSecurityGroupId(finalSecurityGroupVO.getId());
+                }
                 kubernetesClusterDao.persist(newCluster);
                 return newCluster;
             }
@@ -1122,8 +1142,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         startWorker = ComponentContext.inject(startWorker);
         if (onCreate) {
             // Start for Kubernetes cluster in 'Created' state
-            Account owner = accountService.getActiveAccountById(kubernetesCluster.getAccountId());
-            String[] keys = getServiceUserKeys(owner);
+            String[] keys = getServiceUserKeys(kubernetesCluster);
             startWorker.setKeys(keys);
             return startWorker.startKubernetesClusterOnCreate();
         } else {
@@ -1132,8 +1151,9 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         }
     }
 
-    private String[] getServiceUserKeys(Account owner) {
-        if (owner == null) {
+    private String[] getServiceUserKeys(KubernetesClusterVO kubernetesCluster) {
+        Account owner = accountService.getActiveAccountById(kubernetesCluster.getAccountId());
+        if (owner == null || owner.getType() == Account.Type.PROJECT) {
             owner = CallContext.current().getCallingAccount();
         }
         String username = owner.getAccountName() + "-" + KUBEADMIN_ACCOUNT_NAME;
@@ -1231,6 +1251,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
             sc.setParameters("state", state);
         }
         if(keyword != null){
+            sc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.setParameters("keyword", "%" + keyword + "%");
         }
         if (clusterId != null) {
@@ -1284,8 +1305,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         validateKubernetesClusterScaleParameters(cmd);
 
         KubernetesClusterVO kubernetesCluster = kubernetesClusterDao.findById(cmd.getId());
-        Account owner = accountService.getActiveAccountById(kubernetesCluster.getAccountId());
-        String[] keys = getServiceUserKeys(owner);
+        String[] keys = getServiceUserKeys(kubernetesCluster);
         KubernetesClusterScaleWorker scaleWorker =
             new KubernetesClusterScaleWorker(kubernetesClusterDao.findById(cmd.getId()),
                 serviceOfferingDao.findById(cmd.getServiceOfferingId()),
@@ -1308,8 +1328,7 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
 
         validateKubernetesClusterUpgradeParameters(cmd);
         KubernetesClusterVO kubernetesCluster = kubernetesClusterDao.findById(cmd.getId());
-        Account owner = accountService.getActiveAccountById(kubernetesCluster.getAccountId());
-        String[] keys = getServiceUserKeys(owner);
+        String[] keys = getServiceUserKeys(kubernetesCluster);
         KubernetesClusterUpgradeWorker upgradeWorker =
             new KubernetesClusterUpgradeWorker(kubernetesClusterDao.findById(cmd.getId()),
                 kubernetesSupportedVersionDao.findById(cmd.getKubernetesVersionId()), this, keys);
@@ -1550,24 +1569,27 @@ public class KubernetesClusterManagerImpl extends ManagerBase implements Kuberne
         defaultKubernetesServiceNetworkOfferingProviders.put(Service.PortForwarding, Network.Provider.VirtualRouter);
         defaultKubernetesServiceNetworkOfferingProviders.put(Service.Vpn, Network.Provider.VirtualRouter);
 
-        NetworkOfferingVO defaultKubernetesServiceNetworkOffering =
-                new NetworkOfferingVO(DEFAULT_NETWORK_OFFERING_FOR_KUBERNETES_SERVICE_NAME,
-                        "Network Offering used for CloudStack Kubernetes service", Networks.TrafficType.Guest,
-                        false, false, null, null, true,
-                        NetworkOffering.Availability.Required, null, Network.GuestType.Isolated, true,
-                        true, false, false, false, false,
-                        false, false, false, true, true, false,
-                        false, true, false, false);
-        defaultKubernetesServiceNetworkOffering.setState(NetworkOffering.State.Enabled);
-        defaultKubernetesServiceNetworkOffering = networkOfferingDao.persistDefaultNetworkOffering(defaultKubernetesServiceNetworkOffering);
+        if (networkOfferingDao.findByUniqueName(DEFAULT_NETWORK_OFFERING_FOR_KUBERNETES_SERVICE_NAME) == null && networkOfferingDao.findByUniqueName("쿠버네테스 서비스에 대한 기본 네트워크오퍼링") == null) {
+            NetworkOfferingVO defaultKubernetesServiceNetworkOffering =
+                    new NetworkOfferingVO("쿠버네테스 서비스에 대한 기본 네트워크오퍼링",
+                            "쿠버네테스 서비스에 대한 기본 네트워크오퍼링", Networks.TrafficType.Guest,
+                            false, false, null, null, true,
+                            NetworkOffering.Availability.Required, null, Network.GuestType.Isolated, true,
+                            true, false, false, false, false,
+                            false, false, false, true, true, false,
+                            false, true, false, false);
+                            defaultKubernetesServiceNetworkOffering.setState(NetworkOffering.State.Enabled);
+                            defaultKubernetesServiceNetworkOffering = networkOfferingDao.persistDefaultNetworkOffering(defaultKubernetesServiceNetworkOffering);
 
-        for (Service service : defaultKubernetesServiceNetworkOfferingProviders.keySet()) {
-            NetworkOfferingServiceMapVO offService =
-                    new NetworkOfferingServiceMapVO(defaultKubernetesServiceNetworkOffering.getId(), service,
-                            defaultKubernetesServiceNetworkOfferingProviders.get(service));
-            networkOfferingServiceMapDao.persist(offService);
-            LOGGER.trace("Added service for the network offering: " + offService);
+                            for (Service service : defaultKubernetesServiceNetworkOfferingProviders.keySet()) {
+                                NetworkOfferingServiceMapVO offService =
+                                        new NetworkOfferingServiceMapVO(defaultKubernetesServiceNetworkOffering.getId(), service,
+                                                defaultKubernetesServiceNetworkOfferingProviders.get(service));
+                                networkOfferingServiceMapDao.persist(offService);
+                                LOGGER.trace("Added service for the network offering: " + offService);
+                            }
         }
+
 
         _gcExecutor.scheduleWithFixedDelay(new KubernetesClusterGarbageCollector(), 300, 300, TimeUnit.SECONDS);
         _stateScanner.scheduleWithFixedDelay(new KubernetesClusterStatusScanner(), 300, 30, TimeUnit.SECONDS);

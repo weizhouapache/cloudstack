@@ -81,6 +81,7 @@ public class CloudStackImageStoreLifeCycleImpl implements ImageStoreLifeCycle {
         Long dcId = (Long)dsInfos.get("zoneId");
         String url = (String)dsInfos.get("url");
         String name = (String)dsInfos.get("name");
+        String krbdPath = (String)dsInfos.get("krbdPath");
         if (name == null) {
             name = url;
         }
@@ -132,6 +133,7 @@ public class CloudStackImageStoreLifeCycleImpl implements ImageStoreLifeCycle {
                                                            // image store
         imageStoreParameters.put("providerName", providerName);
         imageStoreParameters.put("role", role);
+        imageStoreParameters.put("krbdPath", krbdPath);
 
         ImageStoreVO ids = imageStoreHelper.createImageStore(imageStoreParameters, details);
         return imageStoreMgr.getImageStore(ids.getId());

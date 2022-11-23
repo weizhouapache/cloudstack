@@ -37,7 +37,7 @@ public class HumanReadableJson {
             "bytesSent","bytesReceived","BytesWrite","BytesRead","bytesReadRate","bytesWriteRate","iopsReadRate",
             "iopsWriteRate","ioRead","ioWrite","bytesWrite","bytesRead","networkkbsread","networkkbswrite",
             "diskkbsread","diskkbswrite","minRam","maxRam","volumeSize", "size","newSize","memorykbs",
-            "memoryintfreekbs","memorytargetkbs","diskioread","diskiowrite","totalSize","capacityBytes",
+            "memoryintfreekbs","memorytargetkbs","memoryintusablekbs","diskioread","diskiowrite","totalSize","capacityBytes",
             "availableBytes","maxDownloadSizeInBytes","templateSize","templatePhySicalSize"
     };
 

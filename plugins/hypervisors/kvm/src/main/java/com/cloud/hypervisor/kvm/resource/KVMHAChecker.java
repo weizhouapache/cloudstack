@@ -32,7 +32,7 @@ public class KVMHAChecker extends KVMHABase implements Callable<Boolean> {
     private List<NfsStoragePool> nfsStoragePools;
     private List<RbdStoragePool> rbdStoragePools;
     private String hostIp;
-    private long heartBeatCheckerTimeout = 360000; // 6 minutes
+    private long heartBeatCheckerTimeout = 600000; // 10 minutes
 
     public KVMHAChecker(List<NfsStoragePool> nfspools, List<RbdStoragePool> rbdpools, String host) {
         this.nfsStoragePools = nfspools;

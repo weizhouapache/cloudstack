@@ -51,6 +51,9 @@ public interface PrimaryDataStoreInfo extends StoragePool {
     @Override
     StoragePoolType getPoolType();
 
+    @Override
+    String getStorageProviderName();
+
     boolean isManaged();
 
     void setDetails(Map<String, String> details);

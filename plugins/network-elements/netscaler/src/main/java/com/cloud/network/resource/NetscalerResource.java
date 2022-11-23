@@ -961,7 +961,7 @@ public class NetscalerResource implements ServerResource {
                 try {
                     Thread.sleep(10000);
                 } catch (final InterruptedException e) {
-                    s_logger.debug("[ignored] interupted while waiting for netscaler to be 'up'.");
+                    s_logger.debug("[ignored] interrupted while waiting for netscaler to be 'up'.");
                 }
                 final ns refreshNsObj = new ns();
                 refreshNsObj.set_id(newVpx.get_id());
@@ -3522,7 +3522,7 @@ public class NetscalerResource implements ServerResource {
         try {
             apiCallResult = nsconfig.save(_netscalerService);
             if (apiCallResult.errorcode != 0) {
-                throw new ExecutionException("Error occured while saving configuration changes to Netscaler device due to " + apiCallResult.message);
+                throw new ExecutionException("Error occurred while saving configuration changes to Netscaler device due to " + apiCallResult.message);
             }
         } catch (final nitro_exception e) {
             throw new ExecutionException("Failed to save configuration changes to Netscaler device due to " + e.getMessage());
@@ -3560,7 +3560,7 @@ public class NetscalerResource implements ServerResource {
                 }
             }
         } catch (final Exception e) {
-            s_logger.error("Failed to get bytes sent and recived statistics due to " + e);
+            s_logger.error("Failed to get bytes sent and received statistics due to " + e);
             throw new ExecutionException(e.getMessage());
         }
 
@@ -3616,7 +3616,7 @@ public class NetscalerResource implements ServerResource {
 
     private String generateAutoScaleServiceGroupName(final LoadBalancerTO lbTO) {
         /*
-         *  ServiceGroup name in NetScaler wont support long names. Providing special name.
+         *  ServiceGroup name in NetScaler won't support long names. Providing special name.
          *  Need for introducing uuid because every vmgroup creation should be distinguished.
          *  Ex. (1) create a vm group, delete a vmgroup, create a vmgroup on same lb ip and port
          *  This will reuse all vms from the original vm group in step (1)

@@ -71,6 +71,7 @@ import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.net.Ip;
 import com.cloud.utils.net.NetUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 
 import net.sf.cglib.proxy.Callback;
 import net.sf.cglib.proxy.CallbackFilter;
@@ -878,7 +879,7 @@ public abstract class GenericDaoBase<T, ID extends Serializable> extends Compone
             for (final Field field : clazz.getDeclaredFields()) {
                 sql.append(_table).append(".").append(DbUtil.getColumnName(field, overrides)).append(" = ? AND ");
             }
-            sql.delete(sql.length() - 4, sql.length());
+            removeAndClause(sql);
         }
 
         return sql.toString();
@@ -1262,10 +1263,11 @@ public abstract class GenericDaoBase<T, ID extends Serializable> extends Compone
 
     @DB()
     protected void addJoins(StringBuilder str, Collection<JoinBuilder<SearchCriteria<?>>> joins) {
+        boolean hasWhereClause = true;
         int fromIndex = str.lastIndexOf("WHERE");
         if (fromIndex == -1) {
             fromIndex = str.length();
-            str.append(" WHERE ");
+            hasWhereClause = false;
         } else {
             str.append(" AND ");
         }
@@ -1287,19 +1289,29 @@ public abstract class GenericDaoBase<T, ID extends Serializable> extends Compone
             .append(" ");
             str.insert(fromIndex, onClause);
             String whereClause = join.getT().getWhereClause();
-            if ((whereClause != null) && !"".equals(whereClause)) {
+            if (StringUtils.isNotEmpty(whereClause)) {
+                if (!hasWhereClause) {
+                    str.append(" WHERE ");
+                    hasWhereClause = true;
+                }
                 str.append(" (").append(whereClause).append(") AND");
             }
             fromIndex += onClause.length();
         }
 
-        str.delete(str.length() - 4, str.length());
+        if (hasWhereClause) {
+            removeAndClause(str);
+        }
 
         for (JoinBuilder<SearchCriteria<?>> join : joins) {
             if (join.getT().getJoins() != null) {
                 addJoins(str, join.getT().getJoins());
             }
         }
+    }
+
+    private void removeAndClause(StringBuilder sql) {
+        sql.delete(sql.length() - 4, sql.length());
     }
 
     @Override
@@ -1309,15 +1321,41 @@ public abstract class GenericDaoBase<T, ID extends Serializable> extends Compone
     }
 
     @Override
-    @DB()
     public Pair<List<T>, Integer> searchAndCount(final SearchCriteria<T> sc, final Filter filter) {
-        List<T> objects = search(sc, filter, null, false);
-        Integer count = getCount(sc);
-        // Count cannot be less than the result set but can be higher due to pagination, see CLOUDSTACK-10320
-        if (count < objects.size()) {
-            count = objects.size();
+        return searchAndCount(sc, filter, false);
+    }
+
+    @Override
+    @DB()
+    public Pair<List<T>, Integer> searchAndCount(SearchCriteria<T> sc, final Filter filter, boolean includeRemoved) {
+        if (!includeRemoved) {
+            sc = checkAndSetRemovedIsNull(sc);
         }
+
+        List<T> objects = searchIncludingRemoved(sc, filter, null, false);
+        int count = getCountIncludingRemoved(sc);
+
+        count = checkCountOfRecordsAgainstTheResultSetSize(count, objects.size());
+
         return new Pair<List<T>, Integer>(objects, count);
+    }
+
+    /**
+     * Validates if the count of records is higher or equal to the result set's size.<br/><br/>
+     * Count cannot be less than the result set, however, it can be higher due to pagination (see CLOUDSTACK-10320).
+     * @return Count if it is higher or equal to the result set's size, otherwise the result set's size.
+     */
+    protected int checkCountOfRecordsAgainstTheResultSetSize(int count, int resultSetSize) {
+        if (count >= resultSetSize) {
+            return count;
+        }
+
+        String stackTrace = ExceptionUtils.getStackTrace(new CloudRuntimeException(String.format("The query to count all the records of [%s] resulted in a value smaller than"
+                + " the result set's size [count of records: %s, result set's size: %s]. Using the result set's size instead.", _entityBeanType,
+                count, resultSetSize)));
+        s_logger.warn(stackTrace);
+
+        return resultSetSize;
     }
 
     @Override

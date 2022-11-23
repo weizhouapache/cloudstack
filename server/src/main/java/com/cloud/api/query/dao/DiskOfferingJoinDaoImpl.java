@@ -19,11 +19,8 @@ package com.cloud.api.query.dao;
 import java.util.List;
 import java.util.Map;
 
-import com.cloud.api.ApiDBUtils;
-import com.cloud.dc.VsphereStoragePolicyVO;
-import com.cloud.dc.dao.VsphereStoragePolicyDao;
-import com.cloud.server.ResourceTag;
-import com.cloud.user.AccountManager;
+import javax.inject.Inject;
+
 import org.apache.cloudstack.annotation.AnnotationService;
 import org.apache.cloudstack.annotation.dao.AnnotationDao;
 import org.apache.cloudstack.api.ApiConstants;
@@ -32,15 +29,18 @@ import org.apache.cloudstack.context.CallContext;
 import org.apache.log4j.Logger;
 import org.springframework.stereotype.Component;
 
+import com.cloud.api.ApiDBUtils;
 import com.cloud.api.query.vo.DiskOfferingJoinVO;
+import com.cloud.dc.VsphereStoragePolicyVO;
+import com.cloud.dc.dao.VsphereStoragePolicyDao;
 import com.cloud.offering.DiskOffering;
 import com.cloud.offering.ServiceOffering;
+import com.cloud.server.ResourceTag;
+import com.cloud.user.AccountManager;
 import com.cloud.utils.db.Attribute;
 import com.cloud.utils.db.GenericDaoBase;
 import com.cloud.utils.db.SearchBuilder;
 import com.cloud.utils.db.SearchCriteria;
-
-import javax.inject.Inject;
 
 @Component
 public class DiskOfferingJoinDaoImpl extends GenericDaoBase<DiskOfferingJoinVO, Long> implements DiskOfferingJoinDao {
@@ -107,6 +107,7 @@ public class DiskOfferingJoinDaoImpl extends GenericDaoBase<DiskOfferingJoinVO, 
         diskOfferingResponse.setDomain(offering.getDomainPath());
         diskOfferingResponse.setZoneId(offering.getZoneUuid());
         diskOfferingResponse.setZone(offering.getZoneName());
+        diskOfferingResponse.setEncrypt(offering.getEncrypt());
 
         diskOfferingResponse.setHasAnnotation(annotationDao.hasAnnotations(offering.getUuid(), AnnotationService.EntityType.DISK_OFFERING.name(),
                 accountManager.isRootAdmin(CallContext.current().getCallingAccount().getId())));
@@ -131,6 +132,7 @@ public class DiskOfferingJoinDaoImpl extends GenericDaoBase<DiskOfferingJoinVO, 
         diskOfferingResponse.setCacheMode(offering.getCacheMode());
         diskOfferingResponse.setObjectName("diskoffering");
         Map<String, String> offeringDetails = ApiDBUtils.getResourceDetails(offering.getId(), ResourceTag.ResourceObjectType.DiskOffering);
+        diskOfferingResponse.setDetails(offeringDetails);
         if (offeringDetails != null && !offeringDetails.isEmpty()) {
             String vsphereStoragePolicyId = offeringDetails.get(ApiConstants.STORAGE_POLICY);
             if (vsphereStoragePolicyId != null) {
@@ -139,6 +141,7 @@ public class DiskOfferingJoinDaoImpl extends GenericDaoBase<DiskOfferingJoinVO, 
                     diskOfferingResponse.setVsphereStoragePolicy(vsphereStoragePolicyVO.getName());
             }
         }
+        diskOfferingResponse.setDiskSizeStrictness(offering.getDiskSizeStrictness());
 
         return diskOfferingResponse;
     }

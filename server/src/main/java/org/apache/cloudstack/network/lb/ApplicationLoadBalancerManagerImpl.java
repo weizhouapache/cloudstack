@@ -113,7 +113,7 @@ public class ApplicationLoadBalancerManagerImpl extends ManagerBase implements A
         }
 
         Account caller = CallContext.current().getCallingAccount();
-        _accountMgr.checkAccess(caller, AccessType.UseEntry, false, guestNtwk);
+        _accountMgr.checkAccess(caller, AccessType.OperateEntry, false, guestNtwk);
 
         Network sourceIpNtwk = _networkModel.getNetwork(sourceIpNetworkId);
         if (sourceIpNtwk == null) {
@@ -432,6 +432,7 @@ public class ApplicationLoadBalancerManagerImpl extends ManagerBase implements A
             SearchCriteria<ApplicationLoadBalancerRuleVO> ssc = _lbDao.createSearchCriteria();
             ssc.addOr("name", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             ssc.addOr("description", SearchCriteria.Op.LIKE, "%" + keyword + "%");
+            ssc.addOr("uuid", SearchCriteria.Op.LIKE, "%" + keyword + "%");
             sc.addAnd("name", SearchCriteria.Op.SC, ssc);
         }
 

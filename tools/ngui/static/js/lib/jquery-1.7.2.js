@@ -8249,7 +8249,7 @@ if ( jQuery.support.ajax ) {
 							xml;
 
 						// Firefox throws exceptions when accessing properties
-						// of an xhr when a network error occured
+						// of an xhr when a network error occurred
 						// http://helpful.knobs-dials.com/index.php/Component_returned_failure_code:_0x80040111_(NS_ERROR_NOT_AVAILABLE)
 						try {
 
@@ -8521,7 +8521,7 @@ jQuery.fn.extend({
 					replace = hooks.expand( prop[ name ] );
 					delete prop[ name ];
 
-					// not quite $.extend, this wont overwrite keys already present.
+					// not quite $.extend, this won't overwrite keys already present.
 					// also - reusing 'p' from above because we have the correct "name"
 					for ( p in replace ) {
 						if ( ! ( p in prop ) ) {

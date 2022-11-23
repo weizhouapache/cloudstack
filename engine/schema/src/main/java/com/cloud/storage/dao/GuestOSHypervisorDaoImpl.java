@@ -40,7 +40,7 @@ public class GuestOSHypervisorDaoImpl extends GenericDaoBase<GuestOSHypervisorVO
     protected final SearchBuilder<GuestOSHypervisorVO> guestOsNameSearch;
     protected final SearchBuilder<GuestOSHypervisorVO> availableHypervisorVersionSearch;
 
-    protected GuestOSHypervisorDaoImpl() {
+    public GuestOSHypervisorDaoImpl() {
         guestOsSearch = createSearchBuilder();
         guestOsSearch.and("guest_os_id", guestOsSearch.entity().getGuestOsId(), SearchCriteria.Op.EQ);
         guestOsSearch.done();
@@ -62,6 +62,7 @@ public class GuestOSHypervisorDaoImpl extends GenericDaoBase<GuestOSHypervisorVO
         guestOsNameSearch.and("guest_os_name", guestOsNameSearch.entity().getGuestOsName(), SearchCriteria.Op.EQ);
         guestOsNameSearch.and("hypervisor_type", guestOsNameSearch.entity().getHypervisorType(), SearchCriteria.Op.EQ);
         guestOsNameSearch.and("hypervisor_version", guestOsNameSearch.entity().getHypervisorVersion(), SearchCriteria.Op.EQ);
+        guestOsNameSearch.and("is_user_defined", guestOsNameSearch.entity().getIsUserDefined(), SearchCriteria.Op.EQ);
         guestOsNameSearch.done();
 
         availableHypervisorVersionSearch = createSearchBuilder();
@@ -134,13 +135,30 @@ public class GuestOSHypervisorDaoImpl extends GenericDaoBase<GuestOSHypervisorVO
     }
 
     @Override
+    public GuestOSHypervisorVO findByOsNameAndHypervisorOrderByCreatedDesc(String guestOsName, String hypervisorType, String hypervisorVersion) {
+        SearchCriteria<GuestOSHypervisorVO> sc = guestOsNameSearch.create();
+        sc.setParameters("guest_os_name", guestOsName);
+        sc.setParameters("hypervisor_type", hypervisorType);
+        sc.setParameters("hypervisor_version", hypervisorVersion);
+        sc.setParameters("is_user_defined", false);
+
+        Filter orderByFilter = new Filter(GuestOSHypervisorVO.class, "created", false, null, 1L);
+        List<GuestOSHypervisorVO> GuestOSHypervisorVOs = listBy(sc, orderByFilter);
+        if (CollectionUtils.isNotEmpty(GuestOSHypervisorVOs)) {
+            return GuestOSHypervisorVOs.get(0);
+        }
+        return null;
+    }
+
+    @Override
     public List<GuestOSHypervisorVO> listByOsNameAndHypervisorMinimumVersion(String guestOsName, String hypervisorType,
                                                                              String minHypervisorVersion) {
         final QueryBuilder<GuestOSHypervisorVO> sc = QueryBuilder.create(GuestOSHypervisorVO.class);
         sc.and(sc.entity().getGuestOsName(), SearchCriteria.Op.EQ, guestOsName);
         sc.and(sc.entity().getHypervisorType(), SearchCriteria.Op.EQ, hypervisorType);
-        sc.and(sc.entity().getHypervisorVersion(), SearchCriteria.Op.GTEQ, minHypervisorVersion);
-        sc.and(sc.entity().getHypervisorVersion(), SearchCriteria.Op.NEQ, "default");
+        sc.and().op(sc.entity().getHypervisorVersion(), SearchCriteria.Op.GTEQ, minHypervisorVersion);
+        sc.or(sc.entity().getHypervisorVersion(), SearchCriteria.Op.NEQ, "default");
+        sc.cp();
         return sc.list();
     }
 

@@ -54,6 +54,9 @@ public class PrimaryDataStoreTO implements DataStoreTO {
     private Boolean fullCloneFlag;
     private Boolean diskProvisioningStrictnessFlag;
     private final boolean isManaged;
+    private String provider;
+    private String krbdPath;
+    private final StoragePoolType parentPoolType;
 
     public PrimaryDataStoreTO(PrimaryDataStore dataStore) {
         this.uuid = dataStore.getUuid();
@@ -66,6 +69,9 @@ public class PrimaryDataStoreTO implements DataStoreTO {
         this.url = dataStore.getUri();
         this.details = dataStore.getDetails();
         this.isManaged = dataStore.isManaged();
+        this.provider = dataStore.getStorageProviderName();
+        this.krbdPath = dataStore.getKrbdPath();
+        this.parentPoolType = dataStore.getParentPoolType();
     }
 
     public long getId() {
@@ -94,8 +100,20 @@ public class PrimaryDataStoreTO implements DataStoreTO {
         return this.name;
     }
 
+    public String getProvider() {
+        return this.provider;
+    }
+
     public String getType() {
         return this.type;
+    }
+
+    public String getKrbdPath() {
+        return krbdPath;
+    }
+
+    public void setKrbdPath(String krbdPath) {
+        this.krbdPath = krbdPath;
     }
 
     @Override
@@ -171,5 +189,9 @@ public class PrimaryDataStoreTO implements DataStoreTO {
 
     public void setDiskProvisioningStrictnessFlag(Boolean diskProvisioningStrictnessFlag) {
         this.diskProvisioningStrictnessFlag = diskProvisioningStrictnessFlag;
+    }
+
+    public StoragePoolType getParentPoolType() {
+        return parentPoolType;
     }
 }

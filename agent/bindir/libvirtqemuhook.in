@@ -136,12 +136,65 @@ def substringAfter(s, delimiter):
     return s.partition(delimiter)[2]
 
 
+def executeProgram(programName, sysArgs):
+    logger.info('Executing custom program: %s, parameters: %s' % (programName, ' '.join(map(str, sysArgs))))
+    path = programName
+
+    if not os.access(path, os.X_OK):
+        logger.warning('Custom script: %s is not executable; skipping execution.' % programName)
+        return
+
+    try:
+        process = subprocess.Popen([path] + sysArgs, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, shell=False)
+        try:
+            timer = Timer(timeoutSeconds, terminateProgram, [process, programName])
+            timer.start()
+            output, error = process.communicate()
+
+            if process.returncode == -15:
+                logger.error('Custom program: %s terminated after timeout of %s second[s].'
+                             % (programName, timeoutSeconds))
+                return
+            if process.returncode != 0:
+                logger.info('return code: %s' % str(process.returncode))
+                raise Exception(error)
+            logger.info('Custom program: %s finished successfully; output: \n%s' %
+                        (programName, str(output)))
+        finally:
+            timer.cancel()
+    except (OSError, Exception) as e:
+        logger.exception("Custom script: %s finished with error: \n%s" % (programName, e))
+        pass
+
+
+def terminateProgram(process, programName):
+    logger.warning('Custom program: %s taking longer than %s second[s]; terminating..' % (programName, str(timeoutSeconds)))
+    process.terminate()
+
+def unmapStorage():
+    try:
+        domain = parse(sys.stdin)
+
+        for volume in domain.getElementsByTagName("disk"):
+            target = volume.getElementsByTagName("target")[0]
+            if target.getAttribute("bus")=="scsi":
+                disk = volume.getElementsByTagName("source")[0]
+                img  = disk.getAttribute("dev")
+                executeProgram("/usr/bin/rbd", ["unmap", img])
+
+        #print(domain.toxml())
+    except Exception as e:
+        logger.exception("exception: %s\n"%( e))
+        pass
+
 if __name__ == '__main__':
     if len(sys.argv) != 5:
         sys.exit(0)
 
     # For docs refer https://libvirt.org/hooks.html#qemu
-    logger.debug("Executing qemu hook with args: %s" % sys.argv)
+    logger.info("Executing qemu hook with args: %s" % sys.argv)
+    #logger.info("Executing qemu hook with xml: %s" % parse(sys.stdin).toxml())
     action, status = sys.argv[2:4]
 
     if action not in validQemuActions:
@@ -150,5 +203,8 @@ if __name__ == '__main__':
 
     if action == "migrate" and status == "begin":
         handleMigrateBegin()
+
+    if action == "release" and status == "end":
+       unmapStorage()
 
     executeCustomScripts(sys.argv[1:])

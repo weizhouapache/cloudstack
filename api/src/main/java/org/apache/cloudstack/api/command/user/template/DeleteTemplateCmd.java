@@ -19,7 +19,7 @@ package org.apache.cloudstack.api.command.user.template;
 import org.apache.log4j.Logger;
 
 import org.apache.cloudstack.api.APICommand;
-import org.apache.cloudstack.api.ApiCommandJobType;
+import org.apache.cloudstack.api.ApiCommandResourceType;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.BaseAsyncCmd;
@@ -55,12 +55,19 @@ public class DeleteTemplateCmd extends BaseAsyncCmd {
     @Parameter(name = ApiConstants.FORCED, type = CommandType.BOOLEAN, required = false, description = "Force delete a template.", since = "4.9+")
     private Boolean forced;
 
+    @Parameter(name=ApiConstants.DESKTOP_CHECK, type = CommandType.BOOLEAN, required=false, description="Verify that it is a desktop template.")
+    protected Boolean isDesktop;
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
 
     public Long getId() {
         return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
     }
 
     public Long getZoneId() {
@@ -70,6 +77,15 @@ public class DeleteTemplateCmd extends BaseAsyncCmd {
     public boolean isForced() {
         return (forced != null) ? forced : true;
     }
+
+    public Boolean isDesktop() {
+        return isDesktop;
+    }
+
+    public void setIsDesktop(Boolean isDesktop) {
+        this.isDesktop = isDesktop;
+    }
+
     /////////////////////////////////////////////////////
     /////////////// API Implementation///////////////////
     /////////////////////////////////////////////////////
@@ -104,12 +120,12 @@ public class DeleteTemplateCmd extends BaseAsyncCmd {
     }
 
     @Override
-    public ApiCommandJobType getInstanceType() {
-        return ApiCommandJobType.Template;
+    public ApiCommandResourceType getApiResourceType() {
+        return ApiCommandResourceType.Template;
     }
 
     @Override
-    public Long getInstanceId() {
+    public Long getApiResourceId() {
         return getId();
     }
 

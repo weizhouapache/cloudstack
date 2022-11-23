@@ -252,7 +252,6 @@ public class VmwareManagerImpl extends ManagerBase implements VmwareManager, Vmw
     private String _recycleHungWorker = "false";
     private int _additionalPortRangeStart;
     private int _additionalPortRangeSize;
-    private int _routerExtraPublicNics = 2;
     private int _vCenterSessionTimeout = 1200000; // Timeout in milliseconds
     private String _rootDiskController = DiskControllerType.ide.toString();
 
@@ -332,12 +331,7 @@ public class VmwareManagerImpl extends ManagerBase implements VmwareManager, Vmw
             _storage.configure("StorageLayer", params);
         }
 
-        value = _configDao.getValue(Config.VmwareCreateFullClone.key());
-        if (value == null) {
-            _fullCloneFlag = false;
-        } else {
-            _fullCloneFlag = Boolean.parseBoolean(value);
-        }
+        _fullCloneFlag = StorageManager.VmwareCreateCloneFull.value();
 
         value = _configDao.getValue(Config.SetVmInternalNameUsingDisplayName.key());
         if (value == null) {
@@ -372,8 +366,6 @@ public class VmwareManagerImpl extends ManagerBase implements VmwareManager, Vmw
             s_logger.warn("Invalid port range size (" + _additionalPortRangeSize + " for range starts at " + _additionalPortRangeStart);
             _additionalPortRangeSize = Math.min(1000, 65535 - _additionalPortRangeStart);
         }
-
-        _routerExtraPublicNics = NumbersUtil.parseInt(_configDao.getValue(Config.RouterExtraPublicNics.key()), 2);
 
         _vCenterSessionTimeout = NumbersUtil.parseInt(_configDao.getValue(Config.VmwareVcenterSessionTimeout.key()), 1200) * 1000;
         s_logger.info("VmwareManagerImpl config - vmware.vcenter.session.timeout: " + _vCenterSessionTimeout);
@@ -690,7 +682,7 @@ public class VmwareManagerImpl extends ManagerBase implements VmwareManager, Vmw
 
         // this time-out check was disabled
         // "until we have found out a VMware API that can check if there are pending tasks on the subject VM"
-        // but as we expire jobs and those stale worker VMs stay around untill an MS reboot we opt in to have them removed anyway
+        // but as we expire jobs and those stale worker VMs stay around until an MS reboot we opt in to have them removed anyway
         Instant start = Instant.ofEpochMilli(startTick);
         Instant end = start.plusSeconds(2 * (AsyncJobManagerImpl.JobExpireMinutes.value() + AsyncJobManagerImpl.JobCancelThresholdMinutes.value()) * SECONDS_PER_MINUTE);
         Instant now = Instant.now();
@@ -1066,11 +1058,6 @@ public class VmwareManagerImpl extends ManagerBase implements VmwareManager, Vmw
     @Override
     public Pair<Integer, Integer> getAddiionalVncPortRange() {
         return new Pair<Integer, Integer>(_additionalPortRangeStart, _additionalPortRangeSize);
-    }
-
-    @Override
-    public int getRouterExtraPublicNics() {
-        return _routerExtraPublicNics;
     }
 
     @Override

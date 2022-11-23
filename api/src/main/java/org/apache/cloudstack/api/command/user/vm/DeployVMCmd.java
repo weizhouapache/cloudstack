@@ -31,7 +31,7 @@ import org.apache.cloudstack.acl.RoleType;
 import org.apache.cloudstack.affinity.AffinityGroupResponse;
 import org.apache.cloudstack.api.ACL;
 import org.apache.cloudstack.api.APICommand;
-import org.apache.cloudstack.api.ApiCommandJobType;
+import org.apache.cloudstack.api.ApiCommandResourceType;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.BaseAsyncCreateCustomIdCmd;
@@ -47,6 +47,7 @@ import org.apache.cloudstack.api.response.ProjectResponse;
 import org.apache.cloudstack.api.response.SecurityGroupResponse;
 import org.apache.cloudstack.api.response.ServiceOfferingResponse;
 import org.apache.cloudstack.api.response.TemplateResponse;
+import org.apache.cloudstack.api.response.UserDataResponse;
 import org.apache.cloudstack.api.response.UserVmResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
 import org.apache.cloudstack.context.CallContext;
@@ -114,15 +115,19 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
     @Parameter(name = ApiConstants.NETWORK_IDS, type = CommandType.LIST, collectionType = CommandType.UUID, entityType = NetworkResponse.class, description = "list of network ids used by virtual machine. Can't be specified with ipToNetworkList parameter")
     private List<Long> networkIds;
 
-    @Parameter(name = ApiConstants.BOOT_TYPE, type = CommandType.STRING, required = false, description = "Guest VM Boot option either custom[UEFI] or default boot [BIOS]. Not applicable with VMware, as we honour what is defined in the template.", since = "4.14.0.0")
+    @Parameter(name = ApiConstants.BOOT_TYPE, type = CommandType.STRING, required = false, description = "Guest VM Boot option either custom[UEFI] or default boot [BIOS]. Not applicable with VMware if the template is marked as deploy-as-is, as we honour what is defined in the template.", since = "4.14.0.0")
     private String bootType;
 
-    @Parameter(name = ApiConstants.BOOT_MODE, type = CommandType.STRING, required = false, description = "Boot Mode [Legacy] or [Secure] Applicable when Boot Type Selected is UEFI, otherwise Legacy only for BIOS. Not applicable with VMware, as we honour what is defined in the template.", since = "4.14.0.0")
+    @Parameter(name = ApiConstants.BOOT_MODE, type = CommandType.STRING, required = false, description = "Boot Mode [Legacy] or [Secure] Applicable when Boot Type Selected is UEFI, otherwise Legacy only for BIOS. Not applicable with VMware if the template is marked as deploy-as-is, as we honour what is defined in the template.", since = "4.14.0.0")
     private String bootMode;
 
     @Parameter(name = ApiConstants.BOOT_INTO_SETUP, type = CommandType.BOOLEAN, required = false, description = "Boot into hardware setup or not (ignored if startVm = false, only valid for vmware)", since = "4.15.0.0")
     private Boolean bootIntoSetup;
 
+
+
+    @Parameter(name = ApiConstants.TPM_VERSION, type = CommandType.STRING, required = false, description = "Boot with TPM", since = "4.18.0.0")
+    private String tpmversion;
     //DataDisk information
     @ACL
     @Parameter(name = ApiConstants.DISK_OFFERING_ID, type = CommandType.UUID, entityType = DiskOfferingResponse.class, description = "the ID of the disk offering for the virtual machine. If the template is of ISO format,"
@@ -153,8 +158,18 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
             length = 1048576)
     private String userData;
 
+    @Parameter(name = ApiConstants.USER_DATA_ID, type = CommandType.UUID, entityType = UserDataResponse.class, description = "the ID of the Userdata", since = "4.18")
+    private Long userdataId;
+
+    @Parameter(name = ApiConstants.USER_DATA_DETAILS, type = CommandType.MAP, description = "used to specify the parameters values for the variables in userdata.", since = "4.18")
+    private Map userdataDetails;
+
+    @Deprecated
     @Parameter(name = ApiConstants.SSH_KEYPAIR, type = CommandType.STRING, description = "name of the ssh key pair used to login to the virtual machine")
     private String sshKeyPairName;
+
+    @Parameter(name = ApiConstants.SSH_KEYPAIRS, type = CommandType.LIST, collectionType = CommandType.STRING, since="4.17", description = "names of the ssh key pairs used to login to the virtual machine")
+    private List<String> sshKeyPairNames;
 
     @Parameter(name = ApiConstants.HOST_ID, type = CommandType.UUID, entityType = HostResponse.class, description = "destination Host ID to deploy the VM to - parameter available for root admin only")
     private Long hostId;
@@ -239,6 +254,10 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
             description = "true if virtual machine needs to be dynamically scalable")
     protected Boolean dynamicScalingEnabled;
 
+    @Parameter(name = ApiConstants.OVERRIDE_DISK_OFFERING_ID, type = CommandType.UUID, since = "4.17", entityType = DiskOfferingResponse.class, description = "the ID of the disk offering for the virtual machine to be used for root volume instead of the disk offering mapped in service offering." +
+            "In case of virtual machine deploying from ISO, then the diskofferingid specified for root volume is ignored and uses this override disk offering id")
+    private Long overrideDiskOfferingId;
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
@@ -284,6 +303,21 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
         return null;
     }
 
+    public ApiConstants.TpmVersion getTpmVersion() {
+        if (StringUtils.isNotBlank(tpmversion)) {
+            try {
+                String type = tpmversion.trim().toUpperCase();
+                return ApiConstants.TpmVersion.valueOf(type);
+            } catch (IllegalArgumentException e) {
+                String errMesg = "Invalid TpmVersion " + tpmversion + "Specified for vm " + getName()
+                        + " Valid values are: " + Arrays.toString(ApiConstants.BootType.values());
+                s_logger.warn(errMesg);
+                throw new InvalidParameterValueException(errMesg);
+            }
+        }
+        return null;
+    }
+
     public Map<String, String> getDetails() {
         Map<String, String> customparameterMap = new HashMap<String, String>();
         if (details != null && details.size() != 0) {
@@ -296,12 +330,24 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
                 }
             }
         }
-        if (ApiConstants.BootType.UEFI.equals(getBootType())) {
+        if (getBootType() != null) {
             customparameterMap.put(getBootType().toString(), getBootMode().toString());
         }
 
         if (rootdisksize != null && !customparameterMap.containsKey("rootdisksize")) {
             customparameterMap.put("rootdisksize", rootdisksize.toString());
+        }
+        for (Map.Entry<String,String> entry: customparameterMap.entrySet()) {
+            customparameterMap.put(entry.getKey(),entry.getValue());
+        }
+        if(customparameterMap.containsKey(ApiConstants.TpmVersion.V2_0.toString())){
+            customparameterMap.put("tpmversion", customparameterMap.get(ApiConstants.TpmVersion.V2_0.toString()));
+        }else if(customparameterMap.containsKey("tpmversion")){
+            customparameterMap.put("tpmversion", customparameterMap.get("tpmversion"));
+        }else if(getTpmVersion() != null){
+            customparameterMap.put("tpmversion", getTpmVersion().toString());
+        }else{
+            customparameterMap.put("tpmversion", "NONE");
         }
 
         return customparameterMap;
@@ -328,6 +374,7 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
         }
         return null;
     }
+
 
     public Map<String, String> getVmProperties() {
         Map<String, String> map = new HashMap<>();
@@ -412,6 +459,25 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
         return userData;
     }
 
+    public Long getUserdataId() {
+        return userdataId;
+    }
+
+    public Map<String, String> getUserdataDetails() {
+        Map<String, String> userdataDetailsMap = new HashMap<String, String>();
+        if (userdataDetails != null && userdataDetails.size() != 0) {
+            Collection parameterCollection = userdataDetails.values();
+            Iterator iter = parameterCollection.iterator();
+            while (iter.hasNext()) {
+                HashMap<String, String> value = (HashMap<String, String>)iter.next();
+                for (Map.Entry<String,String> entry: value.entrySet()) {
+                    userdataDetailsMap.put(entry.getKey(),entry.getValue());
+                }
+            }
+        }
+        return userdataDetailsMap;
+    }
+
     public Long getZoneId() {
         return zoneId;
     }
@@ -440,8 +506,15 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
         return name;
     }
 
-    public String getSSHKeyPairName() {
-        return sshKeyPairName;
+    public List<String> getSSHKeyPairNames() {
+        List<String> sshKeyPairs = new ArrayList<String>();
+        if(sshKeyPairNames != null) {
+            sshKeyPairs = sshKeyPairNames;
+        }
+        if(sshKeyPairName != null && !sshKeyPairName.isEmpty()) {
+            sshKeyPairs.add(sshKeyPairName);
+        }
+        return sshKeyPairs;
     }
 
     public Long getHostId() {
@@ -592,7 +665,7 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
 
     public Map<Long, DiskOffering> getDataDiskTemplateToDiskOfferingMap() {
         if (diskOfferingId != null && dataDiskTemplateToDiskOfferingList != null) {
-            throw new InvalidParameterValueException("diskofferingid paramter can't be specified along with datadisktemplatetodiskofferinglist parameter");
+            throw new InvalidParameterValueException("diskofferingid parameter can't be specified along with datadisktemplatetodiskofferinglist parameter");
         }
         if (MapUtils.isEmpty(dataDiskTemplateToDiskOfferingList)) {
             return new HashMap<Long, DiskOffering>();
@@ -635,6 +708,10 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
 
     public boolean isDynamicScalingEnabled() {
         return dynamicScalingEnabled == null ? true : dynamicScalingEnabled;
+    }
+
+    public Long getOverrideDiskOfferingId() {
+        return overrideDiskOfferingId;
     }
 
     /////////////////////////////////////////////////////
@@ -681,8 +758,8 @@ public class DeployVMCmd extends BaseAsyncCreateCustomIdCmd implements SecurityG
     }
 
     @Override
-    public ApiCommandJobType getInstanceType() {
-        return ApiCommandJobType.VirtualMachine;
+    public ApiCommandResourceType getApiResourceType() {
+        return ApiCommandResourceType.VirtualMachine;
     }
 
     @Override

@@ -133,6 +133,8 @@ public interface VMInstanceDao extends GenericDao<VMInstanceVO, Long>, StateDao<
 
     Long countByZoneAndState(long zoneId, State state);
 
+    Long countByZoneAndStateAndHostTag(long dcId, State state, String hostTag);
+
     List<VMInstanceVO> listNonRemovedVmsByTypeAndNetwork(long networkId, VirtualMachine.Type... types);
 
     /**
@@ -162,4 +164,5 @@ public interface VMInstanceDao extends GenericDao<VMInstanceVO, Long>, StateDao<
 
     void updateSystemVmTemplateId(long templateId, Hypervisor.HypervisorType hypervisorType);
 
+    List<VMInstanceVO> listByHostOrLastHostOrHostPod(long hostId, long podId);
 }

@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
+import org.apache.cloudstack.api.ApiCommandResourceType;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.api.command.admin.ha.ConfigureHAForHostCmd;
@@ -54,13 +55,14 @@ import org.apache.cloudstack.ha.task.HealthCheckTask;
 import org.apache.cloudstack.ha.task.RecoveryTask;
 import org.apache.cloudstack.kernel.Partition;
 import org.apache.cloudstack.managed.context.ManagedContextRunnable;
+import org.apache.cloudstack.management.ManagementServerHost;
 import org.apache.cloudstack.poll.BackgroundPollManager;
 import org.apache.cloudstack.poll.BackgroundPollTask;
 import org.apache.cloudstack.utils.identity.ManagementServerNode;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 
 import com.cloud.cluster.ClusterManagerListener;
-import org.apache.cloudstack.management.ManagementServerHost;
 import com.cloud.dc.ClusterDetailsDao;
 import com.cloud.dc.ClusterDetailsVO;
 import com.cloud.dc.DataCenter;
@@ -86,7 +88,6 @@ import com.cloud.utils.fsm.NoTransitionException;
 import com.cloud.utils.fsm.StateListener;
 import com.cloud.utils.fsm.StateMachine2;
 import com.google.common.base.Preconditions;
-import org.apache.commons.lang3.StringUtils;
 
 public final class HAManagerImpl extends ManagerBase implements HAManager, ClusterManagerListener, PluggableService, Configurable, StateListener<HAConfig.HAState, HAConfig.Event, HAConfig> {
     public static final Logger LOG = Logger.getLogger(HAManagerImpl.class);
@@ -160,7 +161,7 @@ public final class HAManagerImpl extends ManagerBase implements HAManager, Clust
 
                 if (nextState == HAConfig.HAState.Recovering || nextState == HAConfig.HAState.Fencing || nextState == HAConfig.HAState.Fenced) {
                     ActionEventUtils.onActionEvent(CallContext.current().getCallingUserId(), CallContext.current().getCallingAccountId(),
-                            Domain.ROOT_DOMAIN, EventTypes.EVENT_HA_STATE_TRANSITION, message);
+                            Domain.ROOT_DOMAIN, EventTypes.EVENT_HA_STATE_TRANSITION, message, haConfig.getResourceId(), ApiCommandResourceType.Host.toString());
                 }
             }
             return result;
@@ -350,6 +351,9 @@ public final class HAManagerImpl extends ManagerBase implements HAManager, Clust
                         haConfig.setEnabled(enable);
                         haConfig.setManagementServerId(ManagementServerNode.getManagementServerId());
                     }
+                    if (haProvider != null && enable != null) {
+                        haConfig.setHastate(HAConfig.HAState.Available);
+                    }
                     haConfig.setResourceId(resourceId);
                     haConfig.setResourceType(resourceType);
                     if (StringUtils.isEmpty(haConfig.getHaProvider())) {
@@ -412,15 +416,39 @@ public final class HAManagerImpl extends ManagerBase implements HAManager, Clust
 
     @Override
     @ActionEvent(eventType = EventTypes.EVENT_HA_RESOURCE_ENABLE, eventDescription = "enabling HA for a cluster")
-    public boolean enableHA(final Cluster cluster) {
+    public boolean enableHA(final Cluster cluster, Boolean includeHost) {
         clusterDetailsDao.persist(cluster.getId(), HA_ENABLED_DETAIL, String.valueOf(true));
+
+        //host enableHA
+        if (includeHost) {
+            List<? extends HAResource> resources = hostDao.findByClusterId(cluster.getId());
+            for (HAResource resource : resources) {
+                final HAConfig haConfig = haConfigDao.findHAResource(resource.getId(), resource.resourceType());
+                if (haConfig == null) {
+                    boolean configureHA = configureHA(resource.getId(), resource.resourceType(), true, "kvmhaprovider");
+                } else {
+                    boolean result = enableHA(resource.getId(), resource.resourceType());
+                }
+            }
+        }
         return true;
     }
 
     @Override
     @ActionEvent(eventType = EventTypes.EVENT_HA_RESOURCE_DISABLE, eventDescription = "disabling HA for a cluster")
-    public boolean disableHA(final Cluster cluster) {
+    public boolean disableHA(final Cluster cluster, Boolean includeHost) {
         clusterDetailsDao.persist(cluster.getId(), HA_ENABLED_DETAIL, String.valueOf(false));
+
+        //host disableHA
+        if (includeHost) {
+            List<? extends HAResource> resources = hostDao.findByClusterId(cluster.getId());
+            for (HAResource resource : resources) {
+                final HAConfig haConfig = haConfigDao.findHAResource(resource.getId(), resource.resourceType());
+                if (haConfig != null && haConfig.isEnabled()) {
+                    boolean result = disableHA(resource.getId(), resource.resourceType());
+                }
+            }
+        }
         return transitionResourceStateToDisabled(cluster);
     }
 

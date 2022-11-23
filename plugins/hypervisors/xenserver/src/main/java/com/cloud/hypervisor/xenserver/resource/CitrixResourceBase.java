@@ -16,7 +16,6 @@
 // under the License.
 package com.cloud.hypervisor.xenserver.resource;
 
-import static com.cloud.hypervisor.xenserver.discoverer.XcpServerDiscoverer.isUefiSupported;
 import static com.cloud.utils.NumbersUtil.toHumanReadableSize;
 
 import java.io.BufferedReader;
@@ -49,7 +48,6 @@ import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
 import javax.naming.ConfigurationException;
-import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
 
 import org.apache.cloudstack.api.ApiConstants;
@@ -59,6 +57,7 @@ import org.apache.cloudstack.diagnostics.DiagnosticsService;
 import org.apache.cloudstack.hypervisor.xenserver.ExtraConfigurationUtility;
 import org.apache.cloudstack.storage.to.TemplateObjectTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
+import org.apache.cloudstack.utils.security.ParserUtils;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.io.FileUtils;
@@ -122,6 +121,7 @@ import com.cloud.network.Networks;
 import com.cloud.network.Networks.BroadcastDomainType;
 import com.cloud.network.Networks.TrafficType;
 import com.cloud.resource.ServerResource;
+import com.cloud.resource.ServerResourceBase;
 import com.cloud.resource.hypervisor.HypervisorResource;
 import com.cloud.storage.Storage;
 import com.cloud.storage.Storage.StoragePoolType;
@@ -180,7 +180,7 @@ import com.xensource.xenapi.XenAPIObject;
  * before you do any changes in this code here.
  *
  */
-public abstract class CitrixResourceBase implements ServerResource, HypervisorResource, VirtualRouterDeployer {
+public abstract class CitrixResourceBase extends ServerResourceBase implements ServerResource, HypervisorResource, VirtualRouterDeployer {
     /**
      * used to describe what type of resource a storage device is of
      */
@@ -216,6 +216,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
     private final static String VM_NAME_ISO_SUFFIX = "-ISO";
 
     private final static String VM_FILE_ISO_SUFFIX = ".iso";
+    public final static int DEFAULTDOMRSSHPORT = 3922;
 
     private static final XenServerConnectionPool ConnPool = XenServerConnectionPool.getInstance();
     // static min values for guests on xenserver
@@ -226,6 +227,9 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
     protected static final HashMap<VmPowerState, PowerState> s_powerStatesTable;
 
     public static final String XS_TOOLS_ISO_AFTER_70 = "guest-tools.iso";
+    public static final String BASEPATH = "/opt/xensource/packages/resources/";
+
+    protected static final String PLATFORM_CORES_PER_SOCKET_KEY = "cores-per-socket";
 
     static {
         s_powerStatesTable = new HashMap<VmPowerState, PowerState>();
@@ -337,6 +341,11 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
     protected StorageSubsystemCommandHandler buildStorageHandler() {
         final XenServerStorageProcessor processor = new XenServerStorageProcessor(this);
         return new StorageSubsystemCommandHandlerBase(processor);
+    }
+
+    @Override
+    protected String getDefaultScriptsDir() {
+        return null;
     }
 
     public String callHostPlugin(final Connection conn, final String plugin, final String cmd, final String... params) {
@@ -904,11 +913,15 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         }
     }
 
-    public String connect(final Connection conn, final String vmname, final String ipAddress) {
-        return connect(conn, vmname, ipAddress, 3922);
+    public String connect(final Connection conn, final String vmname, final String ipAddress, int sleep) {
+        return connect(conn, vmname, ipAddress, DEFAULTDOMRSSHPORT, sleep);
     }
 
-    public String connect(final Connection conn, final String vmName, final String ipAddress, final int port) {
+    public String connect(final Connection conn, final String vmName, final String ipAddress, final int port, int sleep) {
+        if (sleep == 0) {
+            sleep = _sleep;
+        }
+
         for (int i = 0; i <= _retry; i++) {
             try {
                 final Set<VM> vms = VM.getByNameLabel(conn, vmName);
@@ -929,7 +942,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
                 return null;
             }
             try {
-                Thread.sleep(_sleep);
+                Thread.sleep(sleep);
             } catch (final InterruptedException e) {
             }
         }
@@ -974,8 +987,25 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
             s_logger.warn("scp VR config file into host " + _host.getIp() + " failed with exception " + e.getMessage().toString());
         }
 
-        final String rc = callHostPlugin(conn, "vmops", "createFileInDomr", "domrip", routerIp, "srcfilepath", hostPath + filename, "dstfilepath", path);
-        s_logger.debug("VR Config file " + filename + " got created in VR, ip " + routerIp + " with content \n" + content);
+        final String rc = callHostPlugin(conn, "vmops", "createFileInDomr", "domrip", routerIp, "srcfilepath", hostPath + filename, "dstfilepath", path, "cleanup", "true");
+        s_logger.debug("VR Config file " + filename + " got created in VR, IP: " + routerIp + " with content \n" + content);
+
+        return new ExecutionResult(rc.startsWith("succ#"), rc.substring(5));
+    }
+
+    public ExecutionResult copyPatchFilesToVR(final String routerIp, final String path) {
+        final Connection conn = getConnection();
+        final String hostPath = "/opt/xensource/packages/resources/";
+        String rc = "";
+        for (String file: systemVmPatchFiles) {
+            rc = callHostPlugin(conn, "vmops", "createFileInDomr", "domrip", routerIp, "srcfilepath", hostPath.concat(file), "dstfilepath", path, "cleanup", "false");
+            if (rc.startsWith("fail#")) {
+                s_logger.error(String.format("Failed to scp file %s required for patching the systemVM", file));
+                break;
+            }
+        }
+
+        s_logger.debug("VR Config files at " + hostPath + " got created in VR, IP: " + routerIp);
 
         return new ExecutionResult(rc.startsWith("succ#"), rc.substring(5));
     }
@@ -1092,9 +1122,6 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
                     _host.setSystemvmisouuid(vdi.getRecord(conn).uuid);
                 }
             }
-            if (_host.getSystemvmisouuid() == null) {
-                throw new CloudRuntimeException("can not find systemvmiso");
-            }
         }
 
         final VBD.Record cdromVBDR = new VBD.Record();
@@ -1104,14 +1131,12 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         cdromVBDR.userdevice = "3";
         cdromVBDR.mode = Types.VbdMode.RO;
         cdromVBDR.type = Types.VbdType.CD;
-        final VBD cdromVBD = VBD.create(conn, cdromVBDR);
-        cdromVBD.insert(conn, VDI.getByUuid(conn, _host.getSystemvmisouuid()));
 
-        return cdromVBD;
+        return VBD.create(conn, cdromVBDR);
     }
 
-    protected boolean createSecondaryStorageFolder(final Connection conn, final String remoteMountPath, final String newFolder) {
-        final String result = callHostPlugin(conn, "vmopsSnapshot", "create_secondary_storage_folder", "remoteMountPath", remoteMountPath, "newFolder", newFolder);
+    protected boolean createSecondaryStorageFolder(final Connection conn, final String remoteMountPath, final String newFolder, final String nfsVersion) {
+        final String result = callHostPlugin(conn, "vmopsSnapshot", "create_secondary_storage_folder", "remoteMountPath", remoteMountPath, "newFolder", newFolder, "nfsVersion", nfsVersion);
         return result != null;
     }
 
@@ -1396,7 +1421,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
                 final DiskTO[] disks = vmSpec.getDisks();
                 for (final DiskTO disk : disks) {
                     if (disk.getType() == Volume.Type.ISO) {
-                        final TemplateObjectTO iso = (TemplateObjectTO)disk.getData();
+                        final TemplateObjectTO iso = (TemplateObjectTO) disk.getData();
                         final String osType = iso.getGuestOsType();
                         if (osType != null) {
                             final String isoGuestOsName = getGuestOsType(vmSpec.getPlatformEmulator());
@@ -1482,8 +1507,8 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         return vm;
     }
 
-    protected boolean deleteSecondaryStorageFolder(final Connection conn, final String remoteMountPath, final String folder) {
-        final String details = callHostPlugin(conn, "vmopsSnapshot", "delete_secondary_storage_folder", "remoteMountPath", remoteMountPath, "folder", folder);
+    protected boolean deleteSecondaryStorageFolder(final Connection conn, final String remoteMountPath, final String folder, final String nfsVersion) {
+        final String details = callHostPlugin(conn, "vmopsSnapshot", "delete_secondary_storage_folder", "remoteMountPath", remoteMountPath, "folder", folder, "nfsVersion", nfsVersion);
         return details != null && details.equals("1");
     }
 
@@ -1778,9 +1803,6 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
             }
             details.put("product_brand", productBrand);
             details.put("product_version", _host.getProductVersion());
-            if (isUefiSupported(_host.getProductVersion())) {
-                details.put(com.cloud.host.Host.HOST_UEFI_ENABLE, Boolean.TRUE.toString());
-            }
             if (hr.softwareVersion.get("product_version_text_short") != null) {
                 details.put("product_version_text_short", hr.softwareVersion.get("product_version_text_short"));
                 cmd.setHypervisorVersion(hr.softwareVersion.get("product_version_text_short"));
@@ -1899,13 +1921,25 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         }
     }
 
+    protected void syncPlatformAndCoresPerSocketSettings(String coresPerSocket, Map<String, String> platform) {
+        if (org.apache.commons.lang3.StringUtils.isBlank(coresPerSocket) || platform == null) {
+            return;
+        }
+        if (platform.containsKey(PLATFORM_CORES_PER_SOCKET_KEY)) {
+            s_logger.debug("Updating the cores per socket value from: " + platform.get(PLATFORM_CORES_PER_SOCKET_KEY) + " to " + coresPerSocket);
+        }
+        platform.put(PLATFORM_CORES_PER_SOCKET_KEY, coresPerSocket);
+    }
+
     protected void finalizeVmMetaData(final VM vm, final VM.Record vmr, final Connection conn, final VirtualMachineTO vmSpec) throws Exception {
 
         final Map<String, String> details = vmSpec.getDetails();
         if (details != null) {
             final String platformstring = details.get(VmDetailConstants.PLATFORM);
+            final String coresPerSocket = details.get(VmDetailConstants.CPU_CORE_PER_SOCKET);
             if (platformstring != null && !platformstring.isEmpty()) {
                 final Map<String, String> platform = com.cloud.utils.StringUtils.stringToMap(platformstring);
+                syncPlatformAndCoresPerSocketSettings(coresPerSocket, platform);
                 vm.setPlatform(conn, platform);
             } else {
                 final String timeoffset = details.get(VmDetailConstants.TIME_OFFSET);
@@ -1914,10 +1948,9 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
                     platform.put(VmDetailConstants.TIME_OFFSET, timeoffset);
                     vm.setPlatform(conn, platform);
                 }
-                final String coresPerSocket = details.get(VmDetailConstants.CPU_CORE_PER_SOCKET);
                 if (coresPerSocket != null) {
                     final Map<String, String> platform = vm.getPlatform(conn);
-                    platform.put("cores-per-socket", coresPerSocket);
+                    syncPlatformAndCoresPerSocketSettings(coresPerSocket, platform);
                     vm.setPlatform(conn, platform);
                 }
             }
@@ -3130,7 +3163,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         // stability
         if (dynamicMaxRam > staticMax) { // XS contraint that dynamic max <=
             // static max
-            s_logger.warn("dynamic max " + toHumanReadableSize(dynamicMaxRam) + " cant be greater than static max " + toHumanReadableSize(staticMax) + ", this can lead to stability issues. Setting static max as much as dynamic max ");
+            s_logger.warn("dynamic max " + toHumanReadableSize(dynamicMaxRam) + " can't be greater than static max " + toHumanReadableSize(staticMax) + ", this can lead to stability issues. Setting static max as much as dynamic max ");
             return dynamicMaxRam;
         }
         return staticMax;
@@ -3166,7 +3199,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
             final URLConnection uc = url.openConnection();
             in = new BufferedReader(new InputStreamReader(uc.getInputStream()));
             final InputSource statsSource = new InputSource(in);
-            return DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(statsSource);
+            return ParserUtils.getSaferDocumentBuilderFactory().newDocumentBuilder().parse(statsSource);
         } catch (final MalformedURLException e) {
             s_logger.warn("Malformed URL?  come on...." + urlStr);
             return null;
@@ -3438,7 +3471,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         final HashMap<String, VmStatsEntry> vmResponseMap = new HashMap<String, VmStatsEntry>();
 
         for (final String vmUUID : vmUUIDs) {
-            vmResponseMap.put(vmUUID, new VmStatsEntry(0, 0, 0, 0, 0, 0, 0, "vm"));
+            vmResponseMap.put(vmUUID, new VmStatsEntry(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "vm"));
         }
 
         final Object[] rrdData = getRRDData(conn, 2); // call rrddata with 2 for
@@ -3494,6 +3527,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
                     vmStatsAnswer.setDiskWriteKBs(vmStatsAnswer.getDiskWriteKBs() + getDataAverage(dataNode, col, numRows) / BASE_TO_CONVERT_BYTES_INTO_KILOBYTES);
                 } else if (param.contains("memory_internal_free")) {
                     vmStatsAnswer.setIntFreeMemoryKBs(vmStatsAnswer.getIntFreeMemoryKBs() + getDataAverage(dataNode, col, numRows) / BASE_TO_CONVERT_BYTES_INTO_KILOBYTES);
+                    vmStatsAnswer.setIntUsableMemoryKBs(vmStatsAnswer.getIntFreeMemoryKBs() + getDataAverage(dataNode, col, numRows) / BASE_TO_CONVERT_BYTES_INTO_KILOBYTES);
                 } else if (param.contains("memory_target")) {
                     vmStatsAnswer.setTargetMemoryKBs(vmStatsAnswer.getTargetMemoryKBs() + getDataAverage(dataNode, col, numRows) / BASE_TO_CONVERT_BYTES_INTO_KILOBYTES);
                 } else if (param.contains("memory")) {
@@ -4102,7 +4136,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
     }
 
     protected boolean postCreatePrivateTemplate(final Connection conn, final String templatePath, final String tmpltFilename, final String templateName, String templateDescription, String checksum,
-            final long size, final long virtualSize, final long templateId) {
+            final long size, final long virtualSize, final long templateId, final String nfsVersion) {
 
         if (templateDescription == null) {
             templateDescription = "";
@@ -4113,7 +4147,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         }
 
         final String result = callHostPlugin(conn, "vmopsSnapshot", "post_create_private_template", "templatePath", templatePath, "templateFilename", tmpltFilename, "templateName", templateName,
-                "templateDescription", templateDescription, "checksum", checksum, "size", String.valueOf(size), "virtualSize", String.valueOf(virtualSize), "templateId", String.valueOf(templateId));
+                "templateDescription", templateDescription, "checksum", checksum, "size", String.valueOf(size), "virtualSize", String.valueOf(virtualSize), "templateId", String.valueOf(templateId), "nfsVersion", nfsVersion);
 
         boolean success = false;
         if (result != null && !result.isEmpty()) {
@@ -4885,7 +4919,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
                     throw new CloudRuntimeException("Unable to authenticate");
                 }
 
-                final String cmd = "mkdir -p /opt/cloud/bin /var/log/cloud";
+                final String cmd = "mkdir -p /opt/cloud/bin /var/log/cloud /opt/xensource/packages/resources/";
                 if (!SSHCmdHelper.sshExecuteCmd(sshConnection, cmd)) {
                     throw new CloudRuntimeException("Cannot create directory /opt/cloud/bin on XenServer hosts");
                 }
@@ -5661,6 +5695,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         String secondaryStorageUrl = cmd.getSecondaryStorageUrl();
         String vmIP = cmd.getSystemVmIp();
         String diagnosticsZipFile = cmd.getFileName();
+        String nfsVersion = cmd.getNfsVersion();
 
         String localDir = null;
         boolean success;
@@ -5671,7 +5706,7 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
             URI uri = new URI(secondaryStorageUrl);
             secondaryStorageMountPath = uri.getHost() + ":" + uri.getPath();
             localDir = BASE_MOUNT_POINT_ON_REMOTE + UUID.nameUUIDFromBytes(secondaryStorageMountPath.getBytes());
-            String mountPoint = mountNfs(conn, secondaryStorageMountPath, localDir);
+            String mountPoint = mountNfs(conn, secondaryStorageMountPath, localDir, nfsVersion);
             if (StringUtils.isBlank(mountPoint)) {
                 return new CopyToSecondaryStorageAnswer(cmd, false, "Could not mount secondary storage " + secondaryStorageMountPath + " on host " + localDir);
             }
@@ -5698,11 +5733,11 @@ public abstract class CitrixResourceBase implements ServerResource, HypervisorRe
         }
     }
 
-    private String mountNfs(Connection conn, String remoteDir, String localDir) {
+    private String mountNfs(Connection conn, String remoteDir, String localDir, String nfsVersion) {
         if (localDir == null) {
             localDir = BASE_MOUNT_POINT_ON_REMOTE + UUID.nameUUIDFromBytes(remoteDir.getBytes());
         }
-        return callHostPlugin(conn, "cloud-plugin-storage", "mountNfsSecondaryStorage", "localDir", localDir, "remoteDir", remoteDir);
+        return callHostPlugin(conn, "cloud-plugin-storage", "mountNfsSecondaryStorage", "localDir", localDir, "remoteDir", remoteDir, "nfsVersion", nfsVersion);
     }
 
     // Unmount secondary storage from host

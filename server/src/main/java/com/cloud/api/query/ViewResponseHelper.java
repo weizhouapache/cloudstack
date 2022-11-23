@@ -25,6 +25,7 @@ import java.util.Hashtable;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.affinity.AffinityGroupResponse;
@@ -56,6 +57,7 @@ import org.apache.cloudstack.api.response.UserResponse;
 import org.apache.cloudstack.api.response.UserVmResponse;
 import org.apache.cloudstack.api.response.VolumeResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
+import org.apache.cloudstack.outofbandmanagement.OutOfBandManagement;
 import org.apache.cloudstack.context.CallContext;
 import org.apache.log4j.Logger;
 
@@ -134,14 +136,21 @@ public class ViewResponseHelper {
         return respList;
     }
 
-
     public static List<UserVmResponse> createUserVmResponse(ResponseView view, String objectName, UserVmJoinVO... userVms) {
-        return createUserVmResponse(view, objectName, EnumSet.of(VMDetails.all), userVms);
+        return createUserVmResponse(view, objectName, EnumSet.of(VMDetails.all), null, null, userVms);
     }
 
-    public static List<UserVmResponse> createUserVmResponse(ResponseView view, String objectName, EnumSet<VMDetails> details, UserVmJoinVO... userVms) {
-        Account caller = CallContext.current().getCallingAccount();
+    public static List<UserVmResponse> createUserVmResponse(ResponseView view, String objectName, Set<VMDetails> details, UserVmJoinVO... userVms) {
+        return createUserVmResponse(view, objectName, details, null, null, userVms);
+    }
 
+    public static List<UserVmResponse> createUserVmResponse(ResponseView view, String objectName, Set<VMDetails> details, Boolean accumulateStats, UserVmJoinVO... userVms) {
+        return createUserVmResponse(view, objectName, details, accumulateStats, null, userVms);
+    }
+
+    public static List<UserVmResponse> createUserVmResponse(ResponseView view, String objectName, Set<VMDetails> details, Boolean accumulateStats, Boolean showUserData,
+            UserVmJoinVO... userVms) {
+        Account caller = CallContext.current().getCallingAccount();
         Hashtable<Long, UserVmResponse> vmDataList = new Hashtable<Long, UserVmResponse>();
         // Initialise the vmdatalist with the input data
 
@@ -149,7 +158,7 @@ public class ViewResponseHelper {
             UserVmResponse userVmData = vmDataList.get(userVm.getId());
             if (userVmData == null) {
                 // first time encountering this vm
-                userVmData = ApiDBUtils.newUserVmResponse(view, objectName, userVm, details, caller);
+                userVmData = ApiDBUtils.newUserVmResponse(view, objectName, userVm, details, accumulateStats, showUserData, caller);
             } else{
                 // update nics, securitygroups, tags, affinitygroups for 1 to many mapping fields
                 userVmData = ApiDBUtils.fillVmDetails(view, userVmData, userVm);
@@ -246,6 +255,16 @@ public class ViewResponseHelper {
             vrDataList.put(vr.getId(), vrData);
         }
         return new ArrayList<HostResponse>(vrDataList.values());
+    }
+
+    public static List<OutOfBandManagement> createHostOobmResponse(HostJoinVO... hosts) {
+        Hashtable<Long, OutOfBandManagement> vrDataList = new Hashtable<Long, OutOfBandManagement>();
+        // Initialise the vrdatalist with the input data
+        for (HostJoinVO vr : hosts) {
+            OutOfBandManagement vrData = ApiDBUtils.newHostOobmResponse(vr);
+            vrDataList.put(vr.getId(), vrData);
+        }
+        return new ArrayList<OutOfBandManagement>(vrDataList.values());
     }
 
     public static List<HostForMigrationResponse> createHostForMigrationResponse(EnumSet<HostDetails> details, HostJoinVO... hosts) {

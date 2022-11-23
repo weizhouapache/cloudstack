@@ -89,4 +89,5 @@ public class RoleDaoImpl extends GenericDaoBase<RoleVO, Long> implements RoleDao
         sc.setParameters("roleType", type);
         return findOneBy(sc);
     }
+
 }

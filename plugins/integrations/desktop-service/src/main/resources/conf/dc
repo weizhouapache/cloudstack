@@ -1,0 +1,18 @@
+<powershell>
+copy $MyInvocation.MyCommand.Source c:\Works-DC\userdata.ps1
+date > "c:\Works-DC\installed.txt"
+$comname ="{{ instance_name }}"
+netsh advfirewall firewall add rule name="Works-DC" dir=in action=allow localport=8083 protocol=tcp
+set-DnsClientServerAddress -InterfaceIndex (Get-NetAdapter |Select-Object InterfaceAlias, interfaceindex).interfaceindex -ServerAddresses "{{ samba_ip }}"
+$password = "Ablecloud1!" | ConvertTo-SecureString -asPlainText -Force
+$username = "${{ domain_name }}\administrator" 
+$credential = New-Object System.Management.Automation.PSCredential($username,$password)
+echo Rename-Computer >> "c:\Works-DC\installed.txt"
+Rename-Computer -NewName $comname
+$conf = '{  "ADusername": "Administrator",  "ADpassword": "Ablecloud1!",  "ADdomain": "{{ domain_name }}.local",  "ADserver": "{{ domain_name }}.local",  "ADport": 636,  "ADbasedn": "DC={{ domain_name }},DC=local",  "Silent": false,  "PolicyPATH": "./grouppolicy",  "PolicyLIST": "policylist.json",  "UpdatePolicy": true}'
+echo $conf| Out-File -Encoding ascii "c:\Works-DC\conf.json"
+echo $conf
+echo $conf >> "c:\Works-DC\installed.txt"
+C:\Works-DC\nssm.exe restart "Works-DC"
+date >> "c:\Works-DC\installed.txt"
+</powershell>

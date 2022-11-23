@@ -21,6 +21,7 @@ import java.util.List;
 
 import javax.inject.Inject;
 
+import com.cloud.offering.DiskOffering;
 import org.apache.cloudstack.annotation.AnnotationService;
 import org.apache.cloudstack.annotation.dao.AnnotationDao;
 import org.apache.cloudstack.api.ResponseObject.ResponseView;
@@ -95,6 +96,10 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
             volResponse.setClusterName(volume.getClusterName());
             volResponse.setPodId(volume.getPodUuid());
             volResponse.setPodName(volume.getPodName());
+        }
+
+        if (volume.getVmType() != null) {
+            volResponse.setVmType(volume.getVmType().toString());
         }
 
         if (volume.getVolumeType() != null) {
@@ -178,10 +183,12 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
         ApiResponseHelper.populateOwner(volResponse, volume);
 
         if (volume.getDiskOfferingId() > 0) {
-            if (ApiDBUtils.findServiceOfferingByUuid(volume.getDiskOfferingUuid()) != null) {
-                volResponse.setServiceOfferingId(volume.getDiskOfferingUuid());
-                volResponse.setServiceOfferingName(volume.getDiskOfferingName());
-                volResponse.setServiceOfferingDisplayText(volume.getDiskOfferingDisplayText());
+            DiskOffering computeOnlyDiskOffering  = ApiDBUtils.findComputeOnlyDiskOfferingById(volume.getDiskOfferingId());
+            if (computeOnlyDiskOffering != null) {
+                ServiceOffering serviceOffering = ApiDBUtils.findServiceOfferingByComputeOnlyDiskOffering(volume.getDiskOfferingId());
+                volResponse.setServiceOfferingId(String.valueOf(serviceOffering.getId()));
+                volResponse.setServiceOfferingName(serviceOffering.getName());
+                volResponse.setServiceOfferingDisplayText(serviceOffering.getDisplayText());
             } else {
                 volResponse.setDiskOfferingId(volume.getDiskOfferingUuid());
                 volResponse.setDiskOfferingName(volume.getDiskOfferingName());
@@ -227,7 +234,7 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
         volResponse.setAttached(volume.getAttached());
         volResponse.setDestroyed(volume.getState() == Volume.State.Destroy);
         boolean isExtractable = true;
-        if (volume.getVolumeType() != Volume.Type.DATADISK) { // Datadisk dont
+        if (volume.getVolumeType() != Volume.Type.DATADISK) { // Datadisk don't
             // have any
             // template
             // dependence.
@@ -266,6 +273,7 @@ public class VolumeJoinDaoImpl extends GenericDaoBaseWithTagInformation<VolumeJo
         }
 
         volResponse.setObjectName("volume");
+        volResponse.setExternalUuid(volume.getExternalUuid());
         return volResponse;
     }
 

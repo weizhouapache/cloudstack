@@ -19,42 +19,49 @@
   <div class="form-layout" v-ctrl-enter="handleSubmit">
     <a-spin :spinning="loading">
       <a-form
-        :form="form"
-        @submit="handleSubmit"
-        layout="vertical">
-        <a-form-item>
-          <tooltip-label slot="label" :title="$t('label.name')" :tooltip="apiParams.name.description"/>
+        :ref="formRef"
+        :model="form"
+        :rules="rules"
+        @finish="handleSubmit"
+        layout="vertical"
+       >
+        <a-form-item name="name" ref="name">
+          <template #label>
+            <tooltip-label :title="$t('label.name')" :tooltip="apiParams.name.description"/>
+          </template>
           <a-input
-            v-decorator="['name', {
-              rules: [{ required: true, message: `${$t('message.error.required.input')}` }]
-            }]"
+            v-model:value="form.name"
             :placeholder="apiParams.name.description"
             autoFocus />
         </a-form-item>
-        <a-form-item>
-          <tooltip-label slot="label" :title="$t('label.displaytext')" :tooltip="apiParams.displaytext.description"/>
+        <a-form-item name="displaytext" ref="displaytext">
+          <template #label>
+            <tooltip-label :title="$t('label.displaytext')" :tooltip="apiParams.displaytext.description"/>
+          </template>
           <a-input
-            v-decorator="['displaytext', {
-              rules: [{ required: true, message: `${$t('message.error.required.input')}` }]
-            }]"
+            v-model:value="form.displaytext"
             :placeholder="apiParams.displaytext.description"
             autoFocus />
         </a-form-item>
-        <a-form-item v-if="isUpdatingIsolatedNetwork">
-          <tooltip-label slot="label" :title="$t('label.networkofferingid')" :tooltip="apiParams.networkofferingid.description"/>
-          <span v-if="networkOffering.id && networkOffering.id != resource.networkofferingid">
+        <a-form-item name="networkofferingid" ref="networkofferingid" v-if="isUpdatingIsolatedNetwork">
+          <template #label>
+            <tooltip-label :title="$t('label.networkofferingid')" :tooltip="apiParams.networkofferingid.description"/>
+          </template>
+          <span v-if="networkOffering.id && networkOffering.id !== resource.networkofferingid">
             <a-alert type="warning">
-              <span slot="message" v-html="$t('message.network.offering.change.warning')" />
+              <template #message>
+                <span v-html="$t('message.network.offering.change.warning')" />
+              </template>
             </a-alert>
             <br/>
           </span>
           <a-select
             id="offering-selection"
-            v-decorator="['networkofferingid', {}]"
+            v-model:value="form.networkofferingid"
             showSearch
-            optionFilterProp="children"
+            optionFilterProp="label"
             :filterOption="(input, option) => {
-              return option.componentOptions.children[0].text.toLowerCase().indexOf(input.toLowerCase()) >= 0
+              return option.children[0].children.text.toLowerCase().indexOf(input.toLowerCase()) >= 0
             }"
             :loading="networkOfferingLoading"
             :placeholder="apiParams.networkofferingid.description"
@@ -64,40 +71,98 @@
             </a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item>
-          <tooltip-label slot="label" :title="$t('label.guestvmcidr')" :tooltip="apiParams.guestvmcidr.description"/>
+        <a-form-item name="guestvmcidr" ref="guestvmcidr">
+          <template #label>
+            <tooltip-label :title="$t('label.guestvmcidr')" :tooltip="apiParams.guestvmcidr.description"/>
+          </template>
           <a-input
-            v-decorator="['guestvmcidr', {}]"
+            v-model:value="form.guestvmcidr"
             :placeholder="apiParams.guestvmcidr.description"
             @change="(e) => { cidrChanged = e.target.value !== resource.cidr }" />
         </a-form-item>
-        <a-form-item v-if="cidrChanged">
-          <tooltip-label slot="label" :title="$t('label.changecidr')" :tooltip="apiParams.changecidr.description"/>
-          <a-switch v-decorator="['changecidr', {}]" />
+        <a-form-item name="changecidr" ref="changecidr" v-if="cidrChanged">
+          <template #label>
+            <tooltip-label :title="$t('label.changecidr')" :tooltip="apiParams.changecidr.description"/>
+          </template>
+          <a-switch v-model:checked="form.changecidr" />
         </a-form-item>
-        <a-form-item v-if="isUpdatingIsolatedNetwork">
-          <tooltip-label slot="label" :title="$t('label.networkdomain')" :tooltip="apiParams.guestvmcidr.description"/>
+        <a-form-item name="networkdomain" ref="networkdomain" v-if="isUpdatingIsolatedNetwork">
+          <template #label>
+            <tooltip-label :title="$t('label.networkdomain')" :tooltip="apiParams.guestvmcidr.description"/>
+          </template>
           <a-input
-            v-decorator="['networkdomain', {}]"
+            v-model:value="form.networkdomain"
             :placeholder="apiParams.networkdomain.description"
             autoFocus />
         </a-form-item>
-        <a-form-item v-if="resource.redundantrouter">
-          <tooltip-label slot="label" :title="$t('label.updateinsequence')" :tooltip="apiParams.updateinsequence.description"/>
-          <a-switch v-decorator="['maclearning', {initialValue: false}]" />
+        <a-form-item name="updateinsequence" ref="updateinsequence" v-if="resource.redundantrouter">
+          <template #label>
+            <tooltip-label :title="$t('label.updateinsequence')" :tooltip="apiParams.updateinsequence.description"/>
+          </template>
+          <a-switch v-model:checked="form.updateinsequence" />
         </a-form-item>
-        <a-form-item v-if="isAdmin()">
-          <tooltip-label slot="label" :title="$t('label.displaynetwork')" :tooltip="apiParams.displaynetwork.description"/>
-          <a-switch v-decorator="['displaynetwork', {}]" :defaultChecked="resource.displaynetwork" />
+        <div v-if="selectedNetworkOfferingSupportsDns">
+          <a-row :gutter="12">
+            <a-col :md="12" :lg="12">
+              <a-form-item v-if="'dns1' in apiParams" name="dns1" ref="dns1">
+                <template #label>
+                  <tooltip-label :title="$t('label.dns1')" :tooltip="apiParams.dns1.description"/>
+                </template>
+                <a-input
+                  v-model:value="form.dns1"
+                  :placeholder="apiParams.dns1.description"/>
+              </a-form-item>
+            </a-col>
+            <a-col :md="12" :lg="12">
+              <a-form-item v-if="'dns2' in apiParams" name="dns2" ref="dns2">
+                <template #label>
+                  <tooltip-label :title="$t('label.dns2')" :tooltip="apiParams.dns2.description"/>
+                </template>
+                <a-input
+                  v-model:value="form.dns2"
+                  :placeholder="apiParams.dns2.description"/>
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-row :gutter="12">
+            <a-col :md="12" :lg="12">
+              <a-form-item v-if="networkOffering && ((networkOffering.guestiptype === 'Isolated' && networkOffering.internetprotocol === 'DualStack') || (networkOffering.guestiptype === 'Shared' && resource.ip6cidr)) && 'ip6dns1' in apiParams" name="ip6dns1" ref="ip6dns1">
+                <template #label>
+                  <tooltip-label :title="$t('label.ip6dns1')" :tooltip="apiParams.ip6dns1.description"/>
+                </template>
+                <a-input
+                  v-model:value="form.ip6dns1"
+                  :placeholder="apiParams.ip6dns1.description"/>
+              </a-form-item>
+            </a-col>
+            <a-col :md="12" :lg="12">
+              <a-form-item v-if="networkOffering && ((networkOffering.guestiptype === 'Isolated' && networkOffering.internetprotocol === 'DualStack') || (networkOffering.guestiptype === 'Shared' && resource.ip6cidr)) && 'ip6dns1' in apiParams" name="ip6dns2" ref="ip6dns2">
+                <template #label>
+                  <tooltip-label :title="$t('label.ip6dns2')" :tooltip="apiParams.ip6dns2.description"/>
+                </template>
+                <a-input
+                  v-model:value="form.ip6dns2"
+                  :placeholder="apiParams.ip6dns2.description"/>
+              </a-form-item>
+            </a-col>
+          </a-row>
+        </div>
+        <a-form-item name="displaynetwork" ref="displaynetwork" v-if="isAdmin()">
+          <template #label>
+            <tooltip-label :title="$t('label.displaynetwork')" :tooltip="apiParams.displaynetwork.description"/>
+          </template>
+          <a-switch v-model:checked="form.displaynetwork" />
         </a-form-item>
-        <a-form-item v-if="isAdmin()">
-          <tooltip-label slot="label" :title="$t('label.forced')" :tooltip="apiParams.forced.description"/>
-          <a-switch v-decorator="['forced', {}]" />
+        <a-form-item name="forced" ref="forced" v-if="isAdmin()">
+          <template #label>
+            <tooltip-label :title="$t('label.forced')" :tooltip="apiParams.forced.description"/>
+          </template>
+          <a-switch v-model:checked="form.forced" />
         </a-form-item>
 
         <div :span="24" class="action-button">
           <a-button @click="closeAction">{{ $t('label.cancel') }}</a-button>
-          <a-button :loading="loading" ref="submit" type="primary" @click="handleSubmit">{{ this.$t('label.ok') }}</a-button>
+          <a-button :loading="loading" ref="submit" type="primary" @click="handleSubmit">{{ $t('label.ok') }}</a-button>
         </div>
       </a-form>
     </a-spin>
@@ -105,12 +170,15 @@
 </template>
 
 <script>
+import { ref, reactive, toRaw } from 'vue'
 import { api } from '@/api'
 import { isAdmin } from '@/role'
+import { mixinForm } from '@/utils/mixin'
 import TooltipLabel from '@/components/widgets/TooltipLabel'
 
 export default {
   name: 'UpdateNetwork',
+  mixins: [mixinForm],
   components: {
     TooltipLabel
   },
@@ -131,14 +199,18 @@ export default {
     }
   },
   beforeCreate () {
-    this.form = this.$form.createForm(this)
     this.apiParams = this.$getApiParams('updateNetwork')
   },
   created () {
+    this.initForm()
     this.resourceValues = {
       name: this.resource.name,
       displaytext: this.resource.displaytext,
-      guestvmcidr: this.resource.cidr
+      guestvmcidr: this.resource.cidr,
+      dns1: this.resource.dns1,
+      dns2: this.resource.dns2,
+      ip6dns1: this.resource.ip6dns1,
+      ip6dns2: this.resource.ip6dns2
     }
     if (this.isUpdatingIsolatedNetwork) {
       this.resourceValues.networkdomain = this.resource.networkdomain
@@ -146,7 +218,7 @@ export default {
     for (var field in this.resourceValues) {
       var fieldValue = this.resourceValues[field]
       if (fieldValue) {
-        this.form.getFieldDecorator(field, { initialValue: fieldValue })
+        this.form[field] = fieldValue
       }
     }
     this.fetchData()
@@ -154,9 +226,27 @@ export default {
   computed: {
     isUpdatingIsolatedNetwork () {
       return this.resource && this.resource.type === 'Isolated'
+    },
+    selectedNetworkOfferingSupportsDns () {
+      if (this.networkOffering) {
+        const services = this.networkOffering?.service || []
+        const dnsServices = services.filter(service => service.name === 'Dns')
+        return dnsServices && dnsServices.length === 1
+      }
+      return false
     }
   },
   methods: {
+    initForm () {
+      this.formRef = ref()
+      this.form = reactive({
+        displaynetwork: this.resource.displaynetwork
+      })
+      this.rules = reactive({
+        name: [{ required: true, message: this.$t('message.error.required.input') }],
+        displaytext: [{ required: true, message: this.$t('message.error.required.input') }]
+      })
+    },
     fetchData () {
       this.fetchNetworkOfferingData()
     },
@@ -168,12 +258,14 @@ export default {
     },
     fetchNetworkOfferingData () {
       this.networkOfferings = []
-      if (!this.isUpdatingIsolatedNetwork) return
       const params = {
         zoneid: this.resource.zoneid,
         state: 'Enabled',
         guestiptype: this.resource.type,
         forvpc: !!this.resource.vpcid
+      }
+      if (!this.isUpdatingIsolatedNetwork) {
+        params.id = this.resource.networkofferingid
       }
       this.networkOfferingLoading = true
       api('listNetworkOfferings', params).then(json => {
@@ -184,9 +276,7 @@ export default {
           for (var i = 0; i < this.networkOfferings.length; i++) {
             if (this.networkOfferings[i].id === this.resource.networkofferingid) {
               this.networkOffering = this.networkOfferings[i]
-              this.form.setFieldsValue({
-                networkofferingid: i
-              })
+              this.form.networkofferingid = i
               break
             }
           }
@@ -196,10 +286,9 @@ export default {
     handleSubmit (e) {
       e.preventDefault()
       if (this.loading) return
-      this.form.validateFields((err, values) => {
-        if (err) {
-          return
-        }
+      this.formRef.value.validate().then(() => {
+        const formRaw = toRaw(this.form)
+        const values = this.handleRemoveFields(formRaw)
         this.loading = true
         var manualFields = ['name', 'networkofferingid']
         const params = {
@@ -237,6 +326,8 @@ export default {
         }).finally(() => {
           this.loading = false
         })
+      }).catch(error => {
+        this.formRef.value.scrollToField(error.errorFields[0].name)
       })
     },
     closeAction () {

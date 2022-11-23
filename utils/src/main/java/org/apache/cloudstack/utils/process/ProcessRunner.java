@@ -105,10 +105,10 @@ public final class ProcessRunner {
                 process.destroy();
             }
 
-            LOG.debug(String.format("Process standard output for command [%s]: [%s].", oneLineCommand, stdOutput));
-            LOG.debug(String.format("Process standard error output command [%s]: [%s].", oneLineCommand, stdError));
+            LOG.debug(String.format("Process standard output for command : [%s].", stdOutput));
+            LOG.debug(String.format("Process standard error output command : [%s].", stdError));
         } catch (IOException | InterruptedException e) {
-            LOG.error(String.format("Exception caught error running command [%s].", oneLineCommand), e);
+            LOG.error(String.format("Exception caught error running command .", oneLineCommand), e);
             stdError = e.getMessage();
         }
         return new ProcessResult(stdOutput, stdError, retVal);

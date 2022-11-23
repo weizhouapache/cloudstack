@@ -18,7 +18,6 @@ package com.cloud.api.query.dao;
 
 import java.text.DecimalFormat;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
@@ -28,6 +27,9 @@ import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 
+import com.cloud.network.vpc.VpcVO;
+import com.cloud.network.vpc.dao.VpcDao;
+import com.cloud.storage.DiskOfferingVO;
 import org.apache.cloudstack.affinity.AffinityGroupResponse;
 import org.apache.cloudstack.annotation.AnnotationService;
 import org.apache.cloudstack.annotation.dao.AnnotationDao;
@@ -42,6 +44,7 @@ import org.apache.cloudstack.api.response.UserVmResponse;
 import org.apache.cloudstack.context.CallContext;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
 import org.apache.cloudstack.query.QueryService;
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.log4j.Logger;
 import org.springframework.stereotype.Component;
 
@@ -87,6 +90,8 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
     @Inject
     private AnnotationDao annotationDao;
     @Inject
+    private VpcDao vpcDao;
+    @Inject
     UserStatisticsDao userStatsDao;
 
     private final SearchBuilder<UserVmJoinVO> VmDetailSearch;
@@ -117,7 +122,8 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
     }
 
     @Override
-    public UserVmResponse newUserVmResponse(ResponseView view, String objectName, UserVmJoinVO userVm, EnumSet<VMDetails> details, Account caller) {
+    public UserVmResponse newUserVmResponse(ResponseView view, String objectName, UserVmJoinVO userVm, Set<VMDetails> details, Boolean accumulateStats, Boolean showUserData,
+            Account caller) {
         UserVmResponse userVmResponse = new UserVmResponse();
 
         if (userVm.getHypervisorType() != null) {
@@ -127,12 +133,12 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
         userVmResponse.setName(userVm.getName());
 
         if (userVm.getDisplayName() != null) {
-        userVmResponse.setDisplayName(userVm.getDisplayName());
+            userVmResponse.setDisplayName(userVm.getDisplayName());
         } else {
             userVmResponse.setDisplayName(userVm.getName());
         }
 
-        if (userVm.getAccountType() == Account.ACCOUNT_TYPE_PROJECT) {
+        if (userVm.getAccountType() == Account.Type.PROJECT) {
             userVmResponse.setProjectId(userVm.getProjectUuid());
             userVmResponse.setProjectName(userVm.getProjectName());
         } else {
@@ -183,8 +189,11 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
             userVmResponse.setServiceOfferingName(userVm.getServiceOfferingName());
         }
         if (details.contains(VMDetails.all) || details.contains(VMDetails.diskoff)) {
-            userVmResponse.setDiskOfferingId(userVm.getDiskOfferingUuid());
-            userVmResponse.setDiskOfferingName(userVm.getDiskOfferingName());
+            DiskOfferingVO diskOfferingVO = ApiDBUtils.findDiskOfferingById(userVm.getDiskOfferingId());
+            if (diskOfferingVO != null) {
+                userVmResponse.setDiskOfferingId(userVm.getDiskOfferingUuid());
+                userVmResponse.setDiskOfferingName(userVm.getDiskOfferingName());
+            }
         }
         if (details.contains(VMDetails.all) || details.contains(VMDetails.backoff)) {
             userVmResponse.setBackupOfferingId(userVm.getBackupOfferingUuid());
@@ -215,7 +224,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
 
         userVmResponse.setPublicIpId(userVm.getPublicIpUuid());
         userVmResponse.setPublicIp(userVm.getPublicIpAddress());
-        userVmResponse.setKeyPairName(userVm.getKeypairName());
+        userVmResponse.setKeyPairNames(userVm.getKeypairNames());
         userVmResponse.setOsTypeId(userVm.getGuestOsUuid());
         GuestOS guestOS = ApiDBUtils.findGuestOSById(userVm.getGuestOsId());
         if (guestOS != null) {
@@ -224,7 +233,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
 
         if (details.contains(VMDetails.all) || details.contains(VMDetails.stats)) {
             // stats calculation
-            VmStats vmStats = ApiDBUtils.getVmStatistics(userVm.getId());
+            VmStats vmStats = ApiDBUtils.getVmStatistics(userVm.getId(), accumulateStats);
             if (vmStats != null) {
                 userVmResponse.setCpuUsed(new DecimalFormat("#.##").format(vmStats.getCPUUtilization()) + "%");
                 userVmResponse.setNetworkKbsRead((long)vmStats.getNetworkReadKBs());
@@ -239,6 +248,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
                 userVmResponse.setMemoryKBs(totalMemory);
                 userVmResponse.setMemoryIntFreeKBs(correctedFreeMemory);
                 userVmResponse.setMemoryTargetKBs((long)vmStats.getTargetMemoryKBs());
+                userVmResponse.setMemoryIntUsableKBs((long)vmStats.getIntUsableMemoryKBs());
 
             }
         }
@@ -251,7 +261,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
                 resp.setName(userVm.getSecurityGroupName());
                 resp.setDescription(userVm.getSecurityGroupDescription());
                 resp.setObjectName("securitygroup");
-                if (userVm.getAccountType() == Account.ACCOUNT_TYPE_PROJECT) {
+                if (userVm.getAccountType() == Account.Type.PROJECT) {
                     resp.setProjectId(userVm.getProjectUuid());
                     resp.setProjectName(userVm.getProjectName());
                 } else {
@@ -286,6 +296,12 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
                 }
                 if (userVm.getGuestType() != null) {
                     nicResponse.setType(userVm.getGuestType().toString());
+                }
+
+                if (userVm.getVpcUuid() != null) {
+                    nicResponse.setVpcId(userVm.getVpcUuid());
+                    VpcVO vpc = vpcDao.findByUuidIncludingRemoved(userVm.getVpcUuid());
+                    nicResponse.setVpcName(vpc.getName());
                 }
                 nicResponse.setIsDefault(userVm.isDefaultNic());
                 nicResponse.setDeviceId(String.valueOf(userVm.getNicDeviceId()));
@@ -333,6 +349,10 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
             }
         }
 
+        if (BooleanUtils.isTrue(showUserData)) {
+            userVmResponse.setUserData(userVm.getUserData());
+        }
+
         // set resource details map
         // Allow passing details to end user
         // Honour the display field and only return if display is set to true
@@ -360,14 +380,14 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
             }
 
             // Remove deny listed settings if user is not admin
-            if (caller.getType() != Account.ACCOUNT_TYPE_ADMIN) {
+            if (caller.getType() != Account.Type.ADMIN) {
                 String[] userVmSettingsToHide = QueryService.UserVMDeniedDetails.value().split(",");
                 for (String key : userVmSettingsToHide) {
                     resourceDetails.remove(key.trim());
                 }
             }
             userVmResponse.setDetails(resourceDetails);
-            if (caller.getType() != Account.ACCOUNT_TYPE_ADMIN) {
+            if (caller.getType() != Account.Type.ADMIN) {
                 userVmResponse.setReadOnlyDetails(QueryService.UserVMReadOnlyDetails.value());
             }
         }
@@ -377,6 +397,13 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
             userVmResponse.setDynamicallyScalable(false);
         } else {
             userVmResponse.setDynamicallyScalable(userVm.isDynamicallyScalable());
+        }
+
+        if (userVm.getUserDataId() != null) {
+            userVmResponse.setUserDataId(userVm.getUserDataUUid());
+            userVmResponse.setUserDataName(userVm.getUserDataName());
+            userVmResponse.setUserDataDetails(userVm.getUserDataDetails());
+            userVmResponse.setUserDataPolicy(userVm.getUserDataPolicy());
         }
 
         addVmRxTxDataToResponse(userVm, userVmResponse);
@@ -412,7 +439,7 @@ public class UserVmJoinDaoImpl extends GenericDaoBaseWithTagInformation<UserVmJo
             resp.setName(uvo.getSecurityGroupName());
             resp.setDescription(uvo.getSecurityGroupDescription());
             resp.setObjectName("securitygroup");
-            if (uvo.getAccountType() == Account.ACCOUNT_TYPE_PROJECT) {
+            if (uvo.getAccountType() == Account.Type.PROJECT) {
                 resp.setProjectId(uvo.getProjectUuid());
                 resp.setProjectName(uvo.getProjectName());
             } else {

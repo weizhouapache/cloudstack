@@ -155,6 +155,12 @@ public class SnapshotCommandTest {
         }
 
         @Override
+        public String getKrbdPath() {
+            // TODO Auto-generated method stub
+            return null;
+        }
+
+        @Override
         public boolean isInMaintenance() {
             // TODO Auto-generated method stub
             return false;
