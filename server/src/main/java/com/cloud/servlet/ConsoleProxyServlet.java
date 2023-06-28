@@ -553,6 +553,9 @@ public class ConsoleProxyServlet extends HttpServlet {
                 .append("?autoconnect=true")
                 .append("&port=" + ConsoleProxyManager.DEFAULT_NOVNC_PORT)
                 .append("&token=" + encryptor.encryptObject(ConsoleProxyClientParam.class, param));
+            if (requiresVncOverWebSocketConnection(vm, hostVo) && details != null && details.getValue() != null) {
+                sb.append("&language=" + details.getValue());
+            }
         }
 
         // for console access, we need guest OS type to help implement keyboard

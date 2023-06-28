@@ -34,6 +34,7 @@ import RREDecoder from "./decoders/rre.js";
 import HextileDecoder from "./decoders/hextile.js";
 import TightDecoder from "./decoders/tight.js";
 import TightPNGDecoder from "./decoders/tightpng.js";
+import SCANCODES_JP from "../keymaps/keymap-ja-atset1.js"
 
 // How many seconds to wait for a disconnect to finish
 const DISCONNECT_TIMEOUT = 3;
@@ -88,7 +89,14 @@ export default class RFB extends EventTargetMixin {
         this._rfbCredentials = options.credentials || {};
         this._shared = 'shared' in options ? !!options.shared : true;
         this._repeaterID = options.repeaterID || '';
+        this._language = options.language || '';
         this._wsProtocols = ['binary'];
+
+        // Keymaps
+        this._scancodes = {};
+        if (this._language === "jp") {
+            this._scancodes = SCANCODES_JP;
+        }
 
         // Internal state
         this._rfbConnectionState = '';
@@ -120,6 +128,7 @@ export default class RFB extends EventTargetMixin {
         this._screenFlags = 0;
 
         this._qemuExtKeyEventSupported = false;
+        this._VMwareCursorSupported = false;
 
         this._clipboardText = null;
         this._clipboardServerCapabilitiesActions = {};
@@ -148,6 +157,12 @@ export default class RFB extends EventTargetMixin {
             height: 0,
             encoding: null,
         };
+
+        // Keys
+        this._shiftPressed = false;
+        this._shiftKey = KeyTable.XK_Shift_L;
+        this._ctrlPressed = false;
+        this._altPressed = false;
 
         // Mouse state
         this._mousePos = {};
@@ -484,6 +499,17 @@ export default class RFB extends EventTargetMixin {
 
         const scancode = XtScancode[code];
 
+        if (keysym === KeyTable.XK_Shift_L || keysym === KeyTable.XK_Shift_R) {
+            this._shiftPressed = down;
+            this._shiftKey = down ? keysym : KeyTable.XK_Shift_L;
+        }
+        if (keysym === KeyTable.XK_Control_L || keysym === KeyTable.XK_Control_R) {
+            this._ctrlPressed = down;
+        }
+        if (keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R) {
+            this._altPressed = down;
+        }
+
         if (this._qemuExtKeyEventSupported && scancode) {
             // 0 is NoSymbol
             keysym = keysym || 0;
@@ -491,6 +517,28 @@ export default class RFB extends EventTargetMixin {
             Log.Info("Sending key (" + (down ? "down" : "up") + "): keysym " + keysym + ", scancode " + scancode);
 
             RFB.messages.QEMUExtendedKeyEvent(this._sock, keysym, down, scancode);
+        } else if (this._VMwareCursorSupported && Object.keys(this._scancodes).length > 0) {
+            let vscancode = this._scancodes[keysym]
+            if (vscancode) {
+                let shifted = vscancode.includes("shift");
+                let vscancode_int = parseInt(vscancode);
+                let isLetter = (keysym >= 65 && keysym <=90) || (keysym >=97 && keysym <=122);
+                if (shifted && ! this._shiftPressed && ! isLetter) {
+                    RFB.messages.keyEvent(this._sock, this._shiftKey, 1);
+                }
+                if (! shifted && this._shiftPressed && ! isLetter) {
+                    RFB.messages.keyEvent(this._sock, this._shiftKey, 0);
+                }
+                RFB.messages.VMwareExtendedKeyEvent(this._sock, keysym, down, vscancode_int);
+                if (shifted && ! this._shiftPressed && ! isLetter) {
+                    RFB.messages.keyEvent(this._sock, this._shiftKey, 0);
+                }
+                if (! shifted && this._shiftPressed && ! isLetter) {
+                    RFB.messages.keyEvent(this._sock, this._shiftKey, 1);
+                }
+            } else {
+                RFB.messages.keyEvent(this._sock, keysym, down ? 1 : 0);
+            }
         } else {
             if (!keysym) {
                 return;
@@ -2205,6 +2253,7 @@ export default class RFB extends EventTargetMixin {
                 return true;
 
             case encodings.pseudoEncodingVMwareCursor:
+                this._VMwareCursorSupported = true;
                 return this._handleVMwareCursor();
 
             case encodings.pseudoEncodingCursor:
@@ -2630,6 +2679,26 @@ RFB.messages = {
         buff[offset + 11] = RFBkeycode;
 
         sock._sQlen += 12;
+        sock.flush();
+    },
+
+    VMwareExtendedKeyEvent(sock, keysym, down, keycode) {
+        const buff = sock._sQ;
+        const offset = sock._sQlen;
+
+        buff[offset] = 127;     // msgVMWClientMessage
+        buff[offset + 1] = 0;   // msgVMWKeyEvent
+
+        buff[offset + 2] = 0;
+        buff[offset + 3] = 8;
+
+        buff[offset + 4] = (keycode >> 8);
+        buff[offset + 5] = keycode;
+
+        buff[offset + 6] = down;
+        buff[offset + 7] = 0;
+
+        sock._sQlen += 8;
         sock.flush();
     },
 
