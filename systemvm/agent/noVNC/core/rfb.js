@@ -509,6 +509,9 @@ export default class RFB extends EventTargetMixin {
 
             RFB.messages.QEMUExtendedKeyEvent(this._sock, keysym, down, scancode);
         } else if (Object.keys(this._scancodes).length > 0) {
+            if (this._language === "jp" && keysym === 48 && this._shiftPressed) {
+                return; // Shift + 0
+            }
             let vscancode = this._scancodes[keysym]
             if (vscancode) {
                 let shifted = vscancode.includes("shift");
