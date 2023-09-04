@@ -97,7 +97,7 @@ export default {
      "123" : "27         shift",
      "124" : "125        shift",
      "125" : "43         shift",
-     "126" : "11         shift",
+     "126" : "13         shift",
      "165" : "12         shift",
      "166" : "86         shift altgr",
 }
