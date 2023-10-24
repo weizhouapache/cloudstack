@@ -28,7 +28,6 @@ alter table vm_template add update_count bigint unsigned;
 alter table vm_template add updated  datetime;
 alter table storage_pool add storage_provider_id bigint unsigned;
 alter table storage_pool add scope varchar(255);
-alter table storage_pool modify id bigint unsigned AUTO_INCREMENT UNIQUE NOT NULL;
 alter table template_spool_ref add state varchar(255);
 alter table template_spool_ref add update_count bigint unsigned;
 alter table volumes add disk_type varchar(255);
