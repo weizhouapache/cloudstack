@@ -25,6 +25,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import com.cloud.consoleproxy.util.Logger;
 
+import org.apache.commons.lang3.StringUtils;
 import org.eclipse.jetty.server.Request;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.annotations.OnWebSocketClose;
@@ -98,8 +99,12 @@ public class ConsoleProxyNoVNCHandler extends WebSocketHandler {
         long ajaxSessionId = 0;
         int port;
 
-        if (host == null || portStr == null || sid == null)
+        if (host == null || portStr == null) {
             throw new IllegalArgumentException();
+        }
+        if (StringUtils.isBlank(sid)) {
+            s_logger.info("sid is null. VM is probably running in a FIPS-compliant CloudStack environment");
+        }
 
         try {
             port = Integer.parseInt(portStr);

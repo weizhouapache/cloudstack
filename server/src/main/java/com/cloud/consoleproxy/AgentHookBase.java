@@ -159,7 +159,9 @@ public abstract class AgentHookBase implements AgentHook {
         }
 
         String sid = cmd.getSid();
-        if (sid == null || !sid.equals(vm.getVncPassword())) {
+        if (StringUtils.isBlank(vm.getVncPassword())) {
+            s_logger.info("VM VNC password is null. VM is probably running in a FIPS-compliant CloudStack environment");
+        } else if (sid == null || !sid.equals(vm.getVncPassword())) {
             s_logger.warn("sid " + sid + " in url does not match stored sid.");
             return new ConsoleAccessAuthenticationAnswer(cmd, false);
         }
