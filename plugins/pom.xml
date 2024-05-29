@@ -141,6 +141,8 @@
 
         <module>storage-allocators/random</module>
 
+        <module>vnf-providers/dummy</module>
+
         <module>user-authenticators/ldap</module>
         <module>user-authenticators/md5</module>
         <module>user-authenticators/oauth2</module>

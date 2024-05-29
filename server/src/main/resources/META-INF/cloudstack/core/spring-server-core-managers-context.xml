@@ -364,4 +364,10 @@
     <bean id="vnfTemplateManager" class="org.apache.cloudstack.storage.template.VnfTemplateManagerImpl" />
 
     <bean id="volumeImportUnmanageManager" class="org.apache.cloudstack.storage.volume.VolumeImportUnmanageManagerImpl" />
+
+    <bean id="vnfServiceImpl" class="org.apache.cloudstack.vnf.VnfServiceImpl">
+        <property name="vnfProviders"
+            value="#{vnfProvidersRegistry.registered}" />
+    </bean>
+
 </beans>

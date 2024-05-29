@@ -45,6 +45,7 @@ import org.apache.cloudstack.storage.object.BucketApiService;
 import org.apache.cloudstack.storage.ImageStoreService;
 import org.apache.cloudstack.storage.template.VnfTemplateManager;
 import org.apache.cloudstack.usage.UsageService;
+import org.apache.cloudstack.vnf.VnfService;
 import org.apache.commons.collections.MapUtils;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
@@ -215,6 +216,9 @@ public abstract class BaseCmd {
     public Ipv6Service ipv6Service;
     @Inject
     public VnfTemplateManager vnfTemplateManager;
+    @Inject
+    public VnfService vnfService;
+
     @Inject
     public BucketApiService _bucketService;
 
