@@ -114,6 +114,7 @@ write_files:
         echo "Installing binaries from ${BINARIES_DIR}"
         mkdir -p /opt/cni/bin
         tar -f "${BINARIES_DIR}/cni/cni-plugins-"*64.tgz -C /opt/cni/bin -xz
+        chown -R root:root /opt/cni/bin/
 
         mkdir -p /opt/bin
         tar -f "${BINARIES_DIR}/cri-tools/crictl-linux-"*64.tar.gz -C /opt/bin -xz
@@ -183,6 +184,7 @@ write_files:
         echo "Warning: ${BINARIES_DIR} not found. Will get binaries and docker images from Internet."
         mkdir -p /opt/cni/bin
         curl -L "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-amd64-${CNI_VERSION}.tgz" | tar -C /opt/cni/bin -xz
+        chown -R root:root /opt/cni/bin/
 
         mkdir -p /opt/bin
         curl -L "https://github.com/kubernetes-incubator/cri-tools/releases/download/${CRICTL_VERSION}/crictl-${CRICTL_VERSION}-linux-amd64.tar.gz" | tar -C /opt/bin -xz
