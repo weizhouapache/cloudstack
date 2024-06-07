@@ -1,0 +1,6 @@
+#cks-config
+#image: quay.io/cilium/cilium:v1.15.4 quay.io/cilium/operator-generic:v1.15.4
+command:
+  - curl -L https://github.com/cilium/cilium-cli/releases/download/v0.16.6/cilium-linux-amd64.tar.gz | tar -C /usr/bin -xz
+  - cilium version --client
+  - cilium install --version 1.15.4

@@ -79,7 +79,11 @@ fi
 NETWORK_CONFIG_URL="${5}"
 echo "Downloading network config ${NETWORK_CONFIG_URL}"
 network_conf_file="${working_dir}/network.yaml"
-curl -sSL ${NETWORK_CONFIG_URL} -o ${network_conf_file}
+if [ -f "$NETWORK_CONFIG_URL" ];then
+  cp "${NETWORK_CONFIG_URL}" ${network_conf_file}
+else
+  curl -sSL ${NETWORK_CONFIG_URL} -o ${network_conf_file}
+fi
 
 DASHBORAD_CONFIG_URL="${6}"
 echo "Downloading dashboard config ${DASHBORAD_CONFIG_URL}"
@@ -117,8 +121,10 @@ output=`${k8s_dir}/kubeadm config images list --kubernetes-version=${RELEASE}`
 # Don't forget about the yaml images !
 for i in ${network_conf_file} ${dashboard_conf_file}
 do
-  images=`grep "image:" $i | cut -d ':' -f2- | tr -d ' ' | tr -d "'"`
-  output=`printf "%s\n" ${output} ${images}`
+  images=($(grep "image:" $i | cut -d ':' -f2- | tr -d "'"))
+  for image in "${images[@]}"; do
+    output=`printf "%s\n" ${output} ${image}`
+  done
 done
 
 # Don't forget about the other image !

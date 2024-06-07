@@ -219,6 +219,52 @@ write_files:
         done
       fi
 
+  - path: /opt/bin/cks-config.py
+    permissions: '0700'
+    owner: root:root
+    content: |
+      #!/usr/bin/env python3
+      import os
+      import subprocess
+      import sys
+      import yaml
+
+      CKS_CONFIG = "#cks-config"
+      KUBECTL_APPLY = "/opt/bin/kubectl apply -f"
+
+      def main(argv):
+        if len(argv) < 1:
+          print("YAML file is required")
+          sys.exit(1)
+        yaml_file=argv[0]
+        if not os.path.exists(yaml_file):
+          print("YAML file does not exist")
+          sys.exit(1)
+        with open(yaml_file) as f:
+          head_line = f.readline().strip('\n')
+          if head_line != CKS_CONFIG:
+            command = "%s %s" % (KUBECTL_APPLY, yaml_file)
+            run_command(command)
+            sys.exit(0)
+
+        print("Applying CKS config file")
+        content = yaml.safe_load(open(yaml_file))
+        commands = content["command"]
+        if commands:
+          for command in commands:
+            run_command(command)
+
+      def run_command(command):
+        try:
+          print("Executing command: %s" % command)
+          subprocess.check_output(command, shell=True, timeout=600)
+        except subprocess.CalledProcessError as e:
+          print("Error: %s " % e)
+          sys.exit(1)
+
+      if __name__ == "__main__":
+        main(sys.argv[1:])
+
   - path: /opt/bin/deploy-kube-system
     permissions: '0700'
     owner: root:root
@@ -271,8 +317,8 @@ write_files:
       if [ -d "$K8S_CONFIG_SCRIPTS_COPY_DIR" ]; then
         ### Network, dashboard configs available offline ###
         echo "Offline configs are available!"
-        /opt/bin/kubectl apply -f ${K8S_CONFIG_SCRIPTS_COPY_DIR}/network.yaml
-        /opt/bin/kubectl apply -f ${K8S_CONFIG_SCRIPTS_COPY_DIR}/dashboard.yaml
+        /opt/bin/cks-config.py ${K8S_CONFIG_SCRIPTS_COPY_DIR}/network.yaml
+        /opt/bin/cks-config.py ${K8S_CONFIG_SCRIPTS_COPY_DIR}/dashboard.yaml
         rm -rf "${K8S_CONFIG_SCRIPTS_COPY_DIR}"
       else
         /opt/bin/kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(/opt/bin/kubectl version | base64 | tr -d '\n')"
