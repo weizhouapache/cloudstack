@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   build:
-    if: github.repository == 'apache/cloudstack'
+    if: github.repository == 'weizhouapache/cloudstack'
     runs-on: ubuntu-22.04
 
     strategy:
