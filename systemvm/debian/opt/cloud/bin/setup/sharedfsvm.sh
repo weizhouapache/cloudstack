@@ -33,9 +33,6 @@ setup_sharedfsvm() {
     sed -i '/- ssh$/s/- ssh/- [ssh, always]/' /etc/cloud/cloud.cfg
 
     > /root/.ssh/authorized_keys
-    > /home/debian/.ssh/authorized_keys
-    rm -f /etc/cloud/cloud-init.disabled
-
     swapoff -a
     sudo sed -i '/ swap / s/^/#/' /etc/fstab
     log_it "Swap disabled"
@@ -56,7 +53,6 @@ setup_sharedfsvm() {
 
     log_it "Starting cloud-init services"
     if [ -f /home/cloud/success ]; then
-      cloud-init init
       systemctl stop cloud-init cloud-config cloud-final
       systemctl disable cloud-init cloud-config cloud-final
     else
