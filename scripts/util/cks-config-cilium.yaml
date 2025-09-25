@@ -1,0 +1,9 @@
+#cks-config
+images:
+  - quay.io/cilium/cilium:v1.18.1
+  - quay.io/cilium/operator-generic:v1.18.1
+  - quay.io/cilium/cilium-envoy:v1.34.4-1754895458-68cffdfa568b6b226d70a7ef81fc65dda3b890bf
+commands:
+  - curl -L https://github.com/cilium/cilium-cli/releases/download/v0.18.6/cilium-linux-amd64.tar.gz | tar -C /usr/bin -xz
+  - sleep 1 && cilium install --version 1.18.1 --wait
+  - sleep 1 && cilium status --wait

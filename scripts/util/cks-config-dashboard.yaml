@@ -1,0 +1,11 @@
+#cks-config
+images:
+  - kubernetesui/dashboard-api:1.13.0
+  - kubernetesui/dashboard-auth:1.3.0
+  - kubernetesui/dashboard-metrics-scraper:1.2.2
+  - kubernetesui/dashboard-web:1.7.0
+  - library/kong:3.8
+commands:
+  - curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash -s -- --version v3.19.0
+  - helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
+  - helm upgrade --install kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard --create-namespace --namespace kubernetes-dashboard --version 7.13.0
