@@ -20,4 +20,5 @@ import com.cloud.utils.component.Adapter;
 
 public interface VnfProvider extends Adapter {
 
+    String getDescription();
 }

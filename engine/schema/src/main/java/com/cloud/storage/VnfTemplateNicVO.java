@@ -50,6 +50,9 @@ public class VnfTemplateNicVO implements InternalIdentity {
     @Column(name = "management")
     private boolean management = true;
 
+    @Column(name = "is_public")
+    private boolean isPublic = true;
+
     @Column(name = "description")
     private String description;
 
@@ -93,6 +96,10 @@ public class VnfTemplateNicVO implements InternalIdentity {
 
     public boolean isManagement() {
         return management;
+    }
+
+    public boolean isPublic() {
+        return isPublic;
     }
 
     public String getDescription() {
