@@ -30,12 +30,15 @@ public class VnfProviderResponse extends BaseResponse {
     @Param(description = "the name of the vnf provider")
     private String name;
 
-    public String getName() {
-        return name;
-    }
+    @SerializedName(ApiConstants.DESCRIPTION)
+    @Param(description = "the description of the vnf provider")
+    private String description;
 
     public void setName(String name) {
         this.name = name;
     }
 
+    public void setDescription(String description) {
+        this.description = description;
+    }
 }

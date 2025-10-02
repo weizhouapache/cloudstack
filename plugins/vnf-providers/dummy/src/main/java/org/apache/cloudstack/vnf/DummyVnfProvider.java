@@ -23,6 +23,7 @@ import com.cloud.utils.component.AdapterBase;
 public class DummyVnfProvider extends AdapterBase implements VnfProvider {
 
     protected String name;
+    protected String description;
 
     @Override
     public String getName() {
@@ -31,5 +32,14 @@ public class DummyVnfProvider extends AdapterBase implements VnfProvider {
 
     public void setName(String name) {
         this.name = name;
+    }
+
+    @Override
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
     }
 }

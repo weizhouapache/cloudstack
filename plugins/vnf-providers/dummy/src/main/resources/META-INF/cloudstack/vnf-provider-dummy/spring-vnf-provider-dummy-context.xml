@@ -28,6 +28,7 @@
 
     <bean id="DummyVnfProvider" class="org.apache.cloudstack.vnf.DummyVnfProvider">
         <property name="name" value="DummyVnfProvider" />
+        <property name="description" value="Dummy Vnf Provider" />
     </bean>
 
 </beans>

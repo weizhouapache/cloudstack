@@ -41,6 +41,7 @@ public class ListVnfProvidersCmd extends BaseListCmd {
         for (VnfProvider vnfProvider : vnfProviders) {
             VnfProviderResponse vnfProviderResponse = new VnfProviderResponse();
             vnfProviderResponse.setName(vnfProvider.getName());
+            vnfProviderResponse.setDescription(vnfProvider.getDescription());
             vnfProviderResponse.setObjectName("vnfprovider");
             responses.add(vnfProviderResponse);
         }
