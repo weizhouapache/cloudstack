@@ -52,6 +52,7 @@ known_categories = {
     'VM': 'Virtual Machine',
     'Vnf': 'Virtual Network Functions',
     'VnfTemplate': 'Virtual Network Functions',
+    'vnf': 'Virtual Network Functions',
     'GuestSubnet': 'Routing',
     'HypervisorGuestOsNames': 'Guest OS',
     'Domain': 'Domain',

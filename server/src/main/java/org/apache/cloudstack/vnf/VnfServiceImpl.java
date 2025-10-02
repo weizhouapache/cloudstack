@@ -26,7 +26,7 @@ import javax.naming.ConfigurationException;
 
 import com.cloud.utils.component.ManagerBase;
 import com.cloud.utils.component.PluggableService;
-import org.apache.cloudstack.api.command.user.vnf.ListVnfProvidersCmd;
+import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
 import org.apache.cloudstack.storage.template.VnfTemplateManager;
 
 public class VnfServiceImpl extends ManagerBase implements VnfService, PluggableService {
@@ -54,7 +54,8 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
     @Override
     public List<Class<?>> getCommands() {
         final List<Class<?>> cmdList = new ArrayList<>();
-        cmdList.add(ListVnfProvidersCmd.class);
+        // Provider
+        cmdList.add(VnfListProvidersCmd.class);
         return cmdList;
     }
 }

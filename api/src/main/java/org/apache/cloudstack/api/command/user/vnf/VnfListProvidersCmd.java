@@ -27,10 +27,10 @@ import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfProvider;
 
-@APICommand(name = "listVnfProviders", description = "Lists VNF providers.",
+@APICommand(name = "vnfListProviders", description = "Lists VNF providers.",
         responseObject = VnfProviderResponse.class,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
-public class ListVnfProvidersCmd extends BaseListCmd {
+public class VnfListProvidersCmd extends BaseListCmd {
 
     @Override
     public void execute()  {
