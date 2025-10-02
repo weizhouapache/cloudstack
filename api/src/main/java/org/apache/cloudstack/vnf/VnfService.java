@@ -16,11 +16,16 @@
 // under the License.
 package org.apache.cloudstack.vnf;
 
+import org.apache.cloudstack.framework.config.ConfigKey;
+
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
 public interface VnfService {
+
+    ConfigKey<Boolean> VnfFrameworkEnabled = new ConfigKey<>("Advanced", Boolean.class, "vnf.framework.enabled", "true",
+            "If VNF (Virtual Network Functions) framework is enabled", true, ConfigKey.Scope.Global);
 
     enum ServiceCategory {
         FIREWALL,                   // Security

@@ -26,10 +26,23 @@ import javax.naming.ConfigurationException;
 
 import com.cloud.utils.component.ManagerBase;
 import com.cloud.utils.component.PluggableService;
+import org.apache.cloudstack.api.command.admin.vnf.VnfDeployApplianceCmdByAdmin;
+import org.apache.cloudstack.api.command.admin.vnf.VnfListAppliancesCmdByAdmin;
+import org.apache.cloudstack.api.command.admin.vnf.VnfListTemplatesCmdByAdmin;
+import org.apache.cloudstack.api.command.admin.vnf.VnfRegisterTemplateCmdByAdmin;
+import org.apache.cloudstack.api.command.admin.vnf.VnfUpdateTemplateCmdByAdmin;
+import org.apache.cloudstack.api.command.user.vnf.VnfDeleteTemplateCmd;
+import org.apache.cloudstack.api.command.user.vnf.VnfDeployApplianceCmd;
+import org.apache.cloudstack.api.command.user.vnf.VnfListAppliancesCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
+import org.apache.cloudstack.api.command.user.vnf.VnfListTemplatesCmd;
+import org.apache.cloudstack.api.command.user.vnf.VnfRegisterTemplateCmd;
+import org.apache.cloudstack.api.command.user.vnf.VnfUpdateTemplateCmd;
+import org.apache.cloudstack.framework.config.ConfigKey;
+import org.apache.cloudstack.framework.config.Configurable;
 import org.apache.cloudstack.storage.template.VnfTemplateManager;
 
-public class VnfServiceImpl extends ManagerBase implements VnfService, PluggableService {
+public class VnfServiceImpl extends ManagerBase implements VnfService, PluggableService, Configurable {
 
     @Inject
     VnfTemplateManager vnfTemplateManager;
@@ -54,8 +67,40 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
     @Override
     public List<Class<?>> getCommands() {
         final List<Class<?>> cmdList = new ArrayList<>();
-        // Provider
+        if (!VnfFrameworkEnabled.value()) {
+            return cmdList;
+        }
+
+        // VNF Templates
+        cmdList.add(VnfListTemplatesCmd.class);
+        cmdList.add(VnfListTemplatesCmdByAdmin.class);
+        cmdList.add(VnfRegisterTemplateCmd.class);
+        cmdList.add(VnfRegisterTemplateCmdByAdmin.class);
+        cmdList.add(VnfUpdateTemplateCmd.class);
+        cmdList.add(VnfUpdateTemplateCmdByAdmin.class);
+        cmdList.add(VnfDeleteTemplateCmd.class);
+
+        // VNF Appliances
+        cmdList.add(VnfListAppliancesCmd.class);
+        cmdList.add(VnfListAppliancesCmdByAdmin.class);
+        cmdList.add(VnfDeployApplianceCmd.class);
+        cmdList.add(VnfDeployApplianceCmdByAdmin.class);
+
+        // VNF Provider
         cmdList.add(VnfListProvidersCmd.class);
+
         return cmdList;
+    }
+
+    @Override
+    public String getConfigComponentName() {
+        return VnfService.class.getSimpleName();
+    }
+
+    @Override
+    public ConfigKey<?>[] getConfigKeys() {
+        return new ConfigKey<?>[]{
+                VnfFrameworkEnabled
+        };
     }
 }
