@@ -20,6 +20,9 @@ package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.AdapterBase;
 
+import java.util.List;
+import java.util.Map;
+
 public class BaseVnfProvider extends AdapterBase implements VnfProvider {
 
     protected String name;
@@ -41,5 +44,10 @@ public class BaseVnfProvider extends AdapterBase implements VnfProvider {
 
     public void setDescription(String description) {
         this.description = description;
+    }
+
+    @Override
+    public Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations() {
+        return Map.of();
     }
 }

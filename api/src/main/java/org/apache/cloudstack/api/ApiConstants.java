@@ -1295,6 +1295,8 @@ public class ApiConstants {
     public static final String HEURISTIC_RULE = "heuristicrule";
     public static final String HEURISTIC_TYPE_VALID_OPTIONS = "Valid options are: ISO, SNAPSHOT, TEMPLATE and VOLUME.";
     public static final String MANAGEMENT = "management";
+
+    // VNF related
     public static final String IS_VNF = "isvnf";
     public static final String VNF_NICS = "vnfnics";
     public static final String VNF_DETAILS = "vnfdetails";
@@ -1302,6 +1304,8 @@ public class ApiConstants {
     public static final String CLEAN_UP_VNF_NICS = "cleanupvnfnics";
     public static final String VNF_CONFIGURE_MANAGEMENT = "vnfconfiguremanagement";
     public static final String VNF_CIDR_LIST = "vnfcidrlist";
+    public static final String VNF_PROVIDER = "vnfprovider";
+    public static final String VNF_ID = "vnfid";
 
     public static final String CLIENT_ID = "clientid";
     public static final String REDIRECT_URI = "redirecturi";

@@ -18,7 +18,12 @@ package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.Adapter;
 
+import java.util.List;
+import java.util.Map;
+
 public interface VnfProvider extends Adapter {
 
     String getDescription();
+
+    Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations();
 }

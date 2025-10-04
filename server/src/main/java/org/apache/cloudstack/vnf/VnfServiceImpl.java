@@ -20,6 +20,7 @@ package org.apache.cloudstack.vnf;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
@@ -63,6 +64,11 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         return true;
     }
 
+
+    @Override
+    public Set<ServiceCategory> getSupportedServices(VnfProvider vnfProvider) {
+        return vnfProvider.getSupportedOperations().keySet();
+    }
 
     @Override
     public List<Class<?>> getCommands() {
