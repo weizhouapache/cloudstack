@@ -240,7 +240,7 @@ public class BridgeVifDriver extends VifDriverBase {
                 if (trafficLabel != null && !trafficLabel.isEmpty()) {
                     brname = trafficLabel;
                 } else {
-                    brname = _bridges.get("guest");
+                    brname = _bridges.get("private");
                 }
                 intf.defBridgeNet(brname, null, nic.getMac(), getGuestNicModel(guestOsType, nicAdapter), networkRateKBps);
             }
