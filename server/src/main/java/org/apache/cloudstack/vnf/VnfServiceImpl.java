@@ -134,10 +134,15 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
 
     @Override
     public void executeVnfCommand(BaseVnfCmd command) {
+        VnfProvider vnfProvider = validateVnfCommand(command);
+        executeVnfCommand(vnfProvider, command);
+    }
+
+    protected VnfProvider validateVnfCommand(BaseVnfCmd command) {
         Long vnfId = command.getVnfId();
         UserVmVO vnf = userVmDao.findById(vnfId);
         if (vnf == null) {
-            throw new InvalidParameterValueException("Unable to find VNF appliance with ID " + vnfId);
+            throw new InvalidParameterValueException(String.format("Unable to find VNF appliance with ID %s", vnfId));
         }
         VMTemplateVO vnfTemplate = templateDao.findByIdIncludingRemoved(vnf.getTemplateId());
         VnfTemplateDetailVO vnfProviderName = vnfTemplateDetailsDao.findDetail(vnfTemplate.getId(), VNF.VnfDetail.VNF_PROVIDER.name().toLowerCase());
@@ -149,6 +154,33 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
             throw new InvalidParameterValueException(String.format("VNF Provider %s associated with VNF Template %s is not supported by CloudStack",
                     vnfProviderName.getValue(), vnfTemplate.getName()));
         }
+        return vnfProvider;
+    }
 
+    protected void executeVnfCommand(VnfProvider vnfProvider, BaseVnfCmd command) {
+        ServiceCategory serviceCategory = command.getServiceCategory();
+        if (serviceCategory == null) {
+            throw new InvalidParameterValueException("Service category is not specified in the command");
+        }
+        List<VnfOperation> operations = vnfProvider.getSupportedOperations().get(serviceCategory);
+        if (operations == null || operations.isEmpty()) {
+            throw new InvalidParameterValueException(String.format("VNF Provider %s does not support any operations for service category %s",
+                    vnfProvider.getName(), serviceCategory));
+        }
+        // TODO: Validate if the specific operation is supported
+
+        VnfService.Connector vnfConnector = vnfProvider.getConnector(command);
+        // TODO: return VnfConnector here and use it to execute the command
+        if (vnfConnector == null) {
+            throw new InvalidParameterValueException(String.format("VNF Provider %s does not have a connector for command %s",
+                    vnfProvider.getName(), command.getClass().getSimpleName()));
+        }
+        VnfService.DateFormat dateFormat = vnfProvider.getDateFormat(command);
+        if (dateFormat == null) {
+            throw new InvalidParameterValueException(String.format("VNF Provider %s does not have a date format for command %s",
+                    vnfProvider.getName(), command.getClass().getSimpleName()));
+        }
+
+        // TODO: Implement VNF command execution
     }
 }
