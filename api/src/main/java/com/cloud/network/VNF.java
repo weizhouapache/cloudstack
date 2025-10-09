@@ -68,6 +68,7 @@ public class VNF {
     }
 
     public enum VnfDetail {
+        VNF_PROVIDER,
         VERSION,
         VENDOR,
         MAINTAINER

@@ -24,6 +24,7 @@ import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.user.Account;
 
 import org.apache.cloudstack.api.ApiConstants;
+import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
@@ -32,16 +33,37 @@ import org.apache.cloudstack.api.response.UserVmResponse;
 
 public class BaseVnfCmd extends BaseCmd {
 
+    // ///////////////////////////////////////////////////
+    // ////////////// API parameters /////////////////////
+    // ///////////////////////////////////////////////////
+
     @Parameter(name = ApiConstants.VNF_ID,
             type = CommandType.UUID,
             entityType = UserVmResponse.class,
+            required = true,
             description = "the ID of the VNF appliance")
     private Long vnfId;
 
+    // ///////////////////////////////////////////////////
+    // ///////////////// Accessors ///////////////////////
+    // ///////////////////////////////////////////////////
+
+    public Long getVnfId() {
+        return vnfId;
+    }
+
+    // ///////////////////////////////////////////////////
+    // ///////////// API Implementation///////////////////
+    // ///////////////////////////////////////////////////
 
     @Override
     public void execute() throws ResourceUnavailableException, InsufficientCapacityException, ServerApiException, ConcurrentOperationException,
             ResourceAllocationException, NetworkRuleConflictException {
+        try {
+            vnfService.executeVnfCommand(this);
+        } catch (Exception ex) {
+            throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to execute VNF command: " + ex.getMessage());
+        }
     }
 
     @Override

@@ -25,13 +25,23 @@ import java.util.Set;
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
+import com.cloud.exception.InvalidParameterValueException;
+import com.cloud.network.VNF;
+import com.cloud.storage.VMTemplateVO;
+import com.cloud.storage.VnfTemplateDetailVO;
+import com.cloud.storage.dao.VMTemplateDao;
+import com.cloud.storage.dao.VnfTemplateDetailsDao;
 import com.cloud.utils.component.ManagerBase;
 import com.cloud.utils.component.PluggableService;
+
+import com.cloud.vm.UserVmVO;
+import com.cloud.vm.dao.UserVmDao;
 import org.apache.cloudstack.api.command.admin.vnf.VnfDeployApplianceCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfListAppliancesCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfListTemplatesCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfRegisterTemplateCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfUpdateTemplateCmdByAdmin;
+import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfDeleteTemplateCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfDeployApplianceCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListAppliancesCmd;
@@ -47,6 +57,12 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
 
     @Inject
     VnfTemplateManager vnfTemplateManager;
+    @Inject
+    UserVmDao userVmDao;
+    @Inject
+    VMTemplateDao templateDao;
+    @Inject
+    VnfTemplateDetailsDao vnfTemplateDetailsDao;
 
     protected List<VnfProvider> vnfProviders;
 
@@ -64,6 +80,12 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         return true;
     }
 
+    @Override
+    public VnfProvider getVnfProviderByName(String name) {
+        return vnfProviders.stream()
+                .filter(vnfProvider -> vnfProvider.getName().equalsIgnoreCase(name))
+                .findFirst().orElse(null);
+    }
 
     @Override
     public Set<ServiceCategory> getSupportedServices(VnfProvider vnfProvider) {
@@ -108,5 +130,25 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         return new ConfigKey<?>[]{
                 VnfFrameworkEnabled
         };
+    }
+
+    @Override
+    public void executeVnfCommand(BaseVnfCmd command) {
+        Long vnfId = command.getVnfId();
+        UserVmVO vnf = userVmDao.findById(vnfId);
+        if (vnf == null) {
+            throw new InvalidParameterValueException("Unable to find VNF appliance with ID " + vnfId);
+        }
+        VMTemplateVO vnfTemplate = templateDao.findByIdIncludingRemoved(vnf.getTemplateId());
+        VnfTemplateDetailVO vnfProviderName = vnfTemplateDetailsDao.findDetail(vnfTemplate.getId(), VNF.VnfDetail.VNF_PROVIDER.name().toLowerCase());
+        if (vnfProviderName == null) {
+            throw new InvalidParameterValueException(String.format("VNF Template %s does not have a VNF Provider associated with it", vnfTemplate.getName()));
+        }
+        VnfProvider vnfProvider = getVnfProviderByName(vnfProviderName.getValue());
+        if (vnfProvider == null) {
+            throw new InvalidParameterValueException(String.format("VNF Provider %s associated with VNF Template %s is not supported by CloudStack",
+                    vnfProviderName.getValue(), vnfTemplate.getName()));
+        }
+
     }
 }

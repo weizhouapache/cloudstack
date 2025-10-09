@@ -16,6 +16,7 @@
 // under the License.
 package org.apache.cloudstack.vnf;
 
+import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
 import org.apache.cloudstack.framework.config.ConfigKey;
 
 import java.util.Arrays;
@@ -27,6 +28,18 @@ public interface VnfService {
 
     ConfigKey<Boolean> VnfFrameworkEnabled = new ConfigKey<>("Advanced", Boolean.class, "vnf.framework.enabled", "true",
             "If VNF (Virtual Network Functions) framework is enabled", true, ConfigKey.Scope.Global);
+
+    enum DateFormat {
+        JSON,
+        XML,
+        YAML
+    }
+
+    enum Connector {
+        SSH,
+        HTTP,
+        HTTPS
+    }
 
     Set<ServiceCategory> getSupportedServices(VnfProvider vnfProvider);
 
@@ -153,4 +166,8 @@ public interface VnfService {
     }
 
     List<VnfProvider> getVnfProviders();
+
+    VnfProvider getVnfProviderByName(String name);
+
+    void executeVnfCommand(BaseVnfCmd command);
 }
