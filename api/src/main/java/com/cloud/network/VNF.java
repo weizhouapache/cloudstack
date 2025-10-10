@@ -18,9 +18,6 @@ package com.cloud.network;
 
 import org.apache.commons.lang3.StringUtils;
 
-import java.util.HashMap;
-import java.util.Map;
-
 public class VNF {
 
     public enum AccessMethod {
@@ -110,32 +107,6 @@ public class VNF {
 
         public String getDescription() {
             return description;
-        }
-    }
-
-    public class VnfConfig {
-        private Long vnfId;
-        private String vnfName;
-        private String host;
-        private int port;
-        private String username;
-        private String password;
-        private String authToken;
-        private String baseUrl;
-        private Map<String, String> customProperties = new HashMap<>();
-
-        public VnfConfig() {}
-
-        public VnfConfig(Long vnfId, String vnfName, String host) {
-            this.vnfId = vnfId;
-            this.vnfName = vnfName;
-            this.host = host;
-            this.port = 22;
-            this.customProperties = new HashMap<>();
-        }
-
-        public void addCustomProperty(String key, String value) {
-            this.customProperties.put(key, value);
         }
     }
 }

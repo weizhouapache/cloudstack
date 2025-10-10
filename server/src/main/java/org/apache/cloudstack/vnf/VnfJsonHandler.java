@@ -14,23 +14,30 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+
 package org.apache.cloudstack.vnf;
 
-import com.cloud.utils.component.Adapter;
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import com.cloud.utils.exception.CloudRuntimeException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.List;
-import java.util.Map;
+public class VnfJsonHandler implements VnfDataFormatHandler {
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-public interface VnfProvider extends Adapter {
+    @Override
+    public String format(Object data) {
+        try {
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(data);
+        } catch (Exception e) {
+            throw new CloudRuntimeException("JSON formatting failed", e);
+        }
+    }
 
-    String getDescription();
-
-    Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations();
-
-    VnfConnector getConnector(BaseVnfCmd command);
-
-    VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command);
-
-    Object transformVnfCommand(VnfCommand command);
+    @Override
+    public Object parse(String data) {
+        try {
+            return objectMapper.readValue(data, Object.class);
+        } catch (Exception e) {
+            throw new CloudRuntimeException("JSON parsing failed", e);
+        }
+    }
 }

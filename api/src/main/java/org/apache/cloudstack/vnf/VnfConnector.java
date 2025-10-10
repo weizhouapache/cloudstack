@@ -16,21 +16,9 @@
 // under the License.
 package org.apache.cloudstack.vnf;
 
-import com.cloud.utils.component.Adapter;
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+public interface VnfConnector {
 
-import java.util.List;
-import java.util.Map;
+    String execute(VnfConfig config, String formattedData);
 
-public interface VnfProvider extends Adapter {
-
-    String getDescription();
-
-    Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations();
-
-    VnfConnector getConnector(BaseVnfCmd command);
-
-    VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command);
-
-    Object transformVnfCommand(VnfCommand command);
+    void close();
 }

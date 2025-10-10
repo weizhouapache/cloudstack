@@ -30,6 +30,7 @@ public interface VnfService {
             "If VNF (Virtual Network Functions) framework is enabled", true, ConfigKey.Scope.Global);
 
     enum DateFormat {
+        PLAINTEXT,
         JSON,
         XML,
         YAML

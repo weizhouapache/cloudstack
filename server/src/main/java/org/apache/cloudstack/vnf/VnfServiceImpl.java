@@ -158,6 +158,7 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
     }
 
     protected void executeVnfCommand(VnfProvider vnfProvider, BaseVnfCmd command) {
+        // 1. Validate command
         ServiceCategory serviceCategory = command.getServiceCategory();
         if (serviceCategory == null) {
             throw new InvalidParameterValueException("Service category is not specified in the command");
@@ -169,18 +170,36 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         }
         // TODO: Validate if the specific operation is supported
 
-        VnfService.Connector vnfConnector = vnfProvider.getConnector(command);
-        // TODO: return VnfConnector here and use it to execute the command
+        // 2. Get appropriate connector
+        VnfConnector vnfConnector = vnfProvider.getConnector(command);
         if (vnfConnector == null) {
             throw new InvalidParameterValueException(String.format("VNF Provider %s does not have a connector for command %s",
                     vnfProvider.getName(), command.getClass().getSimpleName()));
         }
-        VnfService.DateFormat dateFormat = vnfProvider.getDateFormat(command);
-        if (dateFormat == null) {
-            throw new InvalidParameterValueException(String.format("VNF Provider %s does not have a date format for command %s",
+
+        // 3. Get appropriate data format handler
+        VnfDataFormatHandler dataFormatHandler = vnfProvider.getDataFormatHandler(command);
+        if (dataFormatHandler == null) {
+            throw new InvalidParameterValueException(String.format("VNF Provider %s does not have a date format handler for command %s",
                     vnfProvider.getName(), command.getClass().getSimpleName()));
         }
 
-        // TODO: Implement VNF command execution
+        VnfConfig vnfConfig = new VnfConfig(command.getVnfId());
+        // TODO: add more information to vnfConfig if needed
+
+        VnfCommand vnfCommand = new VnfCommand();
+        // TODO: populate vnfCommand with necessary information from BaseVnfCmd
+
+        // 4. Transform command to provider-specific format
+        Object transformedCommand = vnfProvider.transformVnfCommand(vnfCommand);
+
+        // 5. Format the data
+        String formattedData = dataFormatHandler.format(transformedCommand);
+
+        // 6. Execute command via connector
+        String result = vnfConnector.execute(vnfConfig, formattedData);
+
+        // 7. Cleanup
+        vnfConnector.close();
     }
 }

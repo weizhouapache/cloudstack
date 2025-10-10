@@ -14,23 +14,31 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+
 package org.apache.cloudstack.vnf;
 
-import com.cloud.utils.component.Adapter;
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
-
-import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
-public interface VnfProvider extends Adapter {
+public class VnfPlainTextHandler implements VnfDataFormatHandler {
 
-    String getDescription();
+    @Override
+    public String format(Object data) {
+        if (data instanceof String) {
+            return (String) data;
+        } else if (data instanceof Map) {
+            // Convert simple maps to key=value format
+            Map<?, ?> map = (Map<?, ?>) data;
+            return map.entrySet().stream()
+                .map(entry -> entry.getKey() + "=" + entry.getValue())
+                .collect(Collectors.joining(" "));
+        } else {
+            return data.toString();
+        }
+    }
 
-    Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations();
-
-    VnfConnector getConnector(BaseVnfCmd command);
-
-    VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command);
-
-    Object transformVnfCommand(VnfCommand command);
+    @Override
+    public Object parse(String data) {
+        return data;
+    }
 }

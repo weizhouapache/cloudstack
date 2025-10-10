@@ -53,12 +53,17 @@ public class BaseVnfProvider extends AdapterBase implements VnfProvider {
     }
 
     @Override
-    public VnfService.Connector getConnector(BaseVnfCmd command) {
+    public VnfConnector getConnector(BaseVnfCmd command) {
         return null;
     }
 
     @Override
-    public VnfService.DateFormat getDateFormat(BaseVnfCmd command) {
+    public VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command) {
+        return null;
+    }
+
+    @Override
+    public Object transformVnfCommand(VnfCommand command) {
         return null;
     }
 }

@@ -23,12 +23,12 @@ import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
 public class DummyVnfProvider extends BaseVnfProvider {
 
     @Override
-    public VnfService.Connector getConnector(BaseVnfCmd command) {
-        return VnfService.Connector.SSH;
+    public VnfConnector getConnector(BaseVnfCmd command) {
+        return new VnfSshConnector();
     }
 
     @Override
-    public VnfService.DateFormat getDateFormat(BaseVnfCmd command) {
-        return VnfService.DateFormat.JSON;
+    public VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command) {
+        return new VnfPlainTextHandler();
     }
 }
