@@ -19,6 +19,8 @@ package org.apache.cloudstack.vnf;
 
 public interface VnfDataFormatHandler {
 
+    VnfService.DataFormat getDataFormat();
+
     String format(Object data);
 
     Object parse(String data);

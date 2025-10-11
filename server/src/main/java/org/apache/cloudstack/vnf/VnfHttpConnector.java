@@ -36,7 +36,7 @@ public class VnfHttpConnector implements VnfConnector {
     }
 
     @Override
-    public String execute(VnfConfig config, String formattedData) {
+    public String execute(VnfConfig config, VnfService.DataFormat dataFormat, String formattedData) {
         try {
             HttpPost httpPost = new HttpPost(config.getHttpEndpoint());
 
@@ -49,8 +49,23 @@ public class VnfHttpConnector implements VnfConnector {
                 httpPost.setHeader("Authorization", "Basic " + encodedAuth);
             }
 
-            // Set JSON content
-            httpPost.setHeader("Content-Type", "application/json");
+            // Set Content type
+            switch (dataFormat) {
+                case PLAINTEXT:
+                    httpPost.setHeader("Content-Type", "text/plain");
+                    break;
+                case JSON:
+                    httpPost.setHeader("Content-Type", "application/json");
+                    break;
+                case YAML:
+                    httpPost.setHeader("Content-Type", "application/x-yaml");
+                    break;
+                case XML:
+                    httpPost.setHeader("Content-Type", "application/xml");
+                    break;
+                default:
+                    throw new CloudRuntimeException("Unsupported data format: " + dataFormat);
+            }
             httpPost.setEntity(new StringEntity(formattedData));
 
             HttpResponse response = httpClient.execute(httpPost);

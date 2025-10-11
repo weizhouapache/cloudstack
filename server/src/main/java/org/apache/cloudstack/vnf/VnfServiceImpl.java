@@ -197,7 +197,7 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         String formattedData = dataFormatHandler.format(transformedCommand);
 
         // 6. Execute command via connector
-        String result = vnfConnector.execute(vnfConfig, formattedData);
+        String result = vnfConnector.execute(vnfConfig, dataFormatHandler.getDataFormat(), formattedData);
 
         // 7. Cleanup
         vnfConnector.close();

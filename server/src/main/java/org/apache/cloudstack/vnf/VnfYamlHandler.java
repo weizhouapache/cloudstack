@@ -25,6 +25,11 @@ public class VnfYamlHandler implements VnfDataFormatHandler {
     private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
 
     @Override
+    public VnfService.DataFormat getDataFormat() {
+        return VnfService.DataFormat.YAML;
+    }
+
+    @Override
     public String format(Object data) {
         try {
             return yamlMapper.writeValueAsString(data);

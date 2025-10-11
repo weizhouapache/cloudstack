@@ -28,7 +28,7 @@ public class VnfSshConnector implements VnfConnector {
     private Session session;
 
     @Override
-    public String execute(VnfConfig config, String formattedData) {
+    public String execute(VnfConfig config, VnfService.DataFormat dataFormat, String formattedData) {
         try {
             JSch jsch = new JSch();
 

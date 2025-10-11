@@ -29,7 +29,7 @@ public interface VnfService {
     ConfigKey<Boolean> VnfFrameworkEnabled = new ConfigKey<>("Advanced", Boolean.class, "vnf.framework.enabled", "true",
             "If VNF (Virtual Network Functions) framework is enabled", true, ConfigKey.Scope.Global);
 
-    enum DateFormat {
+    enum DataFormat {
         PLAINTEXT,
         JSON,
         XML,

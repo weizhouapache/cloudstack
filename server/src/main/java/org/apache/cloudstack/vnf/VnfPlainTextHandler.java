@@ -23,6 +23,11 @@ import java.util.stream.Collectors;
 public class VnfPlainTextHandler implements VnfDataFormatHandler {
 
     @Override
+    public VnfService.DataFormat getDataFormat() {
+        return VnfService.DataFormat.PLAINTEXT;
+    }
+
+    @Override
     public String format(Object data) {
         if (data instanceof String) {
             return (String) data;

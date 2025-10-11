@@ -24,6 +24,11 @@ public class VnfJsonHandler implements VnfDataFormatHandler {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
+    public VnfService.DataFormat getDataFormat() {
+        return VnfService.DataFormat.JSON;
+    }
+
+    @Override
     public String format(Object data) {
         try {
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(data);

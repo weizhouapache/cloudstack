@@ -18,7 +18,7 @@ package org.apache.cloudstack.vnf;
 
 public interface VnfConnector {
 
-    String execute(VnfConfig config, String formattedData);
+    String execute(VnfConfig config, VnfService.DataFormat dataFormat, String formattedData);
 
     void close();
 }
