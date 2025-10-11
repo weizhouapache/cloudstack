@@ -19,6 +19,53 @@
 -- Schema upgrade from 4.21.0.0 to 4.22.0.0
 --;
 
+-- Add table for custom VNF providers
+CREATE TABLE IF NOT EXISTS `vnf_providers` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'id',
+    `uuid` varchar(40) NOT NULL COMMENT 'UUID of the vnf provider',
+    `name` varchar(255) NOT NULL COMMENT 'name of the vnf provider',
+    `description` varchar(1024) DEFAULT NULL COMMENT 'description of the vnf provider',
+    `created` datetime DEFAULT NULL COMMENT 'Date Created',
+    `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uc_vnf_provider__uuid` (`uuid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+
+CREATE TABLE  `cloud`.`vnf_provider_service_map` (
+    `id` bigint unsigned NOT NULL auto_increment,
+    `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'ID of vnf provider',
+    `service` varchar(255) NOT NULL COMMENT 'service',
+    `operation` varchar(255) COMMENT 'operation',
+    `created` datetime COMMENT 'date created',
+    PRIMARY KEY (`id`),
+    CONSTRAINT `fk_vnf_provider_service_map__vnf_provider_id` FOREIGN KEY(`vnf_provider_id`) REFERENCES `vnf_providers`(`id`) ON DELETE CASCADE,
+    UNIQUE (`network_id`, `service`, `operation`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+
+-- Add table for VNF broker
+CREATE TABLE IF NOT EXISTS `vnf_brokers` (
+    `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'id',
+    `uuid` varchar(40) NOT NULL COMMENT 'UUID of the vnf broker',
+    `name` varchar(255) NOT NULL COMMENT 'name of the vnf broker',
+    `description` varchar(1024) DEFAULT NULL COMMENT 'description of the vnf broker',
+    `ip_address` varchar(255) NOT NULL COMMENT 'IP address of the vnf broker',
+    `access_method` varchar(255) NOT NULL COMMENT 'access method of the vnf broker',
+    `created` datetime DEFAULT NULL COMMENT 'Date Created',
+    `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uc_vnf_broker__uuid` (`uuid`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+
+-- Add table for VNF broker details
+CREATE TABLE `cloud`.`vnf_broker_details` (
+    `id` bigint unsigned NOT NULL auto_increment,
+    `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'vnf broker id',
+    `name` varchar(255) NOT NULL,
+    `value` varchar(1024) NOT NULL,
+    `display` tinyint(1) NOT NULL DEFAULT '1' COMMENT 'True if the detail can be displayed to the end user',
+    PRIMARY KEY (`id`),
+    CONSTRAINT `fk_vnf_broker_details__vnf_broker_id` FOREIGN KEY `fk_vnf_broker_details__vnf_broker_id`(`vnf_broker_id`) REFERENCES `vnf_brokers`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 
 -- health check status as enum
 CALL `cloud`.`IDEMPOTENT_CHANGE_COLUMN`('router_health_check', 'check_result', 'check_result', 'varchar(16) NOT NULL COMMENT "check executions result: SUCCESS, FAILURE, WARNING, UNKNOWN"');
