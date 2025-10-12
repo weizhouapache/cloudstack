@@ -66,4 +66,21 @@ public class BaseVnfProvider extends AdapterBase implements VnfProvider {
     public Object transformVnfCommand(VnfCommand command) {
         return null;
     }
+
+    @Override
+    public String executeVnfCommand(VnfConfig vnfConfig, VnfConnector vnfConnector, VnfCommand command, VnfDataFormatHandler dataFormatHandler) {
+        // 1. Transform command to provider-specific format
+        Object transformedCommand = transformVnfCommand(command);
+
+        // 2. Format the data
+        String formattedData = dataFormatHandler.format(transformedCommand);
+
+        // 3. Execute the command
+        return executeVnfCommand(vnfConfig, vnfConnector, dataFormatHandler, formattedData);
+    }
+
+    @Override
+    public String executeVnfCommand(VnfConfig vnfConfig, VnfConnector vnfConnector, VnfDataFormatHandler dataFormatHandler, String formattedData) {
+        return vnfConnector.execute(vnfConfig, dataFormatHandler.getDataFormat(), formattedData);
+    }
 }

@@ -47,6 +47,9 @@ public class VnfProviderVO extends CustomVnfProvider implements InternalIdentity
     @Column(name = "description")
     private String description;
 
+    @Column(name = "vnf_broker_id")
+    private Long vnfBrokerId;
+
     @Column(name = GenericDao.CREATED_COLUMN)
     private Date created;
 
@@ -81,6 +84,15 @@ public class VnfProviderVO extends CustomVnfProvider implements InternalIdentity
     @Override
     public void setDescription(String description) {
         this.description = description;
+    }
+
+    @Override
+    public Long getVnfBrokerId() {
+        return vnfBrokerId;
+    }
+
+    public void setVnfBrokerId(Long vnfBrokerId) {
+        this.vnfBrokerId = vnfBrokerId;
     }
 
     public Date getCreated() {

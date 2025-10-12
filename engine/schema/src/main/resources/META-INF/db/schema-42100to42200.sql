@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS `vnf_providers` (
     `uuid` varchar(40) NOT NULL COMMENT 'UUID of the vnf provider',
     `name` varchar(255) NOT NULL COMMENT 'name of the vnf provider',
     `description` varchar(1024) DEFAULT NULL COMMENT 'description of the vnf provider',
+    `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'id of the vnf broker',
     `created` datetime DEFAULT NULL COMMENT 'Date Created',
     `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
     PRIMARY KEY (`id`),
@@ -33,13 +34,13 @@ CREATE TABLE IF NOT EXISTS `vnf_providers` (
 
 CREATE TABLE  `cloud`.`vnf_provider_service_map` (
     `id` bigint unsigned NOT NULL auto_increment,
-    `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'ID of vnf provider',
-    `service` varchar(255) NOT NULL COMMENT 'service',
-    `operation` varchar(255) COMMENT 'operation',
+    `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'id of the vnf provider',
+    `service` varchar(255) NOT NULL COMMENT 'supported service category',
+    `operation` varchar(255) COMMENT 'supported operation',
     `created` datetime COMMENT 'date created',
     PRIMARY KEY (`id`),
     CONSTRAINT `fk_vnf_provider_service_map__vnf_provider_id` FOREIGN KEY(`vnf_provider_id`) REFERENCES `vnf_providers`(`id`) ON DELETE CASCADE,
-    UNIQUE (`network_id`, `service`, `operation`)
+    UNIQUE (`vnf_provider_id`, `service`, `operation`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 
 -- Add table for VNF broker
@@ -54,12 +55,12 @@ CREATE TABLE IF NOT EXISTS `vnf_brokers` (
     `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
     PRIMARY KEY (`id`),
     UNIQUE KEY `uc_vnf_broker__uuid` (`uuid`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 
 -- Add table for VNF broker details
 CREATE TABLE `cloud`.`vnf_broker_details` (
     `id` bigint unsigned NOT NULL auto_increment,
-    `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'vnf broker id',
+    `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'id of the vnf broker',
     `name` varchar(255) NOT NULL,
     `value` varchar(1024) NOT NULL,
     `display` tinyint(1) NOT NULL DEFAULT '1' COMMENT 'True if the detail can be displayed to the end user',

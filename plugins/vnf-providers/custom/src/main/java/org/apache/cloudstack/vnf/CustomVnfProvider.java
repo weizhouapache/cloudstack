@@ -22,6 +22,10 @@ import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
 
 public class CustomVnfProvider extends BaseVnfProvider {
 
+    Long getVnfBrokerId() {
+        return null;
+    }
+
     @Override
     public VnfConnector getConnector(BaseVnfCmd command) {
         // TODO: get connector from VNF broker

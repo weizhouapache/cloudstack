@@ -33,4 +33,9 @@ public interface VnfProvider extends Adapter {
     VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command);
 
     Object transformVnfCommand(VnfCommand command);
+
+    String executeVnfCommand(VnfConfig vnfConfig, VnfConnector vnfConnector, VnfCommand command, VnfDataFormatHandler dataFormatHandler);
+
+    String executeVnfCommand(VnfConfig vnfConfig, VnfConnector vnfConnector, VnfDataFormatHandler dataFormatHandler, String formattedData);
+
 }
