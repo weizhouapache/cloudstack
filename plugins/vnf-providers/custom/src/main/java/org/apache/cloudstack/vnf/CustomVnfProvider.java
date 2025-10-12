@@ -37,4 +37,13 @@ public class CustomVnfProvider extends BaseVnfProvider {
         // TODO: get dataformat handle from VNF broker
         return new VnfJsonHandler();
     }
+
+    @Override
+    public String executeVnfCommand(VnfConfig vnfConfig, VnfConnector vnfConnector, VnfDataFormatHandler dataFormatHandler, String formattedData) {
+        // TODO: add broker specific logic
+        // Replace vnfConfig with VNF broker config
+        // Pass vnfConfig as part of data to VNF broker
+
+        return vnfConnector.execute(vnfConfig, dataFormatHandler.getDataFormat(), formattedData);
+    }
 }
