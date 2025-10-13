@@ -15,11 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package org.apache.cloudstack.vnf;
+package org.apache.cloudstack.vnf.vo;
 
 import com.cloud.utils.db.GenericDao;
 import org.apache.cloudstack.api.Identity;
 import org.apache.cloudstack.api.InternalIdentity;
+import org.apache.cloudstack.vnf.CustomVnfProvider;
 
 import javax.persistence.Column;
 import javax.persistence.Entity;

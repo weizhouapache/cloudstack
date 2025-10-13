@@ -14,7 +14,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-package org.apache.cloudstack.vnf;
+package org.apache.cloudstack.vnf.vo;
 
 import javax.persistence.Column;
 import javax.persistence.Entity;
@@ -26,6 +26,7 @@ import javax.persistence.Id;
 import javax.persistence.Table;
 
 import org.apache.cloudstack.api.ResourceDetail;
+import org.apache.cloudstack.vnf.VnfBroker;
 
 @Entity
 @Table(name = "vnf_broker_details")

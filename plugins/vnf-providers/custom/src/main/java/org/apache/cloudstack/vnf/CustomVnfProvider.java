@@ -22,7 +22,7 @@ import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
 
 public class CustomVnfProvider extends BaseVnfProvider {
 
-    Long getVnfBrokerId() {
+    protected Long getVnfBrokerId() {
         return null;
     }
 

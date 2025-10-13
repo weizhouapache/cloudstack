@@ -14,42 +14,11 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-package org.apache.cloudstack.vnf;
-
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.GeneratedValue;
-import javax.persistence.GenerationType;
-import javax.persistence.Id;
-import javax.persistence.Table;
+package org.apache.cloudstack.vnf.dao;
 
 import com.cloud.utils.db.GenericDao;
-import org.apache.cloudstack.api.InternalIdentity;
+import org.apache.cloudstack.vnf.vo.VnfProviderServiceMapVO;
 
-import java.util.Date;
+public interface VnfProviderServiceMapDao extends GenericDao<VnfProviderServiceMapVO, Long> {
 
-@Entity
-@Table(name = "vnf_provider_service_map")
-public class VnfProviderServiceMapVO implements InternalIdentity {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    @Column(name = "id")
-    long id;
-
-    @Column(name = "vnf_provider_id")
-    long vnfProviderId;
-
-    @Column(name = "service")
-    String service;
-
-    @Column(name = "operation")
-    String operation;
-
-    @Column(name = GenericDao.CREATED_COLUMN)
-    Date created;
-
-    @Override
-    public long getId() {
-        return id;
-    }
 }
