@@ -26,9 +26,17 @@
                       http://www.springframework.org/schema/context
                       http://www.springframework.org/schema/context/spring-context.xsd">
 
-    <bean id="DummyVnfProvider" class="org.apache.cloudstack.vnf.CustomVnfProvider">
+    <bean id="customVnfProvider" class="org.apache.cloudstack.vnf.CustomVnfProvider">
         <property name="name" value="CustomVnfProvider" />
         <property name="description" value="Custom Vnf Provider with Vnf Broker" />
     </bean>
+
+    <bean id="vnfBrokerManagerImpl" class="org.apache.cloudstack.vnf.VnfBrokerManagerImpl" />
+
+    <bean id="vnfBrokerDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfBrokerDaoImpl" />
+    <bean id="vnfBrokerDetailsDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfBrokerDetailsDaoImpl" />
+
+    <bean id="vnfProviderDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfProviderDaoImpl" />
+    <bean id="vnfProviderServiceMapDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfProviderServiceMapDaoImpl" />
 
 </beans>
