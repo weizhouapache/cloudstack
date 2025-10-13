@@ -48,6 +48,11 @@ public class BaseVnfProvider extends AdapterBase implements VnfProvider {
     }
 
     @Override
+    public String getUuid() {
+        return null;
+    }
+
+    @Override
     public Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations() {
         return Map.of();
     }

@@ -18,11 +18,14 @@ package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.ComponentLifecycleBase;
 import org.apache.cloudstack.vnf.api.command.DeleteVnfBrokerCmd;
+import org.apache.cloudstack.vnf.api.command.DeleteVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.ListVnfBrokersCmd;
 import org.apache.cloudstack.vnf.api.command.RegisterVnfBrokerCmd;
+import org.apache.cloudstack.vnf.api.command.RegisterVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.UpdateVnfBrokerCmd;
 import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfBrokerManager {
@@ -30,7 +33,17 @@ public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfB
 
     @Override
     public List<Class<?>> getCommands() {
-        return List.of();
+        List<Class<?>> cmdList = new ArrayList<>();
+
+        cmdList.add(RegisterVnfProviderCmd.class);
+        cmdList.add(DeleteVnfProviderCmd.class);
+
+        cmdList.add(RegisterVnfBrokerCmd.class);
+        cmdList.add(UpdateVnfBrokerCmd.class);
+        cmdList.add(DeleteVnfBrokerCmd.class);
+        cmdList.add(ListVnfBrokersCmd.class);
+
+        return cmdList;
     }
 
     @Override
@@ -56,5 +69,15 @@ public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfB
     @Override
     public List<? extends VnfBroker> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd) {
         return List.of();
+    }
+
+    @Override
+    public VnfProvider registerVnfProvider(RegisterVnfProviderCmd registerVnfProviderCmd) {
+        return null;
+    }
+
+    @Override
+    public boolean deleteVnfProvider(DeleteVnfProviderCmd deleteVnfProviderCmd) {
+        return false;
     }
 }

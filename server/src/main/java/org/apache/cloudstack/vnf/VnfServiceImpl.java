@@ -49,6 +49,7 @@ import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListTemplatesCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfRegisterTemplateCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfUpdateTemplateCmd;
+import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
 import org.apache.cloudstack.storage.template.VnfTemplateManager;
@@ -130,6 +131,21 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         return new ConfigKey<?>[]{
                 VnfFrameworkEnabled
         };
+    }
+
+    @Override
+    public VnfProviderResponse createVnfProviderResponse(VnfProvider vnfProvider) {
+        VnfProviderResponse response = new VnfProviderResponse();
+        response.setName(vnfProvider.getName());
+        response.setDescription(vnfProvider.getDescription());
+        if (vnfProvider.getUuid() != null) {
+            response.setId(vnfProvider.getUuid());
+            response.setType(VnfProvider.TYPE.CUSTOM.name());
+        } else {
+            response.setType(VnfProvider.TYPE.BUILTIN.name());
+        }
+        response.setObjectName("vnfprovider");
+        return response;
     }
 
     @Override

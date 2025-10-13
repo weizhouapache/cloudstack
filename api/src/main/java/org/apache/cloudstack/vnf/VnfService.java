@@ -17,6 +17,7 @@
 package org.apache.cloudstack.vnf;
 
 import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.framework.config.ConfigKey;
 
 import java.util.Arrays;
@@ -164,11 +165,19 @@ public interface VnfService {
                     .filter(op -> op.getCategory() == category)
                     .collect(Collectors.toList());
         }
+
+        public static VnfOperation getOperation(ServiceCategory category, String operationName) {
+            return Arrays.stream(values())
+                    .filter(op -> op.name().equalsIgnoreCase(operationName) && op.getCategory() == category)
+                    .findFirst().orElse(null);
+        }
     }
 
     List<VnfProvider> getVnfProviders();
 
     VnfProvider getVnfProviderByName(String name);
+
+    VnfProviderResponse createVnfProviderResponse(VnfProvider vnfProvider);
 
     void executeVnfCommand(BaseVnfCmd command);
 }

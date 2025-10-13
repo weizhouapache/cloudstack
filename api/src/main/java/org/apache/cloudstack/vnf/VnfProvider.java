@@ -24,7 +24,14 @@ import java.util.Map;
 
 public interface VnfProvider extends Adapter {
 
+    enum TYPE {
+        BUILTIN,
+        CUSTOM
+    }
+
     String getDescription();
+
+    String getUuid();
 
     Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations();
 

@@ -34,11 +34,27 @@ public class VnfProviderResponse extends BaseResponse {
     @Param(description = "the description of the vnf provider")
     private String description;
 
+    @SerializedName(ApiConstants.TYPE)
+    @Param(description = "the type of the vnf provider. valid values are system (build-in providers) and custom (custom providers).")
+    private String type;
+
+    @SerializedName(ApiConstants.ID)
+    @Param(description = "the ID of the vnf provider. Applicable for custome vnf providers only.")
+    private String id;
+
     public void setName(String name) {
         this.name = name;
     }
 
     public void setDescription(String description) {
         this.description = description;
+    }
+
+    public void setType(String type) {
+        this.type = type;
+    }
+
+    public void setId(String id) {
+        this.id = id;
     }
 }

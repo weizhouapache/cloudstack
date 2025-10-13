@@ -73,16 +73,16 @@ public class RegisterVnfBrokerCmd extends BaseCmd {
 
     @Parameter(name = ApiConstants.IP_ADDRESS,
             type = CommandType.STRING,
-            description = "The IPv4 address of the Vnf broker.")
+            description = "The IPv4 address of the Vnf broker")
     private String ipAddress;
 
     @Parameter(name = ApiConstants.ACCESS_METHOD,
             type = CommandType.STRING,
-            description = "The access method of the Vnf broker.")
+            description = "The access method of the Vnf broker")
     private String accessMethod;
 
     @Parameter(name = ApiConstants.DETAILS, type = CommandType.MAP,
-            description = "Vnf broker details in key/value pairs.")
+            description = "Vnf broker details in key/value pairs")
     protected Map details;
 
     public String getName() {
