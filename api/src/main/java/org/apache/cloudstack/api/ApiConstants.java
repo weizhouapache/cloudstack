@@ -1306,6 +1306,7 @@ public class ApiConstants {
     public static final String VNF_CIDR_LIST = "vnfcidrlist";
     public static final String VNF_PROVIDER = "vnfprovider";
     public static final String VNF_ID = "vnfid";
+    public static final String ACCESS_METHOD = "accessmethod";
 
     public static final String CLIENT_ID = "clientid";
     public static final String REDIRECT_URI = "redirecturi";

@@ -16,21 +16,24 @@
 // under the License.
 package org.apache.cloudstack.vnf;
 
-public interface VnfBroker {
+import com.cloud.utils.component.PluggableService;
+import org.apache.cloudstack.vnf.api.command.DeleteVnfBrokerCmd;
+import org.apache.cloudstack.vnf.api.command.ListVnfBrokersCmd;
+import org.apache.cloudstack.vnf.api.command.RegisterVnfBrokerCmd;
+import org.apache.cloudstack.vnf.api.command.UpdateVnfBrokerCmd;
+import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
-    enum Detail {
-        // SSH access details
-        SSH_USER,
-        SSH_PASSWORD,
-        SSH_PORT,
-        SSH_PRIVATE_KEY,
-        SSH_SCRIPT_PATH,
+import java.util.List;
 
-        // HTTP/HTTPS access details
-        HTTP_METHOD,
-        HTTP_PORT,
-        HTTP_ENDPOINT,
-        HTTPS_PORT,
-        HTTPS_ENDPOINT
-    }
+public interface VnfBrokerManager extends PluggableService {
+
+    VnfBroker registerVnfBroker(RegisterVnfBrokerCmd registerVnfBrokerCmd);
+
+    VnfBrokerResponse createVnfBrokerResponse(VnfBroker result);
+
+    VnfBroker updateVnfBroker(UpdateVnfBrokerCmd updateVnfBrokerCmd);
+
+    boolean deleteVnfBroker(DeleteVnfBrokerCmd deleteVnfBrokerCmd);
+
+    List<? extends VnfBroker> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd);
 }

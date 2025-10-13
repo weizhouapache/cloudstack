@@ -22,6 +22,11 @@ import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
 
 public class CustomVnfProvider extends BaseVnfProvider {
 
+    // TODO: define endpoints for services, the operation would be the lower case of VnfOperation
+    // For example, for VnfOperation.FIREWALL_RULE_CREATE,
+    // The SSH command argument would be "<script path> firewall_rule_create <other args>", other args are formatted in json
+    // The HTTP request would be "http://<vnf-broker-endpoint>/firewall_rule_create", json data is sent via POST
+
     protected Long getVnfBrokerId() {
         return null;
     }
