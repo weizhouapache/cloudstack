@@ -23,6 +23,8 @@ import org.apache.cloudstack.vnf.api.command.ListVnfBrokersCmd;
 import org.apache.cloudstack.vnf.api.command.RegisterVnfBrokerCmd;
 import org.apache.cloudstack.vnf.api.command.RegisterVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.UpdateVnfBrokerCmd;
+import org.apache.cloudstack.vnf.api.command.UpdateVnfProviderCmd;
+import org.apache.cloudstack.vnf.api.command.VnfListAllProvidersCmd;
 import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
 import java.util.List;
@@ -42,4 +44,8 @@ public interface VnfBrokerManager extends PluggableService {
     VnfProvider registerVnfProvider(RegisterVnfProviderCmd registerVnfProviderCmd);
 
     boolean deleteVnfProvider(DeleteVnfProviderCmd deleteVnfProviderCmd);
+
+    VnfProvider updateVnfProvider(UpdateVnfProviderCmd updateVnfProviderCmd);
+
+    List<? extends VnfProvider> listVnfProviders(VnfListAllProvidersCmd vnfListAllProvidersCmd);
 }

@@ -17,7 +17,6 @@
 
 package org.apache.cloudstack.vnf.api.command;
 
-import com.cloud.exception.InvalidParameterValueException;
 import org.apache.cloudstack.acl.RoleType;
 import org.apache.cloudstack.api.APICommand;
 import org.apache.cloudstack.api.ApiConstants;
@@ -33,7 +32,9 @@ import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
 
+import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.user.Account;
+import com.cloud.utils.exception.CloudRuntimeException;
 
 import javax.inject.Inject;
 import java.util.Arrays;
@@ -44,14 +45,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-@APICommand(name = "registerVnfProvider",
-        description = "Registers a Vnf provider with a Vnf provider.",
-        responseObject = VnfProviderResponse.class,
+@APICommand(name = "updateVnfProvider",
+        description = "Updates an existing Vnf provider.",
+        responseObject = VnfBrokerResponse.class,
         since = "4.22.0",
         requestHasSensitiveInfo = true,
         responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin})
-public class RegisterVnfProviderCmd extends BaseCmd {
+public class UpdateVnfProviderCmd extends BaseCmd {
 
     @Inject
     VnfBrokerManager vnfBrokerManager;
@@ -60,9 +61,15 @@ public class RegisterVnfProviderCmd extends BaseCmd {
     //////////////// API parameters /////////////////////
     /////////////////////////////////////////////////////
 
+    @Parameter(name = ApiConstants.ID,
+            type = CommandType.UUID,
+            entityType = VnfProviderResponse.class,
+            required = true,
+            description = "Id of the Vnf provider")
+    private Long id;
+
     @Parameter(name = ApiConstants.NAME,
             type = CommandType.STRING,
-            required = true,
             description = "Name of the Vnf provider")
     private String name;
 
@@ -82,10 +89,14 @@ public class RegisterVnfProviderCmd extends BaseCmd {
             description = "desired service categories and operations")
     private Map supportedServices;
 
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
 
+    public Long getId() {
+        return id;
+    }
 
     public String getName() {
         return name;
@@ -138,19 +149,25 @@ public class RegisterVnfProviderCmd extends BaseCmd {
 
     @Override
     public void execute() {
-        VnfProvider result = vnfBrokerManager.registerVnfProvider(this);
-        if (result != null) {
-            VnfProviderResponse response = vnfService.createVnfProviderResponse(result);
-            response.setResponseName(getCommandName());
-            this.setResponseObject(response);
-        } else {
-            throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to create Vnf provider.");
+        try {
+            VnfProvider result = vnfBrokerManager.updateVnfProvider(this);
+            if (result != null) {
+                VnfProviderResponse response = vnfService.createVnfProviderResponse(result);
+                response.setResponseName(getCommandName());
+                this.setResponseObject(response);
+            } else {
+                throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to update Vnf provider:" + getId());
+            }
+        } catch (InvalidParameterValueException ex) {
+            throw new ServerApiException(ApiErrorCode.PARAM_ERROR, ex.getMessage());
+        } catch (CloudRuntimeException ex) {
+            throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, ex.getMessage());
         }
+
     }
 
     @Override
     public long getEntityOwnerId() {
         return Account.ACCOUNT_ID_SYSTEM;
     }
-
 }

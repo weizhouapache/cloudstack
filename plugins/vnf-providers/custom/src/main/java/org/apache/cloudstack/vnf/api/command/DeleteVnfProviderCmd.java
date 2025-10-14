@@ -29,8 +29,8 @@ import org.apache.cloudstack.api.response.SuccessResponse;
 import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.user.Account;
 import com.cloud.utils.exception.CloudRuntimeException;
+import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfBrokerManager;
-import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
 import javax.inject.Inject;
 
@@ -50,12 +50,20 @@ public class DeleteVnfProviderCmd extends BaseCmd {
     //////////////// API parameters /////////////////////
     /////////////////////////////////////////////////////
 
-    @Parameter(name = ApiConstants.ID, type = CommandType.UUID, entityType = VnfBrokerResponse.class, required = true, description = "Id of the Vnf broker")
+    @Parameter(name = ApiConstants.ID, type = CommandType.UUID, entityType = VnfProviderResponse.class, required = true, description = "Id of the Vnf provider")
     private Long id;
+
+    /////////////////////////////////////////////////////
+    /////////////////// Accessors ///////////////////////
+    /////////////////////////////////////////////////////
 
     public Long getId() {
         return id;
     }
+
+    /////////////////////////////////////////////////////
+    /////////////// API Implementation///////////////////
+    /////////////////////////////////////////////////////
 
     @Override
     public void execute() {
