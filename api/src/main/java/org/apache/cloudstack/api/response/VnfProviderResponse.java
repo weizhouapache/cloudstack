@@ -25,6 +25,8 @@ import org.apache.cloudstack.api.BaseResponse;
 
 import com.cloud.serializer.Param;
 
+import java.util.List;
+
 public class VnfProviderResponse extends BaseResponse {
     @SerializedName(ApiConstants.NAME)
     @Param(description = "the name of the vnf provider")
@@ -42,6 +44,10 @@ public class VnfProviderResponse extends BaseResponse {
     @Param(description = "the ID of the vnf provider. Applicable for custome vnf providers only.")
     private String id;
 
+    @SerializedName(ApiConstants.SERVICE)
+    @Param(description = "the list of supported services", responseObject = VnfServiceResponse.class)
+    private List<VnfServiceResponse> services;
+
     public void setName(String name) {
         this.name = name;
     }
@@ -56,5 +62,16 @@ public class VnfProviderResponse extends BaseResponse {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public void setServices(List<VnfServiceResponse> services) {
+        this.services = services;
+    }
+
+    public void addService(VnfServiceResponse serviceResponse) {
+        if (this.services == null) {
+            this.services = new java.util.ArrayList<>();
+        }
+        this.services.add(serviceResponse);
     }
 }

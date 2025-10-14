@@ -49,10 +49,13 @@ import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListTemplatesCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfRegisterTemplateCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfUpdateTemplateCmd;
+import org.apache.cloudstack.api.response.VnfOperationResponse;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
+import org.apache.cloudstack.api.response.VnfServiceResponse;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
 import org.apache.cloudstack.storage.template.VnfTemplateManager;
+import org.apache.commons.collections.MapUtils;
 
 public class VnfServiceImpl extends ManagerBase implements VnfService, PluggableService, Configurable {
 
@@ -143,6 +146,23 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
             response.setType(VnfProvider.TYPE.CUSTOM.name());
         } else {
             response.setType(VnfProvider.TYPE.BUILTIN.name());
+        }
+        Map<ServiceCategory, List<VnfOperation>> supportedOperations = vnfProvider.getSupportedOperations();
+        if (MapUtils.isNotEmpty(supportedOperations)) {
+            for (Map.Entry<ServiceCategory, List<VnfOperation>> entry : supportedOperations.entrySet()) {
+                VnfServiceResponse serviceResponse = new VnfServiceResponse();
+                serviceResponse.setName(entry.getKey().name());
+                List<VnfOperationResponse> operationResponses = new ArrayList<>();
+                for (VnfOperation operation : entry.getValue()) {
+                    VnfOperationResponse operationResponse = new VnfOperationResponse();
+                    operationResponse.setName(operation.name());
+                    operationResponse.setService(operation.getCategory().name());
+                    operationResponse.setDescription(operation.getDescription());
+                    operationResponses.add(operationResponse);
+                }
+                serviceResponse.setOperations(operationResponses);
+                response.addService(serviceResponse);
+            }
         }
         response.setObjectName("vnfprovider");
         return response;

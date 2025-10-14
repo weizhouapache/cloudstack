@@ -109,6 +109,7 @@ public interface VnfService {
         DHCP_SERVER_CONFIGURE(ServiceCategory.DHCP, "Configure DHCP server"),
         DHCP_SERVER_START(ServiceCategory.DHCP, "Start DHCP server"),
         DHCP_SERVER_STOP(ServiceCategory.DHCP, "Stop DHCP server"),
+        DHCP_SERVER_RESTART(ServiceCategory.DHCP, "Restart DHCP server"),
         DHCP_STATIC_LEASE_ADD(ServiceCategory.DHCP, "Add DHCP static lease"),
         DHCP_STATIC_LEASE_REMOVE(ServiceCategory.DHCP, "Remove DHCP static lease"),
 

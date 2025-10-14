@@ -19,8 +19,24 @@
 package org.apache.cloudstack.vnf;
 
 import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.vnf.VnfService.ServiceCategory;
+import org.apache.cloudstack.vnf.VnfService.VnfOperation;
+
+import java.util.List;
+import java.util.Map;
 
 public class DummyVnfProvider extends BaseVnfProvider {
+
+    @Override
+    public Map<ServiceCategory, List<VnfOperation>> getSupportedOperations() {
+        return Map.of(
+                ServiceCategory.INTERFACE_MANAGEMENT, List.of(VnfOperation.INTERFACE_CONFIGURE),
+                ServiceCategory.FIREWALL_RULES, List.of(VnfOperation.FIREWALL_RULE_CREATE, VnfOperation.FIREWALL_RULE_DELETE, VnfOperation.FIREWALL_RULE_UPDATE, VnfOperation.FIREWALL_RULE_LIST),
+                ServiceCategory.LOAD_BALANCING, List.of(VnfOperation.NAT_SOURCE_CREATE, VnfOperation.NAT_DESTINATION_CREATE, VnfOperation.NAT_RULE_DELETE, VnfOperation.NAT_PORT_FORWARD_CREATE),
+                ServiceCategory.DHCP, List.of(VnfOperation.DHCP_SERVER_CONFIGURE, VnfOperation.DHCP_SERVER_RESTART, VnfOperation.DHCP_STATIC_LEASE_ADD, VnfOperation.DHCP_STATIC_LEASE_REMOVE),
+                ServiceCategory.DNS, List.of(VnfOperation.DNS_HOST_OVERRIDE_ADD, VnfOperation.DNS_HOST_OVERRIDE_REMOVE)
+        );
+    }
 
     @Override
     public VnfConnector getConnector(BaseVnfCmd command) {
