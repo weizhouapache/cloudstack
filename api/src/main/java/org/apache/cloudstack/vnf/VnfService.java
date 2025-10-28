@@ -74,7 +74,11 @@ public interface VnfService {
 
         // Status
         EVENT_MANAGEMENT,           // system logs, events
-        MONITORING;                  // system metrics, service status, health check, statistics
+        MONITORING,                 // system metrics, service status, health check, statistics
+
+        // Configurations
+        CONFIGURATION_BACKUP,
+        CONFIGURATION_RESTORE;
 
         public static ServiceCategory getService(String serviceName) {
             return Arrays.stream(values())

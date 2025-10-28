@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS `vnf_providers` (
     UNIQUE KEY `uc_vnf_provider__uuid` (`uuid`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 
-CREATE TABLE  `cloud`.`vnf_provider_service_map` (
+CREATE TABLE IF NOT EXISTS `cloud`.`vnf_provider_service_map` (
     `id` bigint unsigned NOT NULL auto_increment,
     `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'id of the vnf provider',
     `service` varchar(255) NOT NULL COMMENT 'supported service category',
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS `vnf_brokers` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
 
 -- Add table for VNF broker details
-CREATE TABLE `cloud`.`vnf_broker_details` (
+CREATE TABLE IF NOT EXISTS `cloud`.`vnf_broker_details` (
     `id` bigint unsigned NOT NULL auto_increment,
     `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'id of the vnf broker',
     `name` varchar(255) NOT NULL,
