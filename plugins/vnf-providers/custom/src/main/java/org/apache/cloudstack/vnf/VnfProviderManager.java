@@ -17,29 +17,14 @@
 package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.PluggableService;
-import org.apache.cloudstack.vnf.api.command.DeleteVnfBrokerCmd;
 import org.apache.cloudstack.vnf.api.command.DeleteVnfProviderCmd;
-import org.apache.cloudstack.vnf.api.command.ListVnfBrokersCmd;
-import org.apache.cloudstack.vnf.api.command.RegisterVnfBrokerCmd;
 import org.apache.cloudstack.vnf.api.command.RegisterVnfProviderCmd;
-import org.apache.cloudstack.vnf.api.command.UpdateVnfBrokerCmd;
 import org.apache.cloudstack.vnf.api.command.UpdateVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.VnfListAllProvidersCmd;
-import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
 import java.util.List;
 
 public interface VnfProviderManager extends PluggableService {
-
-    VnfProviderConnection registerVnfBroker(RegisterVnfBrokerCmd registerVnfBrokerCmd);
-
-    VnfBrokerResponse createVnfBrokerResponse(VnfProviderConnection result);
-
-    VnfProviderConnection updateVnfBroker(UpdateVnfBrokerCmd updateVnfBrokerCmd);
-
-    boolean deleteVnfBroker(DeleteVnfBrokerCmd deleteVnfBrokerCmd);
-
-    List<? extends VnfProviderConnection> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd);
 
     VnfProvider registerVnfProvider(RegisterVnfProviderCmd registerVnfProviderCmd);
 
