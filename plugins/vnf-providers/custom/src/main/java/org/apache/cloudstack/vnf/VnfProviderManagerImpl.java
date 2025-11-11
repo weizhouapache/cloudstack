@@ -21,7 +21,7 @@ import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 import org.apache.cloudstack.vnf.api.command.DeleteVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.RegisterVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.UpdateVnfProviderCmd;
-import org.apache.cloudstack.vnf.api.command.VnfListAllProvidersCmd;
+import org.apache.cloudstack.vnf.api.command.VnfListProvidersCmd;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +36,7 @@ public class VnfProviderManagerImpl extends ComponentLifecycleBase implements Vn
         cmdList.add(RegisterVnfProviderCmd.class);
         cmdList.add(DeleteVnfProviderCmd.class);
         cmdList.add(UpdateVnfProviderCmd.class);
-        cmdList.add(VnfListAllProvidersCmd.class);
+        cmdList.add(VnfListProvidersCmd.class);
         cmdList.add(PerformVnfActionCmd.class);
 
         return cmdList;
@@ -58,7 +58,7 @@ public class VnfProviderManagerImpl extends ComponentLifecycleBase implements Vn
     }
 
     @Override
-    public List<? extends VnfProvider> listVnfProviders(VnfListAllProvidersCmd vnfListAllProvidersCmd) {
+    public List<? extends VnfProvider> listVnfProviders(VnfListProvidersCmd vnfListProvidersCmd) {
         // search by Name or/and keyword
         return List.of();
     }

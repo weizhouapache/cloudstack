@@ -20,7 +20,7 @@ import com.cloud.utils.component.PluggableService;
 import org.apache.cloudstack.vnf.api.command.DeleteVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.RegisterVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.UpdateVnfProviderCmd;
-import org.apache.cloudstack.vnf.api.command.VnfListAllProvidersCmd;
+import org.apache.cloudstack.vnf.api.command.VnfListProvidersCmd;
 
 import java.util.List;
 
@@ -32,5 +32,5 @@ public interface VnfProviderManager extends PluggableService {
 
     VnfProvider updateVnfProvider(UpdateVnfProviderCmd updateVnfProviderCmd);
 
-    List<? extends VnfProvider> listVnfProviders(VnfListAllProvidersCmd vnfListAllProvidersCmd);
+    List<? extends VnfProvider> listVnfProviders(VnfListProvidersCmd vnfListProvidersCmd);
 }

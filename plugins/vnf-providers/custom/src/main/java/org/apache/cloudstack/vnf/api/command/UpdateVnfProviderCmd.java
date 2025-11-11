@@ -27,27 +27,16 @@ import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
-import org.apache.cloudstack.vnf.VnfService;
-import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.MapUtils;
 
 import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.user.Account;
 import com.cloud.utils.exception.CloudRuntimeException;
 
 import javax.inject.Inject;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 @APICommand(name = "updateVnfProvider",
         description = "Updates an existing Vnf provider.",
-        responseObject = VnfBrokerResponse.class,
+        responseObject = VnfProviderResponse.class,
         since = "4.22.1",
         requestHasSensitiveInfo = true,
         responseHasSensitiveInfo = false,
@@ -78,17 +67,10 @@ public class UpdateVnfProviderCmd extends BaseCmd {
             description = "Description of the Vnf provider")
     private String description;
 
-    @Parameter(name = ApiConstants.VNF_BROKER_ID,
-            type = CommandType.UUID,
-            entityType = VnfBrokerResponse.class,
-            description = "The ID of the Vnf broker")
-    private String vnfBrokerId;
-
-    @Parameter(name = ApiConstants.SUPPORTED_SERVICES,
-            type = CommandType.MAP,
-            description = "desired service categories and operations")
-    private Map supportedServices;
-
+    @Parameter(name = ApiConstants.VNF_DEFINITION,
+            type = CommandType.STRING,
+            description = "The VNF provider definition in YAML format")
+    private String definition;
 
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
@@ -106,41 +88,8 @@ public class UpdateVnfProviderCmd extends BaseCmd {
         return description;
     }
 
-    public String getVnfBrokerId() {
-        return vnfBrokerId;
-    }
-
-    public Map getSupportedServices() {
-        Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> serviceMap = null;
-
-        if (MapUtils.isNotEmpty(supportedServices)) {
-            serviceMap = new HashMap<>();
-            Collection serviceCapabilityCollection = supportedServices.values();
-            Iterator iter = serviceCapabilityCollection.iterator();
-            while (iter.hasNext()) {
-                HashMap<String, String> serviceOperationsMap = (HashMap<String, String>) iter.next();
-                VnfService.ServiceCategory serviceCategory;
-                String serviceName = serviceOperationsMap.get("service");
-                String operations = serviceOperationsMap.get("operations");
-
-                if (serviceName != null) {
-                    serviceCategory = VnfService.ServiceCategory.getService(serviceName);
-                } else {
-                    throw new InvalidParameterValueException("Service is not specified");
-                }
-                if (serviceCategory == null) {
-                    throw new InvalidParameterValueException("Invalid service: " + serviceName);
-                }
-                List<VnfService.VnfOperation> vnfOperations = operations == null ? null :
-                        Arrays.stream(operations.split(",")).map(op -> VnfService.VnfOperation.getOperation(serviceCategory, op)).collect(Collectors.toList());
-                if (CollectionUtils.isEmpty(vnfOperations)) {
-                    throw new InvalidParameterValueException("Invalid operations: " + operations + " in service category: " + serviceName);
-                }
-
-                serviceMap.put(serviceCategory, vnfOperations);
-            }
-        }
-        return serviceMap;
+    public String getDefinition() {
+        return definition;
     }
 
     /////////////////////////////////////////////////////

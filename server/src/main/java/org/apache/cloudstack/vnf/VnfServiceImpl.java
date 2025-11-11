@@ -45,7 +45,6 @@ import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfDeleteTemplateCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfDeployApplianceCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListAppliancesCmd;
-import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListTemplatesCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfRegisterTemplateCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfUpdateTemplateCmd;
@@ -117,9 +116,6 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         cmdList.add(VnfListAppliancesCmdByAdmin.class);
         cmdList.add(VnfDeployApplianceCmd.class);
         cmdList.add(VnfDeployApplianceCmdByAdmin.class);
-
-        // VNF Provider
-        cmdList.add(VnfListProvidersCmd.class);
 
         return cmdList;
     }

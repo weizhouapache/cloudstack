@@ -23,8 +23,8 @@ import java.util.List;
 
 import org.apache.cloudstack.api.APICommand;
 import org.apache.cloudstack.api.ApiConstants;
+import org.apache.cloudstack.api.BaseListCmd;
 import org.apache.cloudstack.api.Parameter;
-import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
 import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfProviderManager;
@@ -32,10 +32,10 @@ import org.apache.cloudstack.vnf.VnfProvider;
 
 import javax.inject.Inject;
 
-@APICommand(name = "vnfListAllProviders", description = "Lists all VNF providers.",
+@APICommand(name = "vnfListProviders", description = "Lists VNF providers.",
         responseObject = VnfProviderResponse.class,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
-public class VnfListAllProvidersCmd extends VnfListProvidersCmd {
+public class VnfListProvidersCmd extends BaseListCmd {
 
     @Inject
     VnfProviderManager vnfProviderManager;

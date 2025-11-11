@@ -29,8 +29,6 @@ import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
 
 import com.cloud.user.Account;
-import org.apache.cloudstack.vnf.VnfService;
-import org.apache.commons.lang3.ObjectUtils;
 
 import javax.inject.Inject;
 
@@ -61,14 +59,9 @@ public class RegisterVnfProviderCmd extends BaseCmd {
             description = "Description of the Vnf provider")
     private String description;
 
-    @Parameter(name = ApiConstants.FORMAT,
-            type = CommandType.STRING,
-            description = "The format of the Vnf provider definition. The default value is YAML.")
-    private String format;
-
     @Parameter(name = ApiConstants.VNF_DEFINITION,
             type = CommandType.STRING,
-            description = "The VNF provider definition in the specified format")
+            description = "The VNF provider definition in YAML format")
     private String definition;
 
     /////////////////////////////////////////////////////
@@ -82,10 +75,6 @@ public class RegisterVnfProviderCmd extends BaseCmd {
 
     public String getDescription() {
         return description;
-    }
-
-    public String getFormat() {
-        return ObjectUtils.defaultIfNull(format, VnfService.DataFormat.YAML.toString());
     }
 
     public String getDefinition() {
