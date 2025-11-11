@@ -14,16 +14,16 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+
 package org.apache.cloudstack.vnf.dao;
 
-import org.apache.cloudstack.resourcedetail.ResourceDetailsDao;
-import org.apache.cloudstack.vnf.VnfBroker;
-import org.apache.cloudstack.vnf.vo.VnfBrokerDetailsVO;
+import com.cloud.utils.db.DB;
+import com.cloud.utils.db.GenericDaoBase;
+import org.apache.cloudstack.vnf.vo.VnfProviderConnectionVO;
+import org.springframework.stereotype.Component;
 
-import java.util.Map;
+@Component
+@DB
+public class VnfProviderConnectionDaoImpl extends GenericDaoBase<VnfProviderConnectionVO, Long> implements VnfProviderConnectionDao {
 
-public interface VnfBrokerDetailsDao extends ResourceDetailsDao<VnfBrokerDetailsVO> {
-    Map<VnfBroker.Detail, String> getVnfBrokerDetails(long vnfBrokerId);
-    String getDetail(long offeringId, VnfBroker.Detail detailName);
-    int removeByVnfBrokerId(long vnfBrokerId);
 }

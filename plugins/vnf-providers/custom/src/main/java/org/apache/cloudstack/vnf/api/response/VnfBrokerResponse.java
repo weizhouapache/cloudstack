@@ -26,9 +26,9 @@ import org.apache.cloudstack.api.EntityReference;
 
 import com.cloud.serializer.Param;
 import com.google.gson.annotations.SerializedName;
-import org.apache.cloudstack.vnf.VnfBroker;
+import org.apache.cloudstack.vnf.VnfProviderConnection;
 
-@EntityReference(value = VnfBroker.class)
+@EntityReference(value = VnfProviderConnection.class)
 public class VnfBrokerResponse extends BaseResponse {
     @SerializedName(ApiConstants.ID)
     @Param(description = "id of the Vnf broker")

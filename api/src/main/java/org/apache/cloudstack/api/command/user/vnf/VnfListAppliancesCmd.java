@@ -30,7 +30,7 @@ import org.apache.cloudstack.api.response.UserVmResponse;
         responseView = ResponseView.Restricted, entityType = {VirtualMachine.class},
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin, RoleType.User},
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfListAppliancesCmd extends ListVMsCmd implements UserCmd {
 
     @Override

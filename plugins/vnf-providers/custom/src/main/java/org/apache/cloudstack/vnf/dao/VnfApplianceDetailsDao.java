@@ -16,9 +16,13 @@
 // under the License.
 package org.apache.cloudstack.vnf.dao;
 
-import com.cloud.utils.db.GenericDao;
-import org.apache.cloudstack.vnf.vo.VnfProviderServiceMapVO;
+import org.apache.cloudstack.resourcedetail.ResourceDetailsDao;
+import org.apache.cloudstack.vnf.vo.VnfApplianceDetailsVO;
 
-public interface VnfProviderServiceMapDao extends GenericDao<VnfProviderServiceMapVO, Long> {
+import java.util.Map;
 
+public interface VnfApplianceDetailsDao extends ResourceDetailsDao<VnfApplianceDetailsVO> {
+    Map<String, String> getVnfApplianceDetails(long vnfApplianceId);
+    String getDetail(long offeringId, String detailName);
+    int removeByVnfApplianceId(long vnfApplianceId);
 }

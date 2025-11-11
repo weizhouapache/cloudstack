@@ -27,6 +27,6 @@ import com.cloud.template.VirtualMachineTemplate;
 @APICommand(name = "vnfListTemplates", description = "List all public, private, and privileged VNF templates.",
         responseObject = TemplateResponse.class, entityType = {VirtualMachineTemplate.class}, responseView = ResponseView.Full,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfListTemplatesCmdByAdmin extends ListVnfTemplatesCmd implements AdminCmd {
 }

@@ -30,6 +30,6 @@ import org.apache.cloudstack.api.response.UserVmResponse;
         entityType = {VirtualMachine.class},
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = true,
         authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin, RoleType.User},
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfDeployApplianceCmd extends DeployVnfApplianceCmd {
 }

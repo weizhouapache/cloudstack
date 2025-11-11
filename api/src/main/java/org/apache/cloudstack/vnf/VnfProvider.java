@@ -17,7 +17,7 @@
 package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.Adapter;
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 
 import java.util.List;
 import java.util.Map;
@@ -35,9 +35,9 @@ public interface VnfProvider extends Adapter {
 
     Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> getSupportedOperations();
 
-    VnfConnector getConnector(BaseVnfCmd command);
+    VnfConnector getConnector(PerformVnfActionCmd command);
 
-    VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command);
+    VnfDataFormatHandler getDataFormatHandler(PerformVnfActionCmd command);
 
     Object transformVnfCommand(VnfCommand command);
 

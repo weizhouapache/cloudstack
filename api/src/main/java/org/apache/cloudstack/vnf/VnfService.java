@@ -16,7 +16,7 @@
 // under the License.
 package org.apache.cloudstack.vnf;
 
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.framework.config.ConfigKey;
 
@@ -184,5 +184,5 @@ public interface VnfService {
 
     VnfProviderResponse createVnfProviderResponse(VnfProvider vnfProvider);
 
-    void executeVnfCommand(BaseVnfCmd command);
+    void executeVnfCommand(PerformVnfActionCmd command);
 }

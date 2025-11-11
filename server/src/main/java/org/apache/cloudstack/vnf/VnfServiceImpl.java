@@ -41,7 +41,7 @@ import org.apache.cloudstack.api.command.admin.vnf.VnfListAppliancesCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfListTemplatesCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfRegisterTemplateCmdByAdmin;
 import org.apache.cloudstack.api.command.admin.vnf.VnfUpdateTemplateCmdByAdmin;
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfDeleteTemplateCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfDeployApplianceCmd;
 import org.apache.cloudstack.api.command.user.vnf.VnfListAppliancesCmd;
@@ -169,12 +169,12 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
     }
 
     @Override
-    public void executeVnfCommand(BaseVnfCmd command) {
+    public void executeVnfCommand(PerformVnfActionCmd command) {
         VnfProvider vnfProvider = validateVnfCommand(command);
         executeVnfCommand(vnfProvider, command);
     }
 
-    protected VnfProvider validateVnfCommand(BaseVnfCmd command) {
+    protected VnfProvider validateVnfCommand(PerformVnfActionCmd command) {
         Long vnfId = command.getVnfId();
         UserVmVO vnf = userVmDao.findById(vnfId);
         if (vnf == null) {
@@ -193,7 +193,7 @@ public class VnfServiceImpl extends ManagerBase implements VnfService, Pluggable
         return vnfProvider;
     }
 
-    protected void executeVnfCommand(VnfProvider vnfProvider, BaseVnfCmd command) {
+    protected void executeVnfCommand(VnfProvider vnfProvider, PerformVnfActionCmd command) {
         // 1. Validate command
         ServiceCategory serviceCategory = command.getServiceCategory();
         if (serviceCategory == null) {

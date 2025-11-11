@@ -27,7 +27,7 @@ import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.command.user.vnf.VnfListProvidersCmd;
 import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
 
 import javax.inject.Inject;
@@ -38,7 +38,7 @@ import javax.inject.Inject;
 public class VnfListAllProvidersCmd extends VnfListProvidersCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     /////////////////////////////////////////////////////
     //////////////// API parameters /////////////////////
@@ -65,7 +65,7 @@ public class VnfListAllProvidersCmd extends VnfListProvidersCmd {
     @Override
     public void execute()  {
         List<VnfProvider> vnfProviders = vnfService.getVnfProviders();
-        vnfProviders.addAll(vnfBrokerManager.listVnfProviders(this));
+        vnfProviders.addAll(vnfProviderManager.listVnfProviders(this));
         final ListResponse<VnfProviderResponse> response = new ListResponse<>();
         final List<VnfProviderResponse> responses = new ArrayList<>();
 

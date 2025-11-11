@@ -24,8 +24,8 @@ import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
-import org.apache.cloudstack.vnf.VnfBroker;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderConnection;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 import org.apache.commons.collections.MapUtils;
 
@@ -40,14 +40,14 @@ import java.util.Map;
 @APICommand(name = "updateVnfBroker",
         description = "Updates an existing Vnf broker.",
         responseObject = VnfBrokerResponse.class,
-        since = "4.22.0",
+        since = "4.22.1",
         requestHasSensitiveInfo = true,
         responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin})
 public class UpdateVnfBrokerCmd extends BaseCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     /////////////////////////////////////////////////////
     //////////////// API parameters /////////////////////
@@ -100,9 +100,9 @@ public class UpdateVnfBrokerCmd extends BaseCmd {
     @Override
     public void execute() {
         try {
-            VnfBroker result = vnfBrokerManager.updateVnfBroker(this);
+            VnfProviderConnection result = vnfProviderManager.updateVnfBroker(this);
             if (result != null) {
-                VnfBrokerResponse response = vnfBrokerManager.createVnfBrokerResponse(result);
+                VnfBrokerResponse response = vnfProviderManager.createVnfBrokerResponse(result);
                 response.setResponseName(getCommandName());
                 this.setResponseObject(response);
             } else {

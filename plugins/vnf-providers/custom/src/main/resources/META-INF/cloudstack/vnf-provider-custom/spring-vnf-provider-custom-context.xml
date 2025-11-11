@@ -28,15 +28,14 @@
 
     <bean id="customVnfProvider" class="org.apache.cloudstack.vnf.CustomVnfProvider">
         <property name="name" value="CustomVnfProvider" />
-        <property name="description" value="Custom Vnf Provider with Vnf Broker" />
+        <property name="description" value="Custom Vnf Provider" />
     </bean>
 
-    <bean id="vnfBrokerManagerImpl" class="org.apache.cloudstack.vnf.VnfBrokerManagerImpl" />
+    <bean id="vnfProviderManagerImpl" class="org.apache.cloudstack.vnf.VnfProviderManagerImpl" />
 
-    <bean id="vnfBrokerDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfBrokerDaoImpl" />
-    <bean id="vnfBrokerDetailsDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfBrokerDetailsDaoImpl" />
-
+    <bean id="vnfApplianceDetailsDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfApplianceDetailsDaoImpl" />
     <bean id="vnfProviderDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfProviderDaoImpl" />
-    <bean id="vnfProviderServiceMapDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfProviderServiceMapDaoImpl" />
+    <bean id="vnfProviderConnectionDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfProviderConnectionDaoImpl" />
+    <bean id="vnfProviderServiceMapDaoImpl" class="org.apache.cloudstack.vnf.dao.VnfProviderServiceDaoImpl" />
 
 </beans>

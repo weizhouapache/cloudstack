@@ -26,22 +26,21 @@ import javax.persistence.Id;
 import javax.persistence.Table;
 
 import org.apache.cloudstack.api.ResourceDetail;
-import org.apache.cloudstack.vnf.VnfBroker;
 
 @Entity
-@Table(name = "vnf_broker_details")
-public class VnfBrokerDetailsVO implements ResourceDetail {
+@Table(name = "vnf_appliance_details")
+public class VnfApplianceDetailsVO implements ResourceDetail {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @Column(name = "id")
     private long id;
 
-    @Column(name = "bgp_peer_id")
+    @Column(name = "vnf_appliance_id")
     private long resourceId;
 
     @Enumerated(value = EnumType.STRING)
     @Column(name = "name")
-    private VnfBroker.Detail name;
+    private String name;
 
     @Column(name = "value", length = 1024)
     private String value;
@@ -49,10 +48,10 @@ public class VnfBrokerDetailsVO implements ResourceDetail {
     @Column(name = "display")
     private boolean display;
 
-    public VnfBrokerDetailsVO() {
+    public VnfApplianceDetailsVO() {
     }
 
-    public VnfBrokerDetailsVO(long resourceId, VnfBroker.Detail detailName, String value, boolean display) {
+    public VnfApplianceDetailsVO(long resourceId, String detailName, String value, boolean display) {
         this.resourceId = resourceId;
         this.name = detailName;
         this.value = value;
@@ -74,10 +73,10 @@ public class VnfBrokerDetailsVO implements ResourceDetail {
     }
 
     public String getName() {
-        return name.name();
+        return name;
     }
 
-    public VnfBroker.Detail getDetailName() {
+    public String getDetailName() {
         return name;
     }
 
@@ -94,7 +93,7 @@ public class VnfBrokerDetailsVO implements ResourceDetail {
         this.id = id;
     }
 
-    public void setName(VnfBroker.Detail name) {
+    public void setName(String name) {
         this.name = name;
     }
 

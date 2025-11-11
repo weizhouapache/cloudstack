@@ -26,6 +26,6 @@ import org.apache.cloudstack.api.response.TemplateResponse;
         description = "Updates a template to VNF template or attributes of a VNF template.",
         responseObject = TemplateResponse.class, responseView = ResponseView.Full,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfUpdateTemplateCmdByAdmin extends UpdateVnfTemplateCmd implements AdminCmd {
 }

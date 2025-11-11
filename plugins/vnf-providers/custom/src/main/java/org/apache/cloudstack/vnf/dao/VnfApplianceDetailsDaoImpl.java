@@ -26,15 +26,13 @@ import com.cloud.utils.db.SearchCriteria;
 import com.cloud.utils.db.SearchCriteria.Func;
 import com.cloud.utils.db.SearchCriteria.Op;
 import org.apache.cloudstack.resourcedetail.ResourceDetailsDaoBase;
-import org.apache.cloudstack.vnf.VnfBroker;
-import org.apache.cloudstack.vnf.vo.VnfBrokerDetailsVO;
-import org.apache.commons.lang3.EnumUtils;
+import org.apache.cloudstack.vnf.vo.VnfApplianceDetailsVO;
 
-public class VnfBrokerDetailsDaoImpl extends ResourceDetailsDaoBase<VnfBrokerDetailsVO> implements VnfBrokerDetailsDao {
-    protected final SearchBuilder<VnfBrokerDetailsVO> DetailSearch;
-    private final GenericSearchBuilder<VnfBrokerDetailsVO, String> ValueSearch;
+public class VnfApplianceDetailsDaoImpl extends ResourceDetailsDaoBase<VnfApplianceDetailsVO> implements VnfApplianceDetailsDao {
+    protected final SearchBuilder<VnfApplianceDetailsVO> DetailSearch;
+    private final GenericSearchBuilder<VnfApplianceDetailsVO, String> ValueSearch;
 
-    public VnfBrokerDetailsDaoImpl() {
+    public VnfApplianceDetailsDaoImpl() {
 
         DetailSearch = createSearchBuilder();
         DetailSearch.and("resourceId", DetailSearch.entity().getResourceId(), SearchCriteria.Op.EQ);
@@ -52,17 +50,17 @@ public class VnfBrokerDetailsDaoImpl extends ResourceDetailsDaoBase<VnfBrokerDet
     }
 
     @Override
-    public Map<VnfBroker.Detail, String> getVnfBrokerDetails(long vnfBrokerId) {
-        SearchCriteria<VnfBrokerDetailsVO> sc = DetailSearch.create();
-        sc.setParameters("resourceId", vnfBrokerId);
+    public Map<String, String> getVnfApplianceDetails(long vnfApplianceId) {
+        SearchCriteria<VnfApplianceDetailsVO> sc = DetailSearch.create();
+        sc.setParameters("resourceId", vnfApplianceId);
         sc.setParameters("display", true);
 
-        List<VnfBrokerDetailsVO> results = search(sc, null);
+        List<VnfApplianceDetailsVO> results = search(sc, null);
         if (results.isEmpty()) {
             return null;
         }
-        Map<VnfBroker.Detail, String> details = new HashMap<>(results.size());
-        for (VnfBrokerDetailsVO result : results) {
+        Map<String, String> details = new HashMap<>(results.size());
+        for (VnfApplianceDetailsVO result : results) {
             details.put(result.getDetailName(), result.getValue());
         }
 
@@ -70,10 +68,10 @@ public class VnfBrokerDetailsDaoImpl extends ResourceDetailsDaoBase<VnfBrokerDet
     }
 
     @Override
-    public String getDetail(long vnfBrokerId, VnfBroker.Detail detailName) {
+    public String getDetail(long vnfApplianceId, String detailName) {
         SearchCriteria<String> sc = ValueSearch.create();
         sc.setParameters("name", detailName);
-        sc.setParameters("resourceId", vnfBrokerId);
+        sc.setParameters("resourceId", vnfApplianceId);
         List<String> results = customSearch(sc, null);
         if (results.isEmpty()) {
             return null;
@@ -84,13 +82,13 @@ public class VnfBrokerDetailsDaoImpl extends ResourceDetailsDaoBase<VnfBrokerDet
 
     @Override
     public void addDetail(long resourceId, String key, String value, boolean display) {
-        persist(new VnfBrokerDetailsVO(resourceId, EnumUtils.getEnumIgnoreCase(VnfBroker.Detail.class, key), value, display));
+        persist(new VnfApplianceDetailsVO(resourceId, key, value, display));
     }
 
     @Override
-    public int removeByVnfBrokerId(long vnfBrokerId) {
-        SearchCriteria<VnfBrokerDetailsVO> sc = DetailSearch.create();
-        sc.setParameters("resourceId", vnfBrokerId);
+    public int removeByVnfApplianceId(long vnfApplianceId) {
+        SearchCriteria<VnfApplianceDetailsVO> sc = DetailSearch.create();
+        sc.setParameters("resourceId", vnfApplianceId);
         return remove(sc);
     }
 }

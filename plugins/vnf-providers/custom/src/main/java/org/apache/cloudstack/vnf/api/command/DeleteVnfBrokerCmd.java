@@ -29,7 +29,7 @@ import org.apache.cloudstack.api.response.SuccessResponse;
 import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.user.Account;
 import com.cloud.utils.exception.CloudRuntimeException;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
 import javax.inject.Inject;
@@ -44,7 +44,7 @@ import javax.inject.Inject;
 public class DeleteVnfBrokerCmd extends BaseCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     /////////////////////////////////////////////////////
     //////////////// API parameters /////////////////////
@@ -60,7 +60,7 @@ public class DeleteVnfBrokerCmd extends BaseCmd {
     @Override
     public void execute() {
         try {
-            boolean result = vnfBrokerManager.deleteVnfBroker(this);
+            boolean result = vnfProviderManager.deleteVnfBroker(this);
             if (result) {
                 SuccessResponse response = new SuccessResponse(getCommandName());
                 response.setResponseName(getCommandName());

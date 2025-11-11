@@ -29,6 +29,6 @@ import com.cloud.template.VirtualMachineTemplate;
         responseObject = TemplateResponse.class, entityType = {VirtualMachineTemplate.class}, responseView = ResponseView.Restricted,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin, RoleType.User},
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfListTemplatesCmd extends ListTemplatesCmd implements UserCmd {
 }

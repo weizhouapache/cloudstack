@@ -19,54 +19,60 @@
 -- Schema upgrade from 4.21.0.0 to 4.22.0.0
 --;
 
--- Add table for custom VNF providers
+-- Add table for VNF appliance details
+CREATE TABLE IF NOT EXISTS `cloud`.`vnf_appliance_details` (
+    `id` bigint unsigned NOT NULL auto_increment,
+    `vnf_appliance_id` bigint unsigned NOT NULL COMMENT 'id of the vnf appliance',
+    `name` varchar(255) NOT NULL,
+    `value` varchar(1024) NOT NULL,
+    `display` tinyint NOT NULL DEFAULT '1' COMMENT 'True if the detail can be displayed to the end user',
+    PRIMARY KEY (`id`),
+    CONSTRAINT `fk_vnf_appliance_detail__vnf_appliance_id` FOREIGN KEY (`vnf_appliance_id`) REFERENCES `vm_instance`(`id`) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Add table for VNF providers
 CREATE TABLE IF NOT EXISTS `vnf_providers` (
     `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'id',
     `uuid` varchar(40) NOT NULL COMMENT 'UUID of the vnf provider',
-    `name` varchar(255) NOT NULL COMMENT 'name of the vnf provider',
-    `description` varchar(1024) DEFAULT NULL COMMENT 'description of the vnf provider',
-    `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'id of the vnf broker',
+    `name` varchar(255) NOT NULL COMMENT 'Name of the vnf provider',
+    `description` varchar(1024) DEFAULT NULL COMMENT 'Description of the vnf provider',
+    `general_info` mediumtext COMMENT 'General information of the vnf provider in YAML format',
+    `health_checks` mediumtext COMMENT 'Health checks of the vnf provider in YAML format',
+    `bootstrap_steps` mediumtext COMMENT 'Bootstrap steps of the vnf provider in YAML format',
     `created` datetime DEFAULT NULL COMMENT 'Date Created',
     `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
     PRIMARY KEY (`id`),
     UNIQUE KEY `uc_vnf_provider__uuid` (`uuid`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS `cloud`.`vnf_provider_service_map` (
-    `id` bigint unsigned NOT NULL auto_increment,
-    `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'id of the vnf provider',
-    `service` varchar(255) NOT NULL COMMENT 'supported service category',
-    `operation` varchar(255) COMMENT 'supported operation',
-    `created` datetime COMMENT 'date created',
-    PRIMARY KEY (`id`),
-    CONSTRAINT `fk_vnf_provider_service_map__vnf_provider_id` FOREIGN KEY(`vnf_provider_id`) REFERENCES `vnf_providers`(`id`) ON DELETE CASCADE,
-    UNIQUE (`vnf_provider_id`, `service`, `operation`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
-
--- Add table for VNF broker
-CREATE TABLE IF NOT EXISTS `vnf_brokers` (
+-- Add table for VNF provider connections
+CREATE TABLE IF NOT EXISTS `vnf_provider_connections` (
     `id` bigint unsigned NOT NULL AUTO_INCREMENT COMMENT 'id',
-    `uuid` varchar(40) NOT NULL COMMENT 'UUID of the vnf broker',
-    `name` varchar(255) NOT NULL COMMENT 'name of the vnf broker',
-    `description` varchar(1024) DEFAULT NULL COMMENT 'description of the vnf broker',
-    `ip_address` varchar(255) NOT NULL COMMENT 'IP address of the vnf broker',
-    `access_method` varchar(255) NOT NULL COMMENT 'access method of the vnf broker',
+    `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'id of the vnf provider',
+    `name` varchar(255) NOT NULL COMMENT 'name of the vnf connection',
+    `description` varchar(1024) DEFAULT NULL COMMENT 'description of the vnf connection',
+    `access_method` varchar(40) NOT NULL COMMENT 'access method of the vnf connection. Valid values are ssh-password, ssh-key, http and https',
+    `access_info` mediumtext NOT NULL COMMENT 'information of the access method in YAML format',
+    `broker_info` mediumtext COMMENT 'information of the vnf broker in YAML format if exists',
     `created` datetime DEFAULT NULL COMMENT 'Date Created',
     `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
     PRIMARY KEY (`id`),
-    UNIQUE KEY `uc_vnf_broker__uuid` (`uuid`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+    CONSTRAINT `fk_vnf_provider_connection_vnf_provider_id` FOREIGN KEY(`vnf_provider_id`) REFERENCES `vnf_providers`(`id`) ON DELETE CASCADE,
+    UNIQUE (`vnf_provider_id`, `name`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Add table for VNF broker details
-CREATE TABLE IF NOT EXISTS `cloud`.`vnf_broker_details` (
+-- Add table for VNF providers services
+CREATE TABLE IF NOT EXISTS `cloud`.`vnf_provider_services` (
     `id` bigint unsigned NOT NULL auto_increment,
-    `vnf_broker_id` bigint unsigned NOT NULL COMMENT 'id of the vnf broker',
-    `name` varchar(255) NOT NULL,
-    `value` varchar(1024) NOT NULL,
-    `display` tinyint(1) NOT NULL DEFAULT '1' COMMENT 'True if the detail can be displayed to the end user',
+    `vnf_provider_id` bigint unsigned NOT NULL COMMENT 'id of the vnf provider',
+    `service` varchar(255) NOT NULL COMMENT 'supported service',
+    `service_info` mediumtext COMMENT 'information of the service in YAML format',
+    `created` datetime COMMENT 'date created',
+    `removed` datetime DEFAULT NULL COMMENT 'Date removed.  not null if removed',
     PRIMARY KEY (`id`),
-    CONSTRAINT `fk_vnf_broker_details__vnf_broker_id` FOREIGN KEY `fk_vnf_broker_details__vnf_broker_id`(`vnf_broker_id`) REFERENCES `vnf_brokers`(`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3;
+    CONSTRAINT `fk_vnf_provider_service_vnf_provider_id` FOREIGN KEY(`vnf_provider_id`) REFERENCES `vnf_providers`(`id`) ON DELETE CASCADE,
+    UNIQUE (`vnf_provider_id`, `service`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- health check status as enum
 CALL `cloud`.`IDEMPOTENT_CHANGE_COLUMN`('router_health_check', 'check_result', 'check_result', 'varchar(16) NOT NULL COMMENT "check executions result: SUCCESS, FAILURE, WARNING, UNKNOWN"');

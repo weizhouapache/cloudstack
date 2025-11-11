@@ -1309,6 +1309,8 @@ public class ApiConstants {
     public static final String VNF_BROKER_ID = "vnfbrokerid";
     public static final String ACCESS_METHOD = "accessmethod";
     public static final String VNF_OPERATIONS = "operations";
+    public static final String VNF_ACTION = "action";
+    public static final String VNF_DEFINITION = "definition";
 
     public static final String CLIENT_ID = "clientid";
     public static final String REDIRECT_URI = "redirecturi";

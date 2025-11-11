@@ -25,7 +25,7 @@ import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
 import org.apache.cloudstack.vnf.VnfService;
 import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
@@ -48,14 +48,14 @@ import java.util.stream.Collectors;
 @APICommand(name = "updateVnfProvider",
         description = "Updates an existing Vnf provider.",
         responseObject = VnfBrokerResponse.class,
-        since = "4.22.0",
+        since = "4.22.1",
         requestHasSensitiveInfo = true,
         responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin})
 public class UpdateVnfProviderCmd extends BaseCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     /////////////////////////////////////////////////////
     //////////////// API parameters /////////////////////
@@ -150,7 +150,7 @@ public class UpdateVnfProviderCmd extends BaseCmd {
     @Override
     public void execute() {
         try {
-            VnfProvider result = vnfBrokerManager.updateVnfProvider(this);
+            VnfProvider result = vnfProviderManager.updateVnfProvider(this);
             if (result != null) {
                 VnfProviderResponse response = vnfService.createVnfProviderResponse(result);
                 response.setResponseName(getCommandName());

@@ -16,15 +16,15 @@
 // under the License.
 package org.apache.cloudstack.vnf.dao;
 
-import org.apache.cloudstack.vnf.vo.VnfProviderServiceMapVO;
+import org.apache.cloudstack.vnf.vo.VnfProviderServiceVO;
 import org.springframework.stereotype.Component;
 
 import com.cloud.utils.db.GenericDaoBase;
 
 @Component
-public class VnfProviderServiceMapDaoImpl extends GenericDaoBase<VnfProviderServiceMapVO, Long> implements VnfProviderServiceMapDao {
+public class VnfProviderServiceDaoImpl extends GenericDaoBase<VnfProviderServiceVO, Long> implements VnfProviderServiceDao {
 
-    public VnfProviderServiceMapDaoImpl() {
+    public VnfProviderServiceDaoImpl() {
     }
 
 }

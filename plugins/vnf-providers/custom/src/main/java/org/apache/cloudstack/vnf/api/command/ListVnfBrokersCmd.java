@@ -26,8 +26,8 @@ import org.apache.cloudstack.api.BaseListCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
-import org.apache.cloudstack.vnf.VnfBroker;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderConnection;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
 import javax.inject.Inject;
@@ -35,14 +35,14 @@ import javax.inject.Inject;
 @APICommand(name = "listVnfBrokers",
         description = "Lists Vnf brokers.",
         responseObject = VnfBrokerResponse.class,
-        since = "4.22.0",
+        since = "4.22.1",
         requestHasSensitiveInfo = false,
         responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin})
 public class ListVnfBrokersCmd extends BaseListCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     @Parameter(name = ApiConstants.ID,
             type = CommandType.UUID,
@@ -71,11 +71,11 @@ public class ListVnfBrokersCmd extends BaseListCmd {
 
     @Override
     public void execute() {
-        List<? extends VnfBroker> subnets = vnfBrokerManager.listVnfBrokers(this);
+        List<? extends VnfProviderConnection> subnets = vnfProviderManager.listVnfBrokers(this);
         ListResponse<VnfBrokerResponse> response = new ListResponse<>();
         List<VnfBrokerResponse> subnetResponses = new ArrayList<>();
-        for (VnfBroker subnet : subnets) {
-            VnfBrokerResponse subnetResponse = vnfBrokerManager.createVnfBrokerResponse(subnet);
+        for (VnfProviderConnection subnet : subnets) {
+            VnfBrokerResponse subnetResponse = vnfProviderManager.createVnfBrokerResponse(subnet);
             subnetResponse.setObjectName("bgppeer");
             subnetResponses.add(subnetResponse);
         }

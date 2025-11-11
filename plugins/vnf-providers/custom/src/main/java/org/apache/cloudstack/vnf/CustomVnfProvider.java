@@ -18,7 +18,7 @@
  */
 package org.apache.cloudstack.vnf;
 
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 
 public class CustomVnfProvider extends BaseVnfProvider {
 
@@ -32,13 +32,13 @@ public class CustomVnfProvider extends BaseVnfProvider {
     }
 
     @Override
-    public VnfConnector getConnector(BaseVnfCmd command) {
+    public VnfConnector getConnector(PerformVnfActionCmd command) {
         // TODO: get connector from VNF broker
         return new VnfHttpConnector();
     }
 
     @Override
-    public VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command) {
+    public VnfDataFormatHandler getDataFormatHandler(PerformVnfActionCmd command) {
         // TODO: get dataformat handle from VNF broker
         return new VnfJsonHandler();
     }

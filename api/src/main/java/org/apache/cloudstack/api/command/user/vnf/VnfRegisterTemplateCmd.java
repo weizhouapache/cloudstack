@@ -27,6 +27,6 @@ import org.apache.cloudstack.api.response.TemplateResponse;
         responseObject = TemplateResponse.class, responseView = ResponseView.Restricted,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin, RoleType.User},
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfRegisterTemplateCmd extends RegisterVnfTemplateCmd {
 }

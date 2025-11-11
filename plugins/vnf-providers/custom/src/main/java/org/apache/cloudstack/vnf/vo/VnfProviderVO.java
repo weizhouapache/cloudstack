@@ -22,8 +22,10 @@ import org.apache.cloudstack.api.Identity;
 import org.apache.cloudstack.api.InternalIdentity;
 import org.apache.cloudstack.vnf.CustomVnfProvider;
 
+import javax.persistence.Basic;
 import javax.persistence.Column;
 import javax.persistence.Entity;
+import javax.persistence.FetchType;
 import javax.persistence.GeneratedValue;
 import javax.persistence.GenerationType;
 import javax.persistence.Id;
@@ -48,8 +50,17 @@ public class VnfProviderVO extends CustomVnfProvider implements InternalIdentity
     @Column(name = "description")
     private String description;
 
-    @Column(name = "vnf_broker_id")
-    private Long vnfBrokerId;
+    @Column(name = "general_info", updatable = true, length = 1048576)
+    @Basic(fetch = FetchType.LAZY)
+    String generalInfo;
+
+    @Column(name = "health_checks", updatable = true, length = 1048576)
+    @Basic(fetch = FetchType.LAZY)
+    String healthChecks;
+
+    @Column(name = "bootstrap_steps", updatable = true, length = 1048576)
+    @Basic(fetch = FetchType.LAZY)
+    String bootstrapSteps;
 
     @Column(name = GenericDao.CREATED_COLUMN)
     private Date created;
@@ -87,13 +98,28 @@ public class VnfProviderVO extends CustomVnfProvider implements InternalIdentity
         this.description = description;
     }
 
-    @Override
-    public Long getVnfBrokerId() {
-        return vnfBrokerId;
+    public String getGeneralInfo() {
+        return generalInfo;
     }
 
-    public void setVnfBrokerId(Long vnfBrokerId) {
-        this.vnfBrokerId = vnfBrokerId;
+    public void setGeneralInfo(String generalInfo) {
+        this.generalInfo = generalInfo;
+    }
+
+    public String getHealthChecks() {
+        return healthChecks;
+    }
+
+    public void setHealthChecks(String healthChecks) {
+        this.healthChecks = healthChecks;
+    }
+
+    public String getBootstrapSteps() {
+        return bootstrapSteps;
+    }
+
+    public void setBootstrapSteps(String bootstrapSteps) {
+        this.bootstrapSteps = bootstrapSteps;
     }
 
     public Date getCreated() {

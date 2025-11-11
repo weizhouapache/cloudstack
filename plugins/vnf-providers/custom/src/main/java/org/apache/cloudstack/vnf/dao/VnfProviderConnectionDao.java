@@ -17,13 +17,9 @@
 
 package org.apache.cloudstack.vnf.dao;
 
-import com.cloud.utils.db.DB;
-import com.cloud.utils.db.GenericDaoBase;
-import org.apache.cloudstack.vnf.vo.VnfBrokerVO;
-import org.springframework.stereotype.Component;
+import com.cloud.utils.db.GenericDao;
+import org.apache.cloudstack.vnf.vo.VnfProviderConnectionVO;
 
-@Component
-@DB
-public class VnfBrokerDaoImpl extends GenericDaoBase<VnfBrokerVO, Long> implements VnfBrokerDao {
+public interface VnfProviderConnectionDao extends GenericDao<VnfProviderConnectionVO, Long> {
 
 }

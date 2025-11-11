@@ -26,6 +26,6 @@ import org.apache.cloudstack.api.response.TemplateResponse;
         description = "Registers an existing VNF template into the CloudStack cloud. ",
         responseObject = TemplateResponse.class, responseView = ResponseView.Full,
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfRegisterTemplateCmdByAdmin extends RegisterVnfTemplateCmd implements AdminCmd {
 }

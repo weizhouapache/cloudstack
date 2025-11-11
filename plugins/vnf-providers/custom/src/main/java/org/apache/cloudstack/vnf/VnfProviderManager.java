@@ -29,17 +29,17 @@ import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 
 import java.util.List;
 
-public interface VnfBrokerManager extends PluggableService {
+public interface VnfProviderManager extends PluggableService {
 
-    VnfBroker registerVnfBroker(RegisterVnfBrokerCmd registerVnfBrokerCmd);
+    VnfProviderConnection registerVnfBroker(RegisterVnfBrokerCmd registerVnfBrokerCmd);
 
-    VnfBrokerResponse createVnfBrokerResponse(VnfBroker result);
+    VnfBrokerResponse createVnfBrokerResponse(VnfProviderConnection result);
 
-    VnfBroker updateVnfBroker(UpdateVnfBrokerCmd updateVnfBrokerCmd);
+    VnfProviderConnection updateVnfBroker(UpdateVnfBrokerCmd updateVnfBrokerCmd);
 
     boolean deleteVnfBroker(DeleteVnfBrokerCmd deleteVnfBrokerCmd);
 
-    List<? extends VnfBroker> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd);
+    List<? extends VnfProviderConnection> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd);
 
     VnfProvider registerVnfProvider(RegisterVnfProviderCmd registerVnfProviderCmd);
 

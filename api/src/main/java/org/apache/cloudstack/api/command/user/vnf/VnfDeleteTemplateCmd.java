@@ -27,6 +27,6 @@ import org.apache.cloudstack.api.response.SuccessResponse;
         description = "Deletes a VNF template from the system. All virtual machines using the deleted template will not be affected.",
         requestHasSensitiveInfo = false, responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin, RoleType.ResourceAdmin, RoleType.DomainAdmin, RoleType.User},
-        since = "4.22.0")
+        since = "4.22.1")
 public class VnfDeleteTemplateCmd extends DeleteVnfTemplateCmd {
 }

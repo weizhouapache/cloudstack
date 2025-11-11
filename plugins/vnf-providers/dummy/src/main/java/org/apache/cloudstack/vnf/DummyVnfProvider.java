@@ -18,7 +18,7 @@
  */
 package org.apache.cloudstack.vnf;
 
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 import org.apache.cloudstack.vnf.VnfService.ServiceCategory;
 import org.apache.cloudstack.vnf.VnfService.VnfOperation;
 
@@ -39,12 +39,12 @@ public class DummyVnfProvider extends BaseVnfProvider {
     }
 
     @Override
-    public VnfConnector getConnector(BaseVnfCmd command) {
+    public VnfConnector getConnector(PerformVnfActionCmd command) {
         return new VnfSshConnector();
     }
 
     @Override
-    public VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command) {
+    public VnfDataFormatHandler getDataFormatHandler(PerformVnfActionCmd command) {
         return new VnfPlainTextHandler();
     }
 }

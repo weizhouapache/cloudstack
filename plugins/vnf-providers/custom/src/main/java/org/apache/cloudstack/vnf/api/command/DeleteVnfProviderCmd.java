@@ -30,21 +30,21 @@ import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.user.Account;
 import com.cloud.utils.exception.CloudRuntimeException;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 
 import javax.inject.Inject;
 
 @APICommand(name = "deleteVnfProvider",
         description = "Deletes an existing Vnf provider.",
         responseObject = SuccessResponse.class,
-        since = "4.22.0",
+        since = "4.22.1",
         requestHasSensitiveInfo = false,
         responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin})
 public class DeleteVnfProviderCmd extends BaseCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     /////////////////////////////////////////////////////
     //////////////// API parameters /////////////////////
@@ -68,7 +68,7 @@ public class DeleteVnfProviderCmd extends BaseCmd {
     @Override
     public void execute() {
         try {
-            boolean result = vnfBrokerManager.deleteVnfProvider(this);
+            boolean result = vnfProviderManager.deleteVnfProvider(this);
             if (result) {
                 SuccessResponse response = new SuccessResponse(getCommandName());
                 response.setResponseName(getCommandName());

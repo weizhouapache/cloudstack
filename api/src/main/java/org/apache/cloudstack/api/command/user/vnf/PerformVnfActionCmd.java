@@ -23,16 +23,26 @@ import com.cloud.exception.ResourceAllocationException;
 import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.user.Account;
 
+import org.apache.cloudstack.acl.RoleType;
+import org.apache.cloudstack.api.APICommand;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.api.response.UserVmResponse;
+import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfService;
+import org.apache.commons.lang3.ObjectUtils;
 
-
-public class BaseVnfCmd extends BaseCmd {
+@APICommand(name = "vnfPerformAction",
+        description = "Performs a Vnf action on Vnf appliance.",
+        responseObject = VnfProviderResponse.class,
+        since = "4.22.1",
+        requestHasSensitiveInfo = true,
+        responseHasSensitiveInfo = false,
+        authorized = {RoleType.Admin, RoleType.DomainAdmin, RoleType.ResourceAdmin, RoleType.User})
+public class PerformVnfActionCmd extends BaseCmd {
 
     // ///////////////////////////////////////////////////
     // ////////////// API parameters /////////////////////
@@ -45,12 +55,39 @@ public class BaseVnfCmd extends BaseCmd {
             description = "the ID of the VNF appliance")
     private Long vnfId;
 
+    @Parameter(name = ApiConstants.SERVICE,
+            type = CommandType.STRING,
+            description = "The service of the Vnf action.")
+    private String service;
+
+    @Parameter(name = ApiConstants.FORMAT,
+            type = CommandType.STRING,
+            description = "The format of the Vnf action. The default value is YAML.")
+    private String format;
+
+    @Parameter(name = ApiConstants.VNF_ACTION,
+            type = CommandType.STRING,
+            description = "The action (in key/value pairs) on VNF appliance in the specified format")
+    private String action;
+
     // ///////////////////////////////////////////////////
     // ///////////////// Accessors ///////////////////////
     // ///////////////////////////////////////////////////
 
     public Long getVnfId() {
         return vnfId;
+    }
+
+    public String getService() {
+        return service;
+    }
+
+    public String getFormat() {
+        return ObjectUtils.defaultIfNull(format, VnfService.DataFormat.YAML.toString());
+    }
+
+    public String getAction() {
+        return action;
     }
 
     // ///////////////////////////////////////////////////

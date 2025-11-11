@@ -17,7 +17,6 @@
 
 package org.apache.cloudstack.vnf.api.command;
 
-import com.cloud.exception.InvalidParameterValueException;
 import org.apache.cloudstack.acl.RoleType;
 import org.apache.cloudstack.api.APICommand;
 import org.apache.cloudstack.api.ApiConstants;
@@ -26,35 +25,26 @@ import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
-import org.apache.cloudstack.vnf.VnfBrokerManager;
+import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
-import org.apache.cloudstack.vnf.VnfService;
-import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
-import org.apache.commons.collections.CollectionUtils;
-import org.apache.commons.collections.MapUtils;
 
 import com.cloud.user.Account;
+import org.apache.cloudstack.vnf.VnfService;
+import org.apache.commons.lang3.ObjectUtils;
 
 import javax.inject.Inject;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 @APICommand(name = "registerVnfProvider",
-        description = "Registers a Vnf provider with a Vnf provider.",
+        description = "Registers a Vnf provider.",
         responseObject = VnfProviderResponse.class,
-        since = "4.22.0",
+        since = "4.22.1",
         requestHasSensitiveInfo = true,
         responseHasSensitiveInfo = false,
         authorized = {RoleType.Admin})
 public class RegisterVnfProviderCmd extends BaseCmd {
 
     @Inject
-    VnfBrokerManager vnfBrokerManager;
+    VnfProviderManager vnfProviderManager;
 
     /////////////////////////////////////////////////////
     //////////////// API parameters /////////////////////
@@ -71,16 +61,15 @@ public class RegisterVnfProviderCmd extends BaseCmd {
             description = "Description of the Vnf provider")
     private String description;
 
-    @Parameter(name = ApiConstants.VNF_BROKER_ID,
-            type = CommandType.UUID,
-            entityType = VnfBrokerResponse.class,
-            description = "The ID of the Vnf broker")
-    private String vnfBrokerId;
+    @Parameter(name = ApiConstants.FORMAT,
+            type = CommandType.STRING,
+            description = "The format of the Vnf provider definition. The default value is YAML.")
+    private String format;
 
-    @Parameter(name = ApiConstants.SUPPORTED_SERVICES,
-            type = CommandType.MAP,
-            description = "desired service categories and operations")
-    private Map supportedServices;
+    @Parameter(name = ApiConstants.VNF_DEFINITION,
+            type = CommandType.STRING,
+            description = "The VNF provider definition in the specified format")
+    private String definition;
 
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
@@ -95,41 +84,12 @@ public class RegisterVnfProviderCmd extends BaseCmd {
         return description;
     }
 
-    public String getVnfBrokerId() {
-        return vnfBrokerId;
+    public String getFormat() {
+        return ObjectUtils.defaultIfNull(format, VnfService.DataFormat.YAML.toString());
     }
 
-    public Map getSupportedServices() {
-        Map<VnfService.ServiceCategory, List<VnfService.VnfOperation>> serviceMap = null;
-
-        if (MapUtils.isNotEmpty(supportedServices)) {
-            serviceMap = new HashMap<>();
-            Collection serviceCapabilityCollection = supportedServices.values();
-            Iterator iter = serviceCapabilityCollection.iterator();
-            while (iter.hasNext()) {
-                HashMap<String, String> serviceOperationsMap = (HashMap<String, String>) iter.next();
-                VnfService.ServiceCategory serviceCategory;
-                String serviceName = serviceOperationsMap.get("service");
-                String operations = serviceOperationsMap.get("operations");
-
-                if (serviceName != null) {
-                    serviceCategory = VnfService.ServiceCategory.getService(serviceName);
-                } else {
-                    throw new InvalidParameterValueException("Service is not specified");
-                }
-                if (serviceCategory == null) {
-                    throw new InvalidParameterValueException("Invalid service: " + serviceName);
-                }
-                List<VnfService.VnfOperation> vnfOperations = operations == null ? null :
-                        Arrays.stream(operations.split(",")).map(op -> VnfService.VnfOperation.getOperation(serviceCategory, op)).collect(Collectors.toList());
-                if (CollectionUtils.isEmpty(vnfOperations)) {
-                    throw new InvalidParameterValueException("Invalid operations: " + operations + " in service category: " + serviceName);
-                }
-
-                serviceMap.put(serviceCategory, vnfOperations);
-            }
-        }
-        return serviceMap;
+    public String getDefinition() {
+        return definition;
     }
 
     /////////////////////////////////////////////////////
@@ -138,13 +98,13 @@ public class RegisterVnfProviderCmd extends BaseCmd {
 
     @Override
     public void execute() {
-        VnfProvider result = vnfBrokerManager.registerVnfProvider(this);
+        VnfProvider result = vnfProviderManager.registerVnfProvider(this);
         if (result != null) {
             VnfProviderResponse response = vnfService.createVnfProviderResponse(result);
             response.setResponseName(getCommandName());
             this.setResponseObject(response);
         } else {
-            throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to create Vnf provider.");
+            throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to register Vnf provider.");
         }
     }
 

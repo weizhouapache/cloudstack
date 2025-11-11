@@ -19,7 +19,7 @@
 package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.AdapterBase;
-import org.apache.cloudstack.api.command.user.vnf.BaseVnfCmd;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 
 import java.util.List;
 import java.util.Map;
@@ -58,12 +58,12 @@ public class BaseVnfProvider extends AdapterBase implements VnfProvider {
     }
 
     @Override
-    public VnfConnector getConnector(BaseVnfCmd command) {
+    public VnfConnector getConnector(PerformVnfActionCmd command) {
         return null;
     }
 
     @Override
-    public VnfDataFormatHandler getDataFormatHandler(BaseVnfCmd command) {
+    public VnfDataFormatHandler getDataFormatHandler(PerformVnfActionCmd command) {
         return null;
     }
 

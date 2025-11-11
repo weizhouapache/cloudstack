@@ -17,6 +17,7 @@
 package org.apache.cloudstack.vnf;
 
 import com.cloud.utils.component.ComponentLifecycleBase;
+import org.apache.cloudstack.api.command.user.vnf.PerformVnfActionCmd;
 import org.apache.cloudstack.vnf.api.command.DeleteVnfBrokerCmd;
 import org.apache.cloudstack.vnf.api.command.DeleteVnfProviderCmd;
 import org.apache.cloudstack.vnf.api.command.ListVnfBrokersCmd;
@@ -30,7 +31,7 @@ import org.apache.cloudstack.vnf.api.response.VnfBrokerResponse;
 import java.util.ArrayList;
 import java.util.List;
 
-public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfBrokerManager {
+public class VnfProviderManagerImpl extends ComponentLifecycleBase implements VnfProviderManager {
 
 
     @Override
@@ -41,6 +42,7 @@ public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfB
         cmdList.add(DeleteVnfProviderCmd.class);
         cmdList.add(UpdateVnfProviderCmd.class);
         cmdList.add(VnfListAllProvidersCmd.class);
+        cmdList.add(PerformVnfActionCmd.class);
 
         cmdList.add(RegisterVnfBrokerCmd.class);
         cmdList.add(UpdateVnfBrokerCmd.class);
@@ -51,17 +53,17 @@ public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfB
     }
 
     @Override
-    public VnfBroker registerVnfBroker(RegisterVnfBrokerCmd registerVnfBrokerCmd) {
+    public VnfProviderConnection registerVnfBroker(RegisterVnfBrokerCmd registerVnfBrokerCmd) {
         return null;
     }
 
     @Override
-    public VnfBrokerResponse createVnfBrokerResponse(VnfBroker result) {
+    public VnfBrokerResponse createVnfBrokerResponse(VnfProviderConnection result) {
         return null;
     }
 
     @Override
-    public VnfBroker updateVnfBroker(UpdateVnfBrokerCmd updateVnfBrokerCmd) {
+    public VnfProviderConnection updateVnfBroker(UpdateVnfBrokerCmd updateVnfBrokerCmd) {
         return null;
     }
 
@@ -71,7 +73,7 @@ public class VnfBrokerManagerImpl extends ComponentLifecycleBase implements VnfB
     }
 
     @Override
-    public List<? extends VnfBroker> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd) {
+    public List<? extends VnfProviderConnection> listVnfBrokers(ListVnfBrokersCmd listVnfBrokersCmd) {
         return List.of();
     }
 

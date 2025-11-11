@@ -16,7 +16,7 @@
 // under the License.
 package org.apache.cloudstack.vnf;
 
-public interface VnfBroker {
+public interface VnfProviderConnection {
 
     enum Detail {
         // SSH access details
