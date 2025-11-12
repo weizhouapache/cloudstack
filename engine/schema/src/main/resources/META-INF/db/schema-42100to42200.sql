@@ -19,6 +19,9 @@
 -- Schema upgrade from 4.21.0.0 to 4.22.0.0
 --;
 
+-- Add column `is_public` to VNF template nics table
+CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.vnf_template_nics','is_public', 'tinyint NOT NULL DEFAULT 1 AFTER `management`');
+
 -- Add table for VNF appliance details
 CREATE TABLE IF NOT EXISTS `cloud`.`vnf_appliance_details` (
     `id` bigint unsigned NOT NULL auto_increment,
