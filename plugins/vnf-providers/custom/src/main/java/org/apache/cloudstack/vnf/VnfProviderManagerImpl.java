@@ -60,6 +60,6 @@ public class VnfProviderManagerImpl extends ComponentLifecycleBase implements Vn
     @Override
     public List<? extends VnfProvider> listVnfProviders(VnfListProvidersCmd vnfListProvidersCmd) {
         // search by Name or/and keyword
-        return List.of();
+        return new ArrayList<>();
     }
 }

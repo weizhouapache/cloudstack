@@ -25,7 +25,7 @@ import com.google.gson.annotations.SerializedName;
 public class VnfOperationResponse extends BaseResponse {
 
     @SerializedName(ApiConstants.NAME)
-    @Param(description = "the provider name")
+    @Param(description = "the operation name")
     private String name;
 
     @SerializedName(ApiConstants.SERVICE)

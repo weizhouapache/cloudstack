@@ -41,7 +41,7 @@ public class VnfProviderResponse extends BaseResponse {
     private String type;
 
     @SerializedName(ApiConstants.ID)
-    @Param(description = "the ID of the vnf provider. Applicable for custome vnf providers only.")
+    @Param(description = "the ID of the vnf provider. Applicable for custom vnf providers only.")
     private String id;
 
     @SerializedName(ApiConstants.SERVICE)

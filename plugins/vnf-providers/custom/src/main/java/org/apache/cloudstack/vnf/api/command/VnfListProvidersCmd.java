@@ -29,6 +29,7 @@ import org.apache.cloudstack.api.response.ListResponse;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
+import org.apache.commons.lang3.StringUtils;
 
 import javax.inject.Inject;
 
@@ -64,7 +65,15 @@ public class VnfListProvidersCmd extends BaseListCmd {
 
     @Override
     public void execute()  {
-        List<VnfProvider> vnfProviders = vnfService.getVnfProviders();
+        List<VnfProvider> vnfProviders = new ArrayList<>();
+        if (StringUtils.isEmpty(name)) {
+            vnfProviders.addAll(vnfService.getVnfProviders());
+        } else {
+            VnfProvider vnfProvider = vnfService.getVnfProviderByName(name);
+            if (vnfProvider != null) {
+                vnfProviders.add(vnfProvider);
+            }
+        }
         vnfProviders.addAll(vnfProviderManager.listVnfProviders(this));
         final ListResponse<VnfProviderResponse> response = new ListResponse<>();
         final List<VnfProviderResponse> responses = new ArrayList<>();
