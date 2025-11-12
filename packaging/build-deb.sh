@@ -43,6 +43,7 @@ note that you can override/provide "branding" string with "-b, --brand" flag as 
 Optional arguments:
    -b, --brand string                      Set branding to be used in package name (it will override any branding string in POM version)
    -T, --use-timestamp                     Use epoch timestamp instead of SNAPSHOT in the package name (if not provided, use "SNAPSHOT")
+   -r, --release integer                   Set the package release version (default is empty)
    -o, --output-directory                  The output directory of packages
 
 Other arguments:
@@ -83,6 +84,11 @@ while [ -n "$1" ]; do
                 USE_TIMESTAMP="true"
                 shift 1
             fi
+            ;;
+
+        -r | --release)
+            RELEASE=$2
+            shift 2
             ;;
 
         -o | --output-directory)
@@ -152,7 +158,11 @@ fi
 
 /bin/cp debian/changelog debian/changelog.$NOW
 
-dch -b -v "${VERSION}~${DISTCODE}" -u low -m "Apache CloudStack Release ${VERSION}"
+if [ -z "${RELEASE}" ];then
+    dch -b -v "${VERSION}~${DISTCODE}" -u low -m "Apache CloudStack Release ${VERSION}"
+else
+    dch -b -v "${VERSION}~${RELEASE}" -u low -m "Apache CloudStack Release ${VERSION}"
+fi
 sed -i '0,/ UNRELEASED;/s// unstable;/g' debian/changelog
 
 dpkg-checkbuilddeps
