@@ -21,11 +21,15 @@ package org.apache.cloudstack.vnf.api.command;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.cloud.exception.InvalidParameterValueException;
+import com.cloud.uservm.UserVm;
+
 import org.apache.cloudstack.api.APICommand;
 import org.apache.cloudstack.api.ApiConstants;
 import org.apache.cloudstack.api.BaseListCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.response.ListResponse;
+import org.apache.cloudstack.api.response.UserVmResponse;
 import org.apache.cloudstack.api.response.VnfProviderResponse;
 import org.apache.cloudstack.vnf.VnfProviderManager;
 import org.apache.cloudstack.vnf.VnfProvider;
@@ -50,6 +54,13 @@ public class VnfListProvidersCmd extends BaseListCmd {
             description = "Name of the Vnf provider")
     private String name;
 
+    @Parameter(name = ApiConstants.VIRTUAL_MACHINE_ID,
+            type = CommandType.UUID,
+            entityType = UserVmResponse.class,
+            description = "The ID of the virtual machine")
+    private Long vmId;
+
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
@@ -59,6 +70,10 @@ public class VnfListProvidersCmd extends BaseListCmd {
         return name;
     }
 
+    public Long getVmId() {
+        return vmId;
+    }
+
     /////////////////////////////////////////////////////
     /////////////// API Implementation///////////////////
     /////////////////////////////////////////////////////
@@ -66,7 +81,19 @@ public class VnfListProvidersCmd extends BaseListCmd {
     @Override
     public void execute()  {
         List<VnfProvider> vnfProviders = new ArrayList<>();
-        if (StringUtils.isEmpty(name)) {
+        if (vmId != null) {
+            UserVm userVm = _userVmService.getUserVm(vmId);
+            String vnfProviderName = vnfTemplateManager.getVnfProviderForVm(userVm);
+            if (vnfProviderName != null) {
+                if (name != null && !vnfProviderName.equals(name)) {
+                    throw new InvalidParameterValueException("VNF provider names do not match. VNF provider name: " + vnfProviderName);
+                }
+                VnfProvider vnfProvider = vnfService.getVnfProviderByName(vnfProviderName);
+                if (vnfProvider != null) {
+                    vnfProviders.add(vnfProvider);
+                }
+            }
+        } else if (StringUtils.isEmpty(name)) {
             vnfProviders.addAll(vnfService.getVnfProviders());
         } else {
             VnfProvider vnfProvider = vnfService.getVnfProviderByName(name);

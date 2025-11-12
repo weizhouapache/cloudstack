@@ -389,4 +389,16 @@ public class VnfTemplateManagerImpl extends ManagerBase implements VnfTemplateMa
             logger.debug("Created network rules for VNF appliance on isolated network {}", network);
         }
     }
+
+    @Override
+    public String getVnfProviderForVm(UserVm userVm) {
+        if (userVm == null) {
+            return null;
+        }
+        VnfTemplateDetailVO vnfProviderName = vnfTemplateDetailsDao.findDetail(userVm.getTemplateId(), VNF.VnfDetail.VNF_PROVIDER.name().toLowerCase());
+        if (vnfProviderName != null) {
+            return vnfProviderName.getValue();
+        }
+        return null;
+    }
 }

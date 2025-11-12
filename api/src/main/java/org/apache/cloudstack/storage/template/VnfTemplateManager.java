@@ -51,4 +51,5 @@ public interface VnfTemplateManager {
                                                    UserVm vm, DeployVnfApplianceCmd cmd)
             throws InsufficientAddressCapacityException, ResourceAllocationException, ResourceUnavailableException;
 
+    String getVnfProviderForVm(UserVm userVm);
 }
