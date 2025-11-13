@@ -64,11 +64,11 @@
         <a-row
           v-for="param in vnfOperation.requiredParameters"
           :key="param.name"
-          gutter="16"
+          gutter="12"
           style="margin-bottom: 1rem; align-items: center;"
         >
           <a-col :span="12">
-            <strong>{{ param.description }}</strong>
+            {{ param.description }}
           </a-col>
 
           <a-col :span="6">
@@ -94,6 +94,7 @@
 import { getAPI, postAPI } from '@/api'
 import Status from '@/components/widgets/Status'
 import { h } from 'vue'
+import yaml from 'js-yaml'
 
 export default {
   name: 'VnfAppliancesTab',
@@ -188,7 +189,9 @@ export default {
           '{"name":"destination_port","type":"string","description":"Destination port number or any"},' +
           '{"name":"descr","type":"string","description":"Description of the firewall rule"},' +
           '{"name":"vnf_rule_id","type":"string","description":"Unique identifier for the VNF firewall rule"}]')
-        this.vnfOperation.optionalParameters = ''
+        console.log('yaml 1 = ' + yaml.dump(this.vnfOperation.requiredParameters))
+        this.vnfOperation.optionalParameters = yaml.load('firewall: {action: pass, interface: lan, protocol: tcp}')
+        console.log('yaml 2 = ' + yaml.dump(this.vnfOperation.optionalParameters))
       }
       if (this.vnfOperation.autoSubmit) {
         this.handleSubmit()
@@ -216,6 +219,9 @@ export default {
             '{"uuid":"123e4567-e89b-12d3-a456-426614174000","id":1,"action":"pass","enabled":true,"interface":"lan","direction":"in","ipprotocol":"inet","protocol":"tcp","source_net":"192.168.1.0/24","source_port":"any","destination_net":"any","destination_port":443,"description":"Allow LAN → any on HTTPS"},' +
             '{"uuid":"123e4567-e89b-12d3-a456-426614174001","id":2,"action":"block","enabled":true,"interface":"lan","direction":"in","ipprotocol":"inet","protocol":"any","source_net":"any","source_port":"any","destination_net":"192.168.1.0/24","destination_port":"any","description":"Block any inbound to LAN subnet"},' +
             '{"uuid":"123e4567-e89b-12d3-a456-426614174002","id":3,"action":"pass","enabled":true,"interface":"wan","direction":"in","ipprotocol":"inet","protocol":"tcp","source_net":"any","source_port":"any","destination_net":"203.0.113.10","destination_port":22,"description":"Allow SSH access to firewall host"}]}'
+        } else if (this.vnfOperationName === 'FIREWALL_RULE_CREATE') {
+          this.vnfOperationResponse = '{"result":' +
+            '{"uuid":"123e4567-e89b-12d3-a456-426614174002","id":3,"action":"pass","enabled":true,"interface":"wan","direction":"in","ipprotocol":"inet","protocol":"tcp","source_net":"any","source_port":"any","destination_net":"203.0.113.10","destination_port":22,"description":"Allow SSH access to firewall host"}}'
         }
         this.processVnfOperationResponse()
       })
@@ -223,13 +229,58 @@ export default {
     processVnfOperationResponse () {
       const message = this.$t('label.vnf.operation.response') + ' : ' + this.vnfOperationName
       this.vnfOperationResponseNode = [h('p', `${message}`)]
-      let parsedVnfOperationResponse = JSON.parse(this.vnfOperationResponse)?.result
+      const parsedVnfOperationResponse = JSON.parse(this.vnfOperationResponse)?.result
       if (!parsedVnfOperationResponse) {
         this.vnfOperationResponseNode = h('div', this.vnfOperationResponseNode)
         return
       }
-      if (parsedVnfOperationResponse && !Array.isArray(parsedVnfOperationResponse) && typeof parsedVnfOperationResponse === 'object' && Object.keys(parsedVnfOperationResponse).length > 0) {
-        parsedVnfOperationResponse = [parsedVnfOperationResponse]
+      if (!Array.isArray(parsedVnfOperationResponse) && typeof parsedVnfOperationResponse === 'object' && Object.keys(parsedVnfOperationResponse).length > 0) {
+        this.vnfOperationResponseNode.push(
+          h('div', {
+            style: {
+              marginTop: '1em',
+              maxHeight: '50vh',
+              maxWidth: '100%',
+              overflow: 'auto',
+              backgroundColor: '#f6f6f6',
+              border: '1px solid #ddd',
+              borderRadius: '4px',
+              display: 'block'
+            }
+          }, [
+            h('table', {
+              style: {
+                width: '100%',
+                minWidth: 'max-content',
+                borderCollapse: 'collapse',
+                whiteSpace: 'pre-wrap'
+              }
+            }, [
+              h('tbody',
+                Object.keys(parsedVnfOperationResponse).map(key =>
+                  h('tr', [
+                    h('td', {
+                      style: {
+                        padding: '8px',
+                        border: '1px solid #ddd',
+                        textAlign: 'left',
+                        fontWeight: 'bold',
+                        backgroundColor: '#fafafa'
+                      }
+                    }, key),
+                    h('td', {
+                      style: {
+                        padding: '8px',
+                        border: '1px solid #ddd',
+                        textAlign: 'left'
+                      }
+                    }, String(parsedVnfOperationResponse[key]))
+                  ])
+                )
+              )
+            ])
+          ])
+        )
       }
 
       if (Array.isArray(parsedVnfOperationResponse) && parsedVnfOperationResponse.length > 0) {
