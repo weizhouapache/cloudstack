@@ -95,6 +95,11 @@
       <a-tab-pane :tab="$t('label.settings')" key="settings">
         <DetailSettings :resource="dataResource" :loading="loading" />
       </a-tab-pane>
+      <a-tab-pane :tab="$t('label.vnf.configurations')" key="vnfconfigurations" v-if="'vnfListProviders' in $store.getters.apis">
+        <VnfConfigurationTab
+          :resource="vm"
+          :loading="loading"/>
+      </a-tab-pane>
       <a-tab-pane :tab="$t('label.events')" key="events" v-if="'listEvents' in $store.getters.apis">
         <events-tab :resource="dataResource" resourceType="VirtualMachine" :loading="loading" />
       </a-tab-pane>
@@ -153,6 +158,7 @@ import AnnotationsTab from '@/components/view/AnnotationsTab'
 import VolumesTab from '@/components/view/VolumesTab.vue'
 import SecurityGroupSelection from '@views/compute/wizard/SecurityGroupSelection'
 import GPUTab from '@/components/view/GPUTab.vue'
+import VnfConfigurationTab from '@/components/view/VnfConfigurationTab.vue'
 
 export default {
   name: 'InstanceTab',
@@ -171,7 +177,8 @@ export default {
     TooltipButton,
     ResourceIcon,
     AnnotationsTab,
-    VolumesTab
+    VolumesTab,
+    VnfConfigurationTab
   },
   mixins: [mixinDevice],
   props: {
@@ -196,7 +203,8 @@ export default {
       annotations: [],
       dataResource: {},
       dataPreFill: {},
-      securitygroupids: []
+      securitygroupids: [],
+      vnfservices: []
     }
   },
   created () {

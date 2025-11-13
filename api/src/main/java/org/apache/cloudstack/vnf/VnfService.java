@@ -133,6 +133,7 @@ public interface VnfService {
         LOAD_BALANCER_POOL_CREATE(ServiceCategory.LOAD_BALANCING, "Create load balancer pool"),
         LOAD_BALANCER_VIRTUAL_SERVER_CREATE(ServiceCategory.LOAD_BALANCING, "Create load balancer virtual server"),
         LOAD_BALANCER_VIRTUAL_SERVER_DELETE(ServiceCategory.LOAD_BALANCING, "Delete load balancer virtual server"),
+        LOAD_BALANCER_VIRTUAL_SERVER_LIST(ServiceCategory.LOAD_BALANCING, "List load balancer virtual servers"),
         LOAD_BALANCER_MEMBER_ADD(ServiceCategory.LOAD_BALANCING, "Add member to load balancer pool"),
         LOAD_BALANCER_MEMBER_REMOVE(ServiceCategory.LOAD_BALANCING, "Remove member from load balancer pool"),
 

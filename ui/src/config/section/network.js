@@ -350,6 +350,27 @@ export default {
       ]
     },
     {
+      name: 'vnfprovider',
+      title: 'label.vnf.providers',
+      icon: 'borderless-table-outlined',
+      permission: ['vnfListProviders'],
+      columns: () => {
+        const fields = ['name', 'description', 'type']
+        return fields
+      },
+      searchFilters: ['name'],
+      details: ['name', 'description', 'type', 'services'],
+      actions: [
+        {
+          api: 'registerVnfProvider',
+          icon: 'plus-outlined',
+          label: 'label.register.vnf.provider',
+          listView: true,
+          popup: true,
+          component: shallowRef(defineAsyncComponent(() => import('@/views/network/RegisterVnfProvider.vue')))
+        }]
+    },
+    {
       name: 'vnfapp',
       title: 'label.vnf.appliances',
       icon: 'gateway-outlined',

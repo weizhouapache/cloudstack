@@ -32,7 +32,8 @@ public class DummyVnfProvider extends BaseVnfProvider {
         return Map.of(
                 ServiceCategory.INTERFACE_MANAGEMENT, List.of(VnfOperation.INTERFACE_CONFIGURE),
                 ServiceCategory.FIREWALL_RULES, List.of(VnfOperation.FIREWALL_RULE_CREATE, VnfOperation.FIREWALL_RULE_DELETE, VnfOperation.FIREWALL_RULE_UPDATE, VnfOperation.FIREWALL_RULE_LIST),
-                ServiceCategory.LOAD_BALANCING, List.of(VnfOperation.NAT_SOURCE_CREATE, VnfOperation.NAT_DESTINATION_CREATE, VnfOperation.NAT_RULE_DELETE, VnfOperation.NAT_PORT_FORWARD_CREATE),
+                ServiceCategory.LOAD_BALANCING, List.of(VnfOperation.LOAD_BALANCER_VIRTUAL_SERVER_CREATE, VnfOperation.LOAD_BALANCER_VIRTUAL_SERVER_DELETE, VnfOperation.LOAD_BALANCER_VIRTUAL_SERVER_LIST),
+                ServiceCategory.NAT, List.of(VnfOperation.NAT_SOURCE_CREATE, VnfOperation.NAT_DESTINATION_CREATE, VnfOperation.NAT_RULE_DELETE, VnfOperation.NAT_PORT_FORWARD_CREATE),
                 ServiceCategory.DHCP, List.of(VnfOperation.DHCP_SERVER_CONFIGURE, VnfOperation.DHCP_SERVER_RESTART, VnfOperation.DHCP_STATIC_LEASE_ADD, VnfOperation.DHCP_STATIC_LEASE_REMOVE),
                 ServiceCategory.DNS, List.of(VnfOperation.DNS_HOST_OVERRIDE_ADD, VnfOperation.DNS_HOST_OVERRIDE_REMOVE)
         );

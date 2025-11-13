@@ -34,6 +34,7 @@ import {
   BlockOutlined,
   BranchesOutlined,
   BookOutlined,
+  BorderlessTableOutlined,
   BuildOutlined,
   BulbOutlined,
   BugOutlined,
@@ -209,6 +210,7 @@ export default {
     app.component('BlockOutlined', BlockOutlined)
     app.component('BranchesOutlined', BranchesOutlined)
     app.component('BookOutlined', BookOutlined)
+    app.component('BorderlessTableOutlined', BorderlessTableOutlined)
     app.component('BuildOutlined', BuildOutlined)
     app.component('BulbOutlined', BulbOutlined)
     app.component('BugOutlined', BugOutlined)

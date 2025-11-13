@@ -53,6 +53,11 @@
               {{ service.name }} : {{ service.provider?.[0]?.name }}
             </div>
           </div>
+          <div v-else-if="$route.meta.name === 'vnfprovider' && item === 'services'">
+            <div v-for="(service, idx) in dataResource[item]" :key="idx">
+              {{ service.name }}
+            </div>
+          </div>
           <div v-else-if="$route.meta.name === 'backup' && (item === 'size' || item === 'virtualsize')">
             {{ $bytesToHumanReadableSize(dataResource[item]) }}
             <a-tooltip placement="right">
