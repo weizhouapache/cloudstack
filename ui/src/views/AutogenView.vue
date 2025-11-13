@@ -1067,7 +1067,7 @@ export default {
         if (['listNetworks'].includes(this.apiName) && 'displaynetwork' in this.$route.query) {
           params.displaynetwork = this.$route.query.displaynetwork
         }
-        if (['listSSHKeyPairs'].includes(this.apiName)) {
+        if (['listSSHKeyPairs', 'vnfListProviders'].includes(this.apiName)) {
           if (!this.$isValidUuid(params.id)) {
             delete params.id
             params.name = this.$route.params.id
@@ -1140,7 +1140,7 @@ export default {
           break
         }
 
-        if ('id' in this.$route.params && this.$route.params.id !== params.id) {
+        if ('id' in this.$route.params && this.$route.params.id !== params.id && this.$route.params.id !== params.name) {
           console.log('DEBUG - Discarding API response as its `id` does not match the uuid on the browser path')
           return
         }
