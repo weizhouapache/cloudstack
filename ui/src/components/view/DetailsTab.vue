@@ -48,9 +48,14 @@
            $route.meta.name === 'cniconfiguration' && item === 'userdata' ? $t('label.' + String($route.meta.name).toLowerCase()) :
            $t(getDetailTitle(item)) }}</strong>
           <br/>
-          <div v-if="Array.isArray(dataResource[item]) && item === 'service'">
+          <div v-if="Array.isArray(dataResource[item]) && item === 'service' && this.$route.meta.name !== 'vnfprovider'">
             <div v-for="(service, idx) in dataResource[item]" :key="idx">
               {{ service.name }} : {{ service.provider?.[0]?.name }}
+            </div>
+          </div>
+          <div v-if="Array.isArray(dataResource[item]) && item === 'service' && this.$route.meta.name === 'vnfprovider'">
+            <div v-for="(service, idx) in dataResource[item]" :key="idx">
+              <strong>{{ service.name }}</strong> : {{ service.operations.map(item => item.name).join(', ') }}
             </div>
           </div>
           <div v-else-if="$route.meta.name === 'vnfprovider' && item === 'services'">

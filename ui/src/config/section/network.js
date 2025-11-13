@@ -359,7 +359,7 @@ export default {
         return fields
       },
       searchFilters: ['name'],
-      details: ['name', 'description', 'type', 'services'],
+      details: ['name', 'description', 'type', 'service'],
       actions: [
         {
           api: 'registerVnfProvider',
