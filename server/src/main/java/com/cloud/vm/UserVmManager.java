@@ -190,4 +190,5 @@ public interface UserVmManager extends UserVmService {
 
     Boolean getDestroyRootVolumeOnVmDestruction(Long domainId);
 
+    boolean isDummyTemplate(HypervisorType hypervisorType, Long templateId);
 }

@@ -60,7 +60,9 @@ import javax.naming.ConfigurationException;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.ParserConfigurationException;
 
+import com.cloud.storage.LaunchPermissionVO;
 import com.cloud.storage.SnapshotPolicyVO;
+import com.cloud.storage.dao.LaunchPermissionDao;
 import com.cloud.storage.dao.SnapshotPolicyDao;
 import org.apache.cloudstack.acl.ControlledEntity;
 import org.apache.cloudstack.acl.ControlledEntity.ACLType;
@@ -420,6 +422,9 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
 
     private static final long GiB_TO_BYTES = 1024 * 1024 * 1024;
 
+    public static final String KVM_VM_DUMMY_TEMPLATE_NAME = "kvm-vm-dummy-template";
+
+
     @Inject
     private EntityManager _entityMgr;
     @Inject
@@ -615,6 +620,8 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
     SnapshotPolicyDao snapshotPolicyDao;
     @Inject
     BackupScheduleDao backupScheduleDao;
+    @Inject
+    LaunchPermissionDao launchPermissionDao;
 
     @Inject
     private StatsCollector statsCollector;
@@ -652,6 +659,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
     private boolean _instanceNameFlag;
     private int _scaleRetry;
     private Map<Long, VmAndCountDetails> vmIdCountMap = new ConcurrentHashMap<>();
+    private static VMTemplateVO KVM_VM_DUMMY_TEMPLATE;
 
     protected static long ROOT_DEVICE_ID = 0;
 
@@ -2466,6 +2474,16 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         _scaleRetry = NumbersUtil.parseInt(configs.get(Config.ScaleRetry.key()), 2);
 
         _vmIpFetchThreadExecutor = Executors.newFixedThreadPool(VmIpFetchThreadPoolMax.value(), new NamedThreadFactory("vmIpFetchThread"));
+
+        KVM_VM_DUMMY_TEMPLATE = _templateDao.findByAccountAndName(Account.ACCOUNT_ID_SYSTEM, KVM_VM_DUMMY_TEMPLATE_NAME);
+        if (KVM_VM_DUMMY_TEMPLATE == null) {
+            KVM_VM_DUMMY_TEMPLATE = VMTemplateVO.createSystemIso(_templateDao.getNextInSequence(Long.class, "id"), KVM_VM_DUMMY_TEMPLATE_NAME, KVM_VM_DUMMY_TEMPLATE_NAME, true,
+                    "", true, 64, Account.ACCOUNT_ID_SYSTEM, "",
+                    "Dummy Template for KVM VM", false, 1);
+            KVM_VM_DUMMY_TEMPLATE.setState(VirtualMachineTemplate.State.Active);
+            KVM_VM_DUMMY_TEMPLATE.setFormat(ImageFormat.QCOW2);
+            KVM_VM_DUMMY_TEMPLATE = _templateDao.persist(KVM_VM_DUMMY_TEMPLATE);
+        }
 
         logger.info("User VM Manager is configured.");
 
@@ -4390,7 +4408,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
                 }
             }
 
-            if (template.getTemplateType().equals(TemplateType.SYSTEM) && !CKS_NODE.equals(vmType) && !SHAREDFSVM.equals(vmType)) {
+            if (template.getTemplateType().equals(TemplateType.SYSTEM) && !CKS_NODE.equals(vmType) && !SHAREDFSVM.equals(vmType) && !isDummyTemplate(hypervisorType, template.getId())) {
                 throw new InvalidParameterValueException(String.format("Unable to use system template %s to deploy a user vm", template));
             }
 
@@ -4403,7 +4421,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
                 if (CollectionUtils.isEmpty(snapshotsOnZone)) {
                     throw new InvalidParameterValueException("The snapshot does not exist on zone " + zone.getId());
                 }
-            } else {
+            } else if (!isDummyTemplate(hypervisorType, template.getId())) {
                 List<VMTemplateZoneVO> listZoneTemplate = _templateZoneDao.listByZoneTemplate(zone.getId(), template.getId());
                 if (listZoneTemplate == null || listZoneTemplate.isEmpty()) {
                     throw new InvalidParameterValueException("The template " + template.getId() + " is not available for use");
@@ -5236,7 +5254,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
     @ActionEvent(eventType = EventTypes.EVENT_VM_CREATE, eventDescription = "deploying Vm", async = true)
     public UserVm startVirtualMachine(DeployVMCmd cmd) throws ResourceUnavailableException, InsufficientCapacityException, ConcurrentOperationException, ResourceAllocationException {
         long vmId = cmd.getEntityId();
-        if (!cmd.getStartVm()) {
+        if (!cmd.getStartVm() || cmd.getDummy()) {
             return getUserVm(vmId);
         }
         Long podId = null;
@@ -6366,6 +6384,12 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
                 (!(HypervisorType.KVM.equals(template.getHypervisorType()) || HypervisorType.KVM.equals(cmd.getHypervisor())))) {
             throw new InvalidParameterValueException("Deploying a virtual machine with existing volume/snapshot is supported only from KVM hypervisors");
         }
+        if (template == null && HypervisorType.KVM.equals(cmd.getHypervisor()) && cmd.getDummy()) {
+            template = KVM_VM_DUMMY_TEMPLATE;
+            logger.info("Creating launch permission for Dummy template");
+            LaunchPermissionVO launchPermission = new LaunchPermissionVO(KVM_VM_DUMMY_TEMPLATE.getId(), owner.getId());
+            launchPermissionDao.persist(launchPermission);
+        }
         // Make sure a valid template ID was specified
         if (template == null) {
             throw new InvalidParameterValueException("Unable to use template " + templateId);
@@ -6524,6 +6548,12 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         if (isLeaseFeatureEnabled) {
             applyLeaseOnCreateInstance(vm, cmd.getLeaseDuration(), cmd.getLeaseExpiryAction(), svcOffering);
         }
+
+        if (KVM_VM_DUMMY_TEMPLATE != null && template.getId() == KVM_VM_DUMMY_TEMPLATE.getId() && cmd instanceof DeployVMCmd && ((DeployVMCmd) cmd).getDummy()) {
+            logger.info("Revoking launch permission for Dummy template");
+            launchPermissionDao.removePermissions(KVM_VM_DUMMY_TEMPLATE.getId(), Collections.singletonList(owner.getId()));
+        }
+
         return vm;
     }
 
@@ -9937,5 +9967,13 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
                 && StringUtils.isNotEmpty(customParameters.get(VmDetailConstants.KVM_VNC_PASSWORD))) {
             vm.setVncPassword(customParameters.get(VmDetailConstants.KVM_VNC_PASSWORD));
         }
+    }
+
+    @Override
+    public boolean isDummyTemplate(HypervisorType hypervisorType, Long templateId) {
+        if (HypervisorType.KVM.equals(hypervisorType) && KVM_VM_DUMMY_TEMPLATE != null && KVM_VM_DUMMY_TEMPLATE.getId() == templateId) {
+            return true;
+        }
+        return false;
     }
 }
