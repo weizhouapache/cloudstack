@@ -957,6 +957,20 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             throw new InvalidParameterValueException("Zone is not configured to use local storage but volume's disk offering " + diskOffering.getName() + " uses it");
         }
 
+        // Verify the storage pool
+        if (cmd.getStorageId() != null) {
+            StoragePoolVO storagePool = _storagePoolDao.findById(cmd.getStorageId());
+            if (storagePool == null) {
+                throw new InvalidParameterValueException("Unable to find storage pool");
+            }
+            if (storagePool.getDataCenterId() != zoneId) {
+                throw new InvalidParameterValueException(String.format("Unable to find storage pool in the zone %s", zone.getName()));
+            }
+            if (storagePool.isLocal() != diskOffering.isUseLocalStorage()) {
+                throw new InvalidParameterValueException("Storage pool local storage setting doesn't match the disk offering local storage setting");
+            }
+        }
+
         String userSpecifiedName = getVolumeNameFromCommand(cmd);
 
         return commitVolume(cmd.getSnapshotId(), caller, owner, displayVolume, zoneId, diskOfferingId, provisioningType, size, minIops, maxIops, parentVolume, userSpecifiedName,
@@ -1074,6 +1088,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
                         throw new CloudRuntimeException(message.toString());
                     }
                 }
+            } else if (cmd.getStorageId() != null) {
+                _volumeMgr.createVolumeOnStoragePool(volume, cmd.getStorageId());
             }
             return volume;
         } catch (Exception e) {

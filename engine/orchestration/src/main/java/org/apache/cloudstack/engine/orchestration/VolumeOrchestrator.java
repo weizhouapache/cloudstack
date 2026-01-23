@@ -1762,6 +1762,41 @@ public class VolumeOrchestrator extends ManagerBase implements VolumeOrchestrati
         }
     }
 
+    @Override
+    public void createVolumeOnStoragePool(Volume volume, Long storageId) throws StorageUnavailableException {
+        if (!Volume.State.Allocated.equals(volume.getState())) {
+            logger.debug("Volume [{}] is in [{}] state. No need to create it on storage pool [{}].", getVolumeIdentificationInfos(volume), volume.getState(), storageId);
+            return;
+        }
+        VolumeVO vol = _volsDao.findById(volume.getId());
+        DiskOffering diskOffering = _entityMgr.findById(DiskOffering.class, vol.getDiskOfferingId());
+        if (diskOffering.getEncrypt()) {
+            vol = setPassphraseForVolumeEncryption(vol);
+        }
+        DataStore destPool = dataStoreMgr.getDataStore(storageId, DataStoreRole.Primary);
+        VolumeInfo volumeInfo = volFactory.getVolume(vol.getId(), destPool);
+        AsyncCallFuture<VolumeApiResult> future = volService.createVolumeAsync(volumeInfo, destPool);
+
+        VolumeApiResult result;
+        String newVolToString = getReflectOnlySelectedFields(volume);
+
+        try {
+            result = future.get();
+            if (result.isFailed()) {
+                String msg = String.format("Unable to create volume [%s] due to [%s].", newVolToString, result.getResult());
+                logger.error(msg);
+                throw new StorageUnavailableException(msg, destPool.getId());
+            }
+        } catch (StorageAccessException e) {
+            throw e;
+        } catch (InterruptedException | ExecutionException e) {
+            String msg = String.format("Unable to create volume [%s] due to [%s].", newVolToString, e.toString());
+            logger.error(msg);
+            logger.debug("Exception: ", e);
+            throw new StorageUnavailableException(msg, destPool.getId());
+        }
+    }
+
     private Pair<VolumeVO, DataStore> recreateVolume(VolumeVO vol, VirtualMachineProfile vm, DeployDestination dest) throws StorageUnavailableException, StorageAccessException, ResourceAllocationException {
         String volToString = getReflectOnlySelectedFields(vol);
 

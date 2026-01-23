@@ -197,4 +197,6 @@ public interface VolumeOrchestrationService {
      * Retrieves the volume's checkpoints paths to be used in the KVM processor. If there are no checkpoints, it will return an empty list.
      */
     Pair<List<String>, Set<String>> getVolumeCheckpointPathsAndImageStoreUrls(long volumeId, HypervisorType hypervisorType);
+
+    void createVolumeOnStoragePool(Volume volume, Long storageId) throws StorageUnavailableException;
 }
