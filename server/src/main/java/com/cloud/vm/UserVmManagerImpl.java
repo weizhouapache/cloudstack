@@ -8842,14 +8842,8 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
             if (newTemplateId != null) {
                 template = _templateDao.findById(newTemplateId);
                 _accountMgr.checkAccess(caller, null, true, template);
-                if (isISO) {
-                    if (!template.getFormat().equals(ImageFormat.ISO)) {
-                        throw new InvalidParameterValueException("VM has been created using an ISO therefore it can not be re-installed with a template");
-                    }
-                } else {
-                    if (template.getFormat().equals(ImageFormat.ISO)) {
-                        throw new InvalidParameterValueException("Invalid template id provided to restore the VM ");
-                    }
+                if (!isISO && template.getFormat().equals(ImageFormat.ISO)) {
+                    throw new InvalidParameterValueException("Invalid template id provided to restore the VM ");
                 }
             } else {
                 if (isISO && templateId == null) {
