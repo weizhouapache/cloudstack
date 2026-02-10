@@ -121,9 +121,7 @@ public class VeeamClientV2 extends VeeamClientBase {
         request.setHeader("x-api-version", API_VERSION);
 
         try {
-            String body = String.format("grant_type=password&username=%s&password=%s",
-                    java.net.URLEncoder.encode(username, "UTF-8"),
-                    java.net.URLEncoder.encode(password, "UTF-8"));
+            String body = String.format("grant_type=password&username=%s&password=%s", username, password);
             request.setEntity(new StringEntity(body));
 
             final HttpResponse response = httpClient.execute(request);
