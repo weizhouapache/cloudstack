@@ -41,6 +41,7 @@ import java.util.Calendar;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.X509TrustManager;
 
+import com.cloud.hypervisor.Hypervisor;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.backup.Backup;
@@ -77,8 +78,6 @@ import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.LogManager;
 
 import com.cloud.utils.NumbersUtil;
 import com.cloud.utils.Pair;
@@ -91,8 +90,7 @@ import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import com.fasterxml.jackson.dataformat.xml.ser.ToXmlGenerator;
 import org.apache.commons.lang3.StringUtils;
 
-public class VeeamClient {
-    protected Logger logger = LogManager.getLogger(getClass());
+public class VeeamClient extends VeeamClientBase {
     private static final String FAILED_TO_DELETE = "Failed to delete";
 
     private final URI apiURI;
@@ -119,6 +117,7 @@ public class VeeamClient {
 
     public VeeamClient(final String url, final Integer version, final String username, final String password, final boolean validateCertificate, final int timeout,
             final int restoreTimeout, final int taskPollInterval, final int taskPollMaxRetry) throws URISyntaxException, NoSuchAlgorithmException, KeyManagementException {
+        super((version != null && version != 0) ? version : 0);
         this.apiURI = new URI(url);
         this.restoreTimeout = restoreTimeout;
         this.taskPollInterval = taskPollInterval;
@@ -404,6 +403,7 @@ public class VeeamClient {
     //////////////// Public Veeam APIs /////////////////////
     ////////////////////////////////////////////////////////
 
+    @Override
     public Ref listBackupRepository(final String backupServerId, final String backupName) {
         logger.debug(String.format("Trying to list backup repository for backup job [name: %s] in server [id: %s].", backupName, backupServerId));
         try {
@@ -442,6 +442,7 @@ public class VeeamClient {
         throw new CloudRuntimeException(String.format("Can't find any repository name for Job [name: %s].", backupName));
     }
 
+    @Override
     public void listAllBackups() {
         logger.debug("Trying to list Veeam backups");
         try {
@@ -458,6 +459,7 @@ public class VeeamClient {
         }
     }
 
+    @Override
     public List<BackupOffering> listJobs() {
         logger.debug("Trying to list backup policies that are Veeam jobs");
         try {
@@ -480,6 +482,7 @@ public class VeeamClient {
         return new ArrayList<>();
     }
 
+    @Override
     public Job listJob(final String jobId) {
         logger.debug("Trying to list veeam job id: " + jobId);
         try {
@@ -498,6 +501,7 @@ public class VeeamClient {
         return null;
     }
 
+    @Override
     public boolean toggleJobSchedule(final String jobId) {
         logger.debug("Trying to toggle schedule for Veeam job: " + jobId);
         try {
@@ -510,6 +514,7 @@ public class VeeamClient {
         return false;
     }
 
+    @Override
     public boolean startBackupJob(final String jobId) {
         logger.debug("Trying to start ad-hoc backup for Veeam job: " + jobId);
         try {
@@ -522,6 +527,7 @@ public class VeeamClient {
         return false;
     }
 
+    @Override
     public boolean cloneVeeamJob(final Job parentJob, final String clonedJobName) {
         logger.debug("Trying to clone veeam job: " + parentJob.getUid() + " with backup uuid: " + clonedJobName);
         try {
@@ -544,7 +550,9 @@ public class VeeamClient {
         return false;
     }
 
-    public boolean addVMToVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName) {
+    @Override
+    public boolean addVMToVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName,
+                                   Hypervisor.HypervisorType hypervisorType) {
         logger.debug("Trying to add VM to backup offering that is Veeam job: " + jobId);
         try {
             final String heirarchyId = findDCHierarchy(vmwareDcName);
@@ -561,7 +569,9 @@ public class VeeamClient {
         throw new CloudRuntimeException("Failed to add VM to backup offering likely due to timeout, please check Veeam tasks");
     }
 
-    public boolean removeVMFromVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName) {
+    @Override
+    public boolean removeVMFromVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName,
+                                        Hypervisor.HypervisorType hypervisorType) {
         logger.debug("Trying to remove VM from backup offering that is a Veeam job: " + jobId);
         try {
             final String hierarchyId = findDCHierarchy(vmwareDcName);
@@ -590,6 +600,7 @@ public class VeeamClient {
         return false;
     }
 
+    @Override
     public boolean restoreFullVM(final String vmwareInstanceName, final String restorePointId) {
         logger.debug("Trying to restore full VM: " + vmwareInstanceName + " from backup");
         try {
@@ -653,6 +664,7 @@ public class VeeamClient {
         return result != null && result.first() && !result.second().isEmpty() && !result.second().contains(FAILED_TO_DELETE);
     }
 
+    @Override
     public boolean deleteJobAndBackup(final String jobName) {
         Pair<Boolean, String> result = executePowerShellCommands(Arrays.asList(
                 String.format("$job = Get-VBRJob -Name '%s'", jobName),
@@ -661,6 +673,7 @@ public class VeeamClient {
         return result != null && result.first() && !result.second().contains(FAILED_TO_DELETE);
     }
 
+    @Override
     public boolean deleteBackup(final String restorePointId) {
         logger.debug(String.format("Trying to delete restore point [name: %s].", restorePointId));
         Pair<Boolean, String> result = executePowerShellCommands(Arrays.asList(
@@ -674,6 +687,7 @@ public class VeeamClient {
         return result != null && result.first() && !result.second().contains(FAILED_TO_DELETE);
     }
 
+    @Override
     public boolean syncBackupRepository() {
         logger.debug("Trying to sync backup repository.");
         Pair<Boolean, String> result = executePowerShellCommands(Arrays.asList(
@@ -685,6 +699,7 @@ public class VeeamClient {
         return result != null && result.first();
     }
 
+    @Override
     public Map<String, Backup.Metric> getBackupMetrics() {
         if (isLegacyServer()) {
             return getBackupMetricsLegacy();
@@ -830,7 +845,9 @@ public class VeeamClient {
         return restorePoints;
     }
 
-    public List<Backup.RestorePoint> listRestorePoints(String backupName, String vmwareDcName, String vmInternalName, Map<String, Backup.Metric> metricsMap) {
+    @Override
+    public List<Backup.RestorePoint> listRestorePoints(String backupName, String vmwareDcName, String vmInternalName, Map<String, Backup.Metric> metricsMap,
+                                                       Hypervisor.HypervisorType hypervisorType) {
         if (isLegacyServer()) {
             return listRestorePointsLegacy(backupName, vmInternalName, metricsMap);
         } else {
@@ -910,6 +927,7 @@ public class VeeamClient {
         return dateFormat.parse(StringUtils.substring(date, 0, 19));
     }
 
+    @Override
     public Pair<Boolean, String> restoreVMToDifferentLocation(String restorePointId, String restoreLocation, String hostIp, String dataStoreUuid) {
         if (restoreLocation == null) {
             restoreLocation = RESTORE_VM_SUFFIX + UUID.randomUUID().toString();
