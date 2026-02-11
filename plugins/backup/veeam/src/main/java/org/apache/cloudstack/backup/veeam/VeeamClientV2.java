@@ -229,7 +229,7 @@ public class VeeamClientV2 extends VeeamClientBase {
     public List<BackupOffering> listJobs() {
         logger.debug("Listing backup jobs from Veeam 13+ API");
         try {
-            final HttpResponse response = get("/v1/jobs");
+            final HttpResponse response = get("/v1/jobs/states");
             if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
                 ObjectMapper mapper = new ObjectMapper();
                 JsonNode root = mapper.readTree(response.getEntity().getContent());
@@ -255,24 +255,30 @@ public class VeeamClientV2 extends VeeamClientBase {
     public Job listJob(String jobId) {
         logger.debug("Getting job details for: " + jobId);
         try {
-            final HttpResponse response = get("/v1/jobs/" + jobId);
+            final HttpResponse response = get("/v1/jobs/states?idFilter=" + jobId);
             if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
                 ObjectMapper mapper = new ObjectMapper();
-                JsonNode jobNode = mapper.readTree(response.getEntity().getContent());
+                JsonNode root = mapper.readTree(response.getEntity().getContent());
+                JsonNode data = root.get("data");
 
-                // Convert JSON to Job object (simplified mapping)
-                Job job = new Job();
-                job.setUid("urn:veeam:Job:" + jobNode.get("id").asText());
-                job.setName(jobNode.get("name").asText());
+                List<BackupOffering> jobs = new ArrayList<>();
+                if (data != null && data.isArray()) {
+                    for (JsonNode jobNode : data) {
+                        // Convert JSON to Job object (simplified mapping)
+                        Job job = new Job();
+                        job.setUid("urn:veeam:Job:" + jobNode.get("id").asText());
+                        job.setName(jobNode.get("name").asText());
 
-                if (jobNode.has("scheduleConfigured")) {
-                    job.setScheduleConfigured(String.valueOf(jobNode.get("scheduleConfigured").asBoolean()));
+                        if (jobNode.has("scheduleConfigured")) {
+                            job.setScheduleConfigured(String.valueOf(jobNode.get("scheduleConfigured").asBoolean()));
+                        }
+                        if (jobNode.has("scheduleEnabled")) {
+                            job.setScheduleEnabled(String.valueOf(jobNode.get("scheduleEnabled").asBoolean()));
+                        }
+
+                        return job;
+                    }
                 }
-                if (jobNode.has("scheduleEnabled")) {
-                    job.setScheduleEnabled(String.valueOf(jobNode.get("scheduleEnabled").asBoolean()));
-                }
-
-                return job;
             }
         } catch (IOException e) {
             logger.error("Failed to get job details due to:", e);
@@ -328,14 +334,14 @@ public class VeeamClientV2 extends VeeamClientBase {
         try {
             // Veeam 13+ API: Clone job by creating a new job based on existing one
             // First get the parent job details
-            final HttpResponse getResponse = get("/v1/jobs/" + parentJob.getId());
+            final HttpResponse getResponse = get("/v1/jobs/states?idFilter=" + parentJob.getId());
             if (getResponse.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {
                 logger.error("Failed to get parent job details");
                 return false;
             }
 
             ObjectMapper mapper = new ObjectMapper();
-            JsonNode parentJobData = mapper.readTree(getResponse.getEntity().getContent());
+            JsonNode parentJobData = mapper.readTree(getResponse.getEntity().getContent()).get("data").get(0);
 
             // Create a new job with modified name
             com.fasterxml.jackson.databind.node.ObjectNode newJobData = mapper.createObjectNode();
