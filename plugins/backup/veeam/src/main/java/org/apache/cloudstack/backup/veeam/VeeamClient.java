@@ -42,6 +42,7 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.X509TrustManager;
 
 import com.cloud.hypervisor.Hypervisor;
+import com.cloud.vm.VirtualMachine;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.ServerApiException;
 import org.apache.cloudstack.backup.Backup;
@@ -528,7 +529,7 @@ public class VeeamClient extends VeeamClientBase {
     }
 
     @Override
-    public boolean cloneVeeamJob(final Job parentJob, final String clonedJobName) {
+    public BackupOffering cloneVeeamJob(final Job parentJob, final String clonedJobName) {
         logger.debug("Trying to clone veeam job: " + parentJob.getUid() + " with backup uuid: " + clonedJobName);
         try {
             final Ref repositoryRef = listBackupRepository(parentJob.getBackupServerId(), parentJob.getName());
@@ -543,16 +544,22 @@ public class VeeamClient extends VeeamClientBase {
             cloneInfo.setRepositoryUid(repositoryRef.getUid());
             final JobCloneSpec cloneSpec = new JobCloneSpec(cloneInfo);
             final HttpResponse response = post(String.format("/jobs/%s?action=clone", parentJob.getId()), cloneSpec);
-            return checkTaskStatus(response);
+            if (checkTaskStatus(response)) {
+                for (final BackupOffering job : listJobs()) {
+                    if (job.getName().equals(clonedJobName)) {
+                        return job;
+                    }
+                }
+            }
         } catch (final Exception e) {
             logger.warn("Exception caught while trying to clone Veeam job:", e);
         }
-        return false;
+        return null;
     }
 
     @Override
-    public boolean addVMToVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName,
-                                   Hypervisor.HypervisorType hypervisorType) {
+    public boolean addVMToVeeamJob(final String jobId, final String jobName, final String parentJobId, final String vmwareInstanceName, final String vmwareDcName,
+                                   final VirtualMachine vm) {
         logger.debug("Trying to add VM to backup offering that is Veeam job: " + jobId);
         try {
             final String heirarchyId = findDCHierarchy(vmwareDcName);

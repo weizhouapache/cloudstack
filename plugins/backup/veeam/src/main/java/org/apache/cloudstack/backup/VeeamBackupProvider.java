@@ -232,23 +232,20 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         final Job parentJob = client.listJob(backupOffering.getExternalId());
         final String clonedJobName = getGuestBackupName(vm.getInstanceName(), vm.getUuid());
 
-        if (!client.cloneVeeamJob(parentJob, clonedJobName)) {
+        BackupOffering clonedVeeamJob = client.cloneVeeamJob(parentJob, clonedJobName);
+        if (clonedVeeamJob == null) {
             logger.error("Failed to clone pre-defined Veeam job (backup offering) for backup offering [id: {}, name: {}] but will check the list of jobs again if it was eventually succeeded.", backupOffering.getExternalId(), backupOffering.getName());
         }
 
-        for (final BackupOffering job : client.listJobs()) {
-            if (job.getName().equals(clonedJobName)) {
-                final Job clonedJob = client.listJob(job.getExternalId());
-                if (BooleanUtils.isTrue(clonedJob.getScheduleConfigured()) && !clonedJob.getScheduleEnabled()) {
-                    client.toggleJobSchedule(clonedJob.getId());
-                }
-                logger.debug("Veeam job (backup offering) for backup offering [id: {}, name: {}] found, now trying to assign the VM to the job.", backupOffering.getExternalId(), backupOffering.getName());
-                final String hierarchyRef = getHierarchyReferenceForVM(vm);
-                if (client.addVMToVeeamJob(job.getExternalId(), vm.getInstanceName(), hierarchyRef, vm.getHypervisorType())) {
-                    ((VMInstanceVO) vm).setBackupExternalId(job.getExternalId());
-                    return true;
-                }
-            }
+        final Job clonedJob = client.listJob(clonedVeeamJob.getExternalId());
+        if (BooleanUtils.isTrue(clonedJob.getScheduleConfigured()) && !clonedJob.getScheduleEnabled()) {
+            client.toggleJobSchedule(clonedJob.getId());
+        }
+        logger.debug("Veeam job (backup offering) for backup offering [id: {}, name: {}] found, now trying to assign the VM to the job.", backupOffering.getExternalId(), backupOffering.getName());
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
+        if (client.addVMToVeeamJob(clonedVeeamJob.getExternalId(), clonedJobName, parentJob.getId(), vm.getInstanceName(), hierarchyRef, vm)) {
+            ((VMInstanceVO) vm).setBackupExternalId(clonedVeeamJob.getExternalId());
+            return true;
         }
         return false;
     }

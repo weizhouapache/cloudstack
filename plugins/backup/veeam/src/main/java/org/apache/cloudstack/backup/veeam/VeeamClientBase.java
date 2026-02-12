@@ -20,6 +20,7 @@ package org.apache.cloudstack.backup.veeam;
 import java.util.List;
 import java.util.Map;
 
+import com.cloud.vm.VirtualMachine;
 import org.apache.cloudstack.backup.Backup;
 import org.apache.cloudstack.backup.BackupOffering;
 import org.apache.cloudstack.backup.veeam.api.Job;
@@ -48,9 +49,9 @@ public abstract class VeeamClientBase {
     public abstract Job listJob(final String jobId);
     public abstract boolean toggleJobSchedule(final String jobId);
     public abstract boolean startBackupJob(final String jobId);
-    public abstract boolean cloneVeeamJob(final Job parentJob, final String clonedJobName);
-    public abstract boolean addVMToVeeamJob(final String jobId, final String vmInstanceName,
-                                           final String hierarchyRef, final Hypervisor.HypervisorType hypervisorType);
+    public abstract BackupOffering cloneVeeamJob(final Job parentJob, final String clonedJobName);
+    public abstract boolean addVMToVeeamJob(final String jobId, final String jobName, final String parentJobId, final String vmInstanceName,
+                                           final String hierarchyRef, final VirtualMachine vm);
     public abstract boolean removeVMFromVeeamJob(final String jobId, final String vmInstanceName,
                                                 final String hierarchyRef, final Hypervisor.HypervisorType hypervisorType);
     public abstract boolean deleteJobAndBackup(final String jobName);
