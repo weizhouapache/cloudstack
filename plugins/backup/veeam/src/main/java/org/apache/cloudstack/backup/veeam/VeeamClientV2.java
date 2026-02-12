@@ -443,42 +443,47 @@ public class VeeamClientV2 extends VeeamClientBase {
     }
 
     @Override
-    public boolean removeVMFromVeeamJob(String jobId, String vmInstanceName, String hierarchyRef,
-                                       Hypervisor.HypervisorType hypervisorType) {
+    public boolean removeVMFromVeeamJob(String jobId, String vmInstanceName, String hierarchyRef) {
         logger.debug("Removing VM " + vmInstanceName + " from job " + jobId);
         try {
-            // List job includes to find the VM
-            final HttpResponse getResponse = get("/v1/jobs/" + jobId + "/includes");
+            // Find VM reference in Veeam inventory
+            String vmReference = findVMReference(vmInstanceName, hierarchyRef);
+            if (vmReference == null) {
+                logger.error("Failed to find VM reference for {}", vmInstanceName);
+                return false;
+            }
+
+            // List job to find the include ID for the VM
+            final HttpResponse getResponse = get("/v1/jobs/" + jobId);
             if (getResponse.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {
-                logger.error("Failed to list job includes");
+                logger.error("Failed to list job details for job ID: " + jobId);
                 return false;
             }
 
             ObjectMapper mapper = new ObjectMapper();
-            JsonNode includesData = mapper.readTree(getResponse.getEntity().getContent());
-            JsonNode dataArray = includesData.get("data");
-
-            if (dataArray == null || !dataArray.isArray()) {
-                logger.warn("No includes found in job");
-                return false;
-            }
-
-            // Find the include entry for this VM
-            String includeId = null;
-            for (JsonNode include : dataArray) {
-                if (include.has("objectName") && include.get("objectName").asText().equals(vmInstanceName)) {
-                    includeId = include.get("id").asText();
-                    break;
+            JsonNode jobData = mapper.readTree(getResponse.getEntity().getContent());
+            if (jobData.has("virtualMachines") && jobData.get("virtualMachines").has("includes")) {
+                JsonNode includesData = jobData.get("virtualMachines").get("includes");
+                if (includesData == null || !includesData.isArray() || includesData.isEmpty()) {
+                    logger.warn("No includes data found in job");
+                    return false;
                 }
-            }
-
-            if (includeId == null) {
-                logger.warn("VM " + vmInstanceName + " not found in job includes");
+                JsonNode virtualMachineData = includesData.get(0);
+                if (virtualMachineData == null) {
+                    logger.warn("No virtual machine data found in job data");
+                    return false;
+                }
+                if (!TYPE_VIRTUAL_MACHINE.equals(virtualMachineData.get("type").asText()) || !vmReference.equals(virtualMachineData.get("urn").asText())) {
+                    logger.warn("VM reference in job does not match the VM to remove");
+                    return false;
+                }
+            } else {
+                logger.warn("No virtual machines found in job data");
                 return false;
             }
 
-            // Remove the include
-            final HttpResponse response = delete("/v1/jobs/" + jobId + "/includes/" + includeId);
+            // Remove the job
+            final HttpResponse response = delete("/v1/jobs/" + jobId);
             int statusCode = response.getStatusLine().getStatusCode();
             return statusCode == HttpStatus.SC_NO_CONTENT || statusCode == HttpStatus.SC_OK;
         } catch (IOException e) {

@@ -53,7 +53,7 @@ public abstract class VeeamClientBase {
     public abstract boolean addVMToVeeamJob(final String jobId, final String jobName, final String parentJobId, final String vmInstanceName,
                                            final String hierarchyRef, final VirtualMachine vm);
     public abstract boolean removeVMFromVeeamJob(final String jobId, final String vmInstanceName,
-                                                final String hierarchyRef, final Hypervisor.HypervisorType hypervisorType);
+                                                final String hierarchyRef);
     public abstract boolean deleteJobAndBackup(final String jobName);
 
     // Backup Management

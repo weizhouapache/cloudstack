@@ -259,7 +259,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             throw new CloudRuntimeException("The VM does not have a backup job assigned.");
         }
         try {
-            if (!client.removeVMFromVeeamJob(vm.getBackupExternalId(), vm.getInstanceName(), hierarchyRef, vm.getHypervisorType())) {
+            if (!client.removeVMFromVeeamJob(vm.getBackupExternalId(), vm.getInstanceName(), hierarchyRef)) {
                 logger.warn("Failed to remove VM from Veeam Job id: " + vm.getBackupExternalId());
             }
         } catch (Exception e) {

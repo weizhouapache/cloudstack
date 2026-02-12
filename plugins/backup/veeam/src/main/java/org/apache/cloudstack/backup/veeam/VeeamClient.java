@@ -577,8 +577,7 @@ public class VeeamClient extends VeeamClientBase {
     }
 
     @Override
-    public boolean removeVMFromVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName,
-                                        Hypervisor.HypervisorType hypervisorType) {
+    public boolean removeVMFromVeeamJob(final String jobId, final String vmwareInstanceName, final String vmwareDcName) {
         logger.debug("Trying to remove VM from backup offering that is a Veeam job: " + jobId);
         try {
             final String hierarchyId = findDCHierarchy(vmwareDcName);
