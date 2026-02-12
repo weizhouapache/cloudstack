@@ -23,7 +23,11 @@ import java.net.URISyntaxException;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -568,7 +572,7 @@ public class VeeamClientV2 extends VeeamClientBase {
     @Override
     public Map<String, Backup.Metric> getBackupMetrics() {
         logger.debug("Getting backup metrics");
-        Map<String, Backup.Metric> metrics = new java.util.HashMap<>();
+        Map<String, Backup.Metric> metrics = new HashMap<>();
 
         try {
             final HttpResponse response = get("/v1/backups");
@@ -676,46 +680,47 @@ public class VeeamClientV2 extends VeeamClientBase {
 
         try {
             // Get restore points filtered by VM name
-            final HttpResponse response = get("/v1/restorePoints?vmNameFilter=" +
-                java.net.URLEncoder.encode(vmInternalName, "UTF-8"));
+            final HttpResponse response = get("/v1/restorePoints?nameFilter=" + vmInternalName);
 
             if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
                 ObjectMapper mapper = new ObjectMapper();
                 JsonNode root = mapper.readTree(response.getEntity().getContent());
                 JsonNode dataArray = root.get("data");
 
-                if (dataArray != null && dataArray.isArray()) {
+                if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
                     for (JsonNode rpNode : dataArray) {
-                        String id = rpNode.get("id").asText();
+                        String restorePointId = rpNode.get("id").asText();
                         String type = rpNode.has("type") ? rpNode.get("type").asText() : "Full";
 
                         // Parse creation date
-                        java.util.Date created = null;
+                        Date created = null;
                         if (rpNode.has("creationTime")) {
                             String dateStr = rpNode.get("creationTime").asText();
                             try {
-                                created = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss").parse(dateStr);
-                            } catch (java.text.ParseException e) {
+                                // the creationTime is like "2026-02-12T07:23:02.304046-08:00" which contains the timezone offset
+                                OffsetDateTime dateTime = OffsetDateTime.parse(dateStr);
+                                created = Date.from(dateTime.toInstant());
+                            } catch (DateTimeParseException e) {
                                 logger.warn("Failed to parse date: " + dateStr);
-                                created = new java.util.Date();
+                                created = new Date();
                             }
                         } else {
-                            created = new java.util.Date();
+                            created = new Date();
                         }
 
                         // Get metrics if available
-                        Long backupSize = null;
-                        Long dataSize = null;
-                        if (metricsMap != null && metricsMap.containsKey(id)) {
-                            Backup.Metric metric = metricsMap.get(id);
+                        Long backupSize = 0L;
+                        Long dataSize = 0L;
+                        if (metricsMap != null && metricsMap.containsKey(restorePointId)) {
+                            Backup.Metric metric = metricsMap.get(restorePointId);
                             backupSize = metric.getBackupSize();
                             dataSize = metric.getDataSize();
-                        } else if (rpNode.has("backupSize")) {
-                            backupSize = rpNode.get("backupSize").asLong();
-                            dataSize = rpNode.has("dataSize") ? rpNode.get("dataSize").asLong() : backupSize;
+                        } else if (rpNode.has("originalSize")) {
+                            dataSize = rpNode.get("originalSize").asLong(); // TODO: double-check if this is the correct field for data size
+                            backupSize = dataSize;
                         }
 
-                        restorePoints.add(new Backup.RestorePoint(id, created, type, backupSize, dataSize));
+                        restorePoints.add(new Backup.RestorePoint(restorePointId, created, type, backupSize, dataSize));
                     }
                 }
             }
