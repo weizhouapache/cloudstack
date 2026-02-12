@@ -319,8 +319,7 @@ public class VeeamClientV2 extends VeeamClientBase {
         logger.debug("Starting backup job: " + jobId);
         try {
             final HttpResponse response = post("/v1/jobs/" + jobId + "/start", null);
-            return response.getStatusLine().getStatusCode() == HttpStatus.SC_ACCEPTED ||
-                   response.getStatusLine().getStatusCode() == HttpStatus.SC_OK;
+            return response.getStatusLine().getStatusCode() == HttpStatus.SC_CREATED;
         } catch (IOException e) {
             logger.error("Failed to start backup job due to:", e);
         }
