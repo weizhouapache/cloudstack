@@ -567,7 +567,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             String jobId = dataArray.get(0).get("id").asText();
 
             // Delete job (this also removes associated backups)
-            final HttpResponse response = delete("/v1/jobs/" + jobId + "?deleteBackups=true");
+            final HttpResponse response = delete("/v1/jobs/" + jobId + "?deleteBackups=true");      // TODO: is deleteBackups needed ?
             int statusCode = response.getStatusLine().getStatusCode();
             return statusCode == HttpStatus.SC_NO_CONTENT || statusCode == HttpStatus.SC_OK;
         } catch (IOException e) {
@@ -958,18 +958,22 @@ public class VeeamClientV2 extends VeeamClientBase {
 
         for (int i = 0; i < maxRetries; i++) {
             try {
-                final HttpResponse response = get("/v1/restoreSessions/" + sessionId);
+                final HttpResponse response = get("/v1/sessions/" + sessionId);
                 if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
                     ObjectMapper mapper = new ObjectMapper();
                     JsonNode sessionData = mapper.readTree(response.getEntity().getContent());
 
                     String state = sessionData.get("state").asText();
-                    if ("Finished".equalsIgnoreCase(state) || "Success".equalsIgnoreCase(state)) {
-                        logger.debug("Restore completed successfully");
-                        return true;
-                    } else if ("Failed".equalsIgnoreCase(state) || "Error".equalsIgnoreCase(state)) {
-                        logger.error("Restore failed with state: " + state);
-                        return false;
+                    JsonNode result = sessionData.get("result");
+                    logger.debug("Restore session state: " + state + ", result: " + (result != null ? result.asText() : "N/A"));
+                    if ("Stopped".equalsIgnoreCase(state) && result != null) {
+                        if ("Success".equals(result.get("result").asText())) {
+                            logger.debug("Restore completed successfully");
+                            return true;
+                        } else {
+                            logger.error("Restore failed with result: {}", result.get("result").asText());
+                            return false;
+                        }
                     }
 
                     // Still in progress, wait and retry
