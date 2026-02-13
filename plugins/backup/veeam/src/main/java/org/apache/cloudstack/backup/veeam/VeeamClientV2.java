@@ -58,7 +58,6 @@ import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.HttpClientBuilder;
 
-import com.cloud.hypervisor.Hypervisor;
 import com.cloud.utils.Pair;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.utils.nio.TrustAllManager;
@@ -80,6 +79,8 @@ public class VeeamClientV2 extends VeeamClientBase {
     private static final String TYPE_DATASTORE= "Datastore";
     private static final String TYPE_FOLDER= "Folder";
     private static final String PLATFORM_VSPHERE = "VSphere";
+    private static final String PLATFORM_VMWARE = "VMware";
+    private static final String PLATFORM_CUSTOM = "CustomPlatform";
 
     private final URI apiURI;
     private final HttpClient httpClient;
@@ -373,7 +374,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             ObjectMapper mapper = new ObjectMapper();
 
             // Find VM reference in Veeam inventory
-            String vmReference = findVMReference(hierarchyRef, vmInstanceName);
+            Pair<String, String> vmReference = findVMReference(hierarchyRef, vmInstanceName);
             if (vmReference == null) {
                 logger.error("Failed to find VM reference for {}", vmInstanceName);
                 return false;
@@ -406,8 +407,9 @@ public class VeeamClientV2 extends VeeamClientBase {
                 inventoryObject.put("platform", firstInclude.get("platform").asText());
                 inventoryObject.put("type", TYPE_VIRTUAL_MACHINE);
                 inventoryObject.put("hostName", firstInclude.get("hostName").asText());
-                inventoryObject.put("objectId", vmReference.substring(vmReference.lastIndexOf(":") + 1)); // Extract object ID from URN
-                inventoryObject.put("urn", vmReference);
+                String vmUrn = vmReference.second();
+                inventoryObject.put("objectId", vmUrn.substring(vmUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
+                inventoryObject.put("urn", vmUrn);
 
                 includesArray.removeAll();
                 includesArray.add(inventoryObject);
@@ -454,7 +456,7 @@ public class VeeamClientV2 extends VeeamClientBase {
         logger.debug("Removing VM {} from job {}", vmInstanceName, jobId);
         try {
             // Find VM reference in Veeam inventory
-            String vmReference = findVMReference(hierarchyRef, vmInstanceName);
+            Pair<String, String> vmReference = findVMReference(hierarchyRef, vmInstanceName);
             if (vmReference == null) {
                 logger.error("Failed to find VM reference for {}", vmInstanceName);
                 return false;
@@ -745,14 +747,20 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     @Override
     public List<Backup.RestorePoint> listRestorePoints(String backupName, String hierarchyRef,
-                                                       String vmInternalName, Map<String, Backup.Metric> metricsMap,
-                                                       Hypervisor.HypervisorType hypervisorType) {
+                                                       String vmInternalName, Map<String, Backup.Metric> metricsMap) {
         logger.debug("Listing restore points for VM: " + vmInternalName);
         List<Backup.RestorePoint> restorePoints = new ArrayList<>();
 
         try {
+            // Get backup reference by backup name
+            Pair<String, String> backupRef = findBackupReference(hierarchyRef, backupName);
+            if (backupRef == null) {
+                logger.error("Failed to find backup reference for backup name: {}", backupName);
+                return restorePoints;
+            }
+
             // Get restore points filtered by VM name
-            final HttpResponse response = get("/v1/restorePoints?nameFilter=" + vmInternalName);
+            final HttpResponse response = get(String.format("/v1/restorePoints?nameFilter=%s&platformIdFilter=%s", vmInternalName, backupRef.second()));
 
             if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
                 ObjectMapper mapper = new ObjectMapper();
@@ -866,8 +874,9 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     /**
      * Find VM reference in Veeam inventory
+     * Returns a pair of VM name and URN if found, otherwise null
      */
-    private String findVMReference(String hierarchyRef, String vmName) {
+    private Pair<String, String> findVMReference(String hierarchyRef, String vmName) {
         logger.debug("Finding VM reference for: {}", vmName);
         // Search for VM in inventory
         ObjectMapper mapper = new ObjectMapper();
@@ -884,7 +893,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
                 JsonNode vmNode = dataArray.get(0);
                 if (TYPE_VIRTUAL_MACHINE.equals(vmNode.get("type").asText()) && vmName.equals(vmNode.get("name").asText())) {
-                    return vmNode.get("urn").asText();
+                    return new Pair<>(vmNode.get("name").asText(), vmNode.get("urn").asText());
                 }
             }
         }
@@ -895,6 +904,7 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     /**
      * Find Datastore reference in Veeam inventory
+     * Returns a pair of datastore name and URN if found, otherwise null
      */
     private Pair<String, String> findDatastoreReference(String hierarchyRef, String datastoreName) {
         if (datastoreName.contains("-")) {
@@ -925,6 +935,7 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     /**
      * Find Folder reference in Veeam inventory
+     * Returns a pair of folder name and URN if found, otherwise null
      */
     private Pair<String, String> findFolderReference(String hierarchyRef) {
         logger.debug("Finding folder reference from: {}", hierarchyRef);
@@ -944,6 +955,32 @@ public class VeeamClientV2 extends VeeamClientBase {
                     return new Pair<>(dataNode.get("name").asText(), dataNode.get("urn").asText());
                 }
             }
+        }
+        return null;
+    }
+
+    /**
+     * Find Backup reference in Veeam
+     * Returns a pair of backup name and platform ID if found, otherwise null
+     */
+    private Pair<String, String> findBackupReference(String hierarchyRef, String backupName) {
+        logger.debug("Finding backup reference for: {} from {}", backupName, hierarchyRef);
+        try {
+            final HttpResponse response = get("/v1/backups?nameFilter=" + backupName);
+            if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode root = mapper.readTree(response.getEntity().getContent());
+                JsonNode dataArray = root.get("data");
+
+                if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
+                    JsonNode backupNode = dataArray.get(0);
+                    if (backupName.equals(backupNode.get("name").asText())) {
+                        return new Pair<>(backupNode.get("id").asText(), backupNode.get("platformId").asText());
+                    }
+                }
+            }
+        } catch (IOException e) {
+            logger.error("Failed to find backup reference due to:", e);
         }
         return null;
     }

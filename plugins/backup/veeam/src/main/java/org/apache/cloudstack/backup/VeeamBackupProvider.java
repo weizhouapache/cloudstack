@@ -397,7 +397,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         validateSupportedHypervisor(vm);
         final String hierarchyRef = getHierarchyReferenceForVM(vm);
         String backupName = getGuestBackupName(vm.getInstanceName(), vm.getUuid());
-        return getClient(vm.getDataCenterId()).listRestorePoints(backupName, hierarchyRef, vm.getInstanceName(), backupFilesMetricsMap, vm.getHypervisorType());
+        return getClient(vm.getDataCenterId()).listRestorePoints(backupName, hierarchyRef, vm.getInstanceName(), backupFilesMetricsMap);
     }
 
     @Override

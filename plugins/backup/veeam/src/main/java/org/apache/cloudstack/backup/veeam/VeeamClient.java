@@ -41,7 +41,6 @@ import java.util.Calendar;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.X509TrustManager;
 
-import com.cloud.hypervisor.Hypervisor;
 import com.cloud.vm.VirtualMachine;
 import org.apache.cloudstack.api.ApiErrorCode;
 import org.apache.cloudstack.api.ServerApiException;
@@ -851,8 +850,7 @@ public class VeeamClient extends VeeamClientBase {
     }
 
     @Override
-    public List<Backup.RestorePoint> listRestorePoints(String backupName, String vmwareDcName, String vmInternalName, Map<String, Backup.Metric> metricsMap,
-                                                       Hypervisor.HypervisorType hypervisorType) {
+    public List<Backup.RestorePoint> listRestorePoints(String backupName, String vmwareDcName, String vmInternalName, Map<String, Backup.Metric> metricsMap) {
         if (isLegacyServer()) {
             return listRestorePointsLegacy(backupName, vmInternalName, metricsMap);
         } else {

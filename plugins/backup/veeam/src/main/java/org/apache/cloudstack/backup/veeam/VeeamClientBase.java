@@ -28,7 +28,6 @@ import org.apache.cloudstack.backup.veeam.api.Ref;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.LogManager;
 
-import com.cloud.hypervisor.Hypervisor;
 import com.cloud.utils.Pair;
 
 /**
@@ -71,8 +70,7 @@ public abstract class VeeamClientBase {
 
     // Restore Points
     public abstract List<Backup.RestorePoint> listRestorePoints(String backupName, String hierarchyRef,
-                                                                String vmInternalName, Map<String, Backup.Metric> metricsMap,
-                                                                Hypervisor.HypervisorType hypervisorType);
+                                                                String vmInternalName, Map<String, Backup.Metric> metricsMap);
 
     // Repository Management
     public abstract Ref listBackupRepository(final String backupServerId, final String backupName);
