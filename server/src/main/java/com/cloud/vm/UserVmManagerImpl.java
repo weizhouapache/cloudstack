@@ -5847,6 +5847,9 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         String reservationId = vmEntity.reserve(planner, plan, new ExcludeList(), Long.toString(callerUser.getId()));
         vmEntity.deploy(reservationId, Long.toString(callerUser.getId()), params, deployOnGivenHost);
 
+        if (params == null) {
+            params = new HashMap<>();
+        }
         Pair<UserVmVO, Map<VirtualMachineProfile.Param, Object>> vmParamPair = new Pair(vm, params);
         if (vm != null && vm.isUpdateParameters()) {
             // this value is not being sent to the backend; need only for api
