@@ -709,6 +709,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             String datastoreUrn = datastoreRef.second();
             configurationFileDatastoreObject.put("objectId", datastoreUrn.substring(datastoreUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
             configurationFileDatastoreObject.put("name", datastoreRef.first());
+            configurationFileDatastoreObject.put("urn", datastoreUrn);
 
             // Add folder details
             Pair<String, String> folderRef = findFolderReference(hierarchyRef);
@@ -919,7 +920,7 @@ public class VeeamClientV2 extends VeeamClientBase {
         filterData.put("operation", "Equals");
         filterData.put("value", datastoreName);
 
-        JsonNode inventoryData = getInventoryFromHierarchy(hierarchyRef, "HostsAndDatastores", filterData);
+        JsonNode inventoryData = getInventoryFromHierarchy(hierarchyRef, "DatastoresAndVms", filterData);
 
         if (inventoryData != null) {
             JsonNode dataArray = inventoryData.get("data");
