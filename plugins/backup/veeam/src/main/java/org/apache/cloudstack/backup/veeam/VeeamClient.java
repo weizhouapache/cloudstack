@@ -97,7 +97,6 @@ public class VeeamClient extends VeeamClientBase {
     private final URI apiURI;
 
     private final HttpClient httpClient;
-    private static final String RESTORE_VM_SUFFIX = "CS-RSTR-";
     private static final String SESSION_HEADER = "X-RestSvcSessionId";
     private static final String BACKUP_REFERENCE = "BackupReference";
     private static final String HIERARCHY_ROOT_REFERENCE = "HierarchyRootReference";
@@ -934,7 +933,7 @@ public class VeeamClient extends VeeamClientBase {
     }
 
     @Override
-    public Pair<Boolean, String> restoreVMToDifferentLocation(String restorePointId, String restoreLocation, String hostIp, String dataStoreUuid) {
+    public Pair<Boolean, String> restoreVMToDifferentLocation(String restorePointId, String restoreLocation, String hostIp, String dataStoreUuid, String hierarchyRef) {
         if (restoreLocation == null) {
             restoreLocation = RESTORE_VM_SUFFIX + UUID.randomUUID().toString();
         }

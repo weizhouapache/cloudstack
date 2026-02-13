@@ -30,6 +30,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.X509TrustManager;
@@ -76,6 +77,9 @@ public class VeeamClientV2 extends VeeamClientBase {
     private static final String API_VERSION = "1.3-rev1";
     private static final String OAUTH_TOKEN_ENDPOINT = "/oauth2/token";
     private static final String TYPE_VIRTUAL_MACHINE = "VirtualMachine";
+    private static final String TYPE_DATASTORE= "Datastore";
+    private static final String TYPE_FOLDER= "Folder";
+    private static final String PLATFORM_VSPHERE = "VSphere";
 
     private final URI apiURI;
     private final HttpClient httpClient;
@@ -332,7 +336,7 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     @Override
     public BackupOffering cloneVeeamJob(Job parentJob, String clonedJobName) {
-        logger.debug("Cloning job: " + parentJob.getName() + " to " + clonedJobName);
+        logger.debug("Cloning job: {} to {}", parentJob.getName(), clonedJobName);
         try {
             // Veeam 13+ API: Clone job by creating a new job based on existing one
             // First get the parent job details
@@ -364,11 +368,12 @@ public class VeeamClientV2 extends VeeamClientBase {
     public boolean addVMToVeeamJob(String jobId, String jobName, String parentJobId, String vmInstanceName, String hierarchyRef,
                                    VirtualMachine vm) {
 
+        logger.debug("Adding VM {} to job {}", vmInstanceName, jobId);
         try {
             ObjectMapper mapper = new ObjectMapper();
 
             // Find VM reference in Veeam inventory
-            String vmReference = findVMReference(vmInstanceName, hierarchyRef);
+            String vmReference = findVMReference(hierarchyRef, vmInstanceName);
             if (vmReference == null) {
                 logger.error("Failed to find VM reference for {}", vmInstanceName);
                 return false;
@@ -432,12 +437,11 @@ public class VeeamClientV2 extends VeeamClientBase {
                 }
             }
 
-            logger.debug("Adding VM {} to job {}", vmInstanceName, jobId);
             String jsonBody = mapper.writeValueAsString(updateJobData);
             final HttpResponse updateResponse = put(String.format("/v1/jobs/%s", jobId), jsonBody);
 
             int statusCode = updateResponse.getStatusLine().getStatusCode();
-            logResponseBody(updateResponse);
+            logResponseBody(updateResponse, jsonBody);
             return statusCode == HttpStatus.SC_OK;
         } catch (IOException e) {
             logger.error("Failed to clone job due to:", e);
@@ -447,10 +451,10 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     @Override
     public boolean removeVMFromVeeamJob(String jobId, String vmInstanceName, String hierarchyRef) {
-        logger.debug("Removing VM " + vmInstanceName + " from job " + jobId);
+        logger.debug("Removing VM {} from job {}", vmInstanceName, jobId);
         try {
             // Find VM reference in Veeam inventory
-            String vmReference = findVMReference(vmInstanceName, hierarchyRef);
+            String vmReference = findVMReference(hierarchyRef, vmInstanceName);
             if (vmReference == null) {
                 logger.error("Failed to find VM reference for {}", vmInstanceName);
                 return false;
@@ -459,7 +463,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             // List job to find the include ID for the VM
             final HttpResponse getResponse = get("/v1/jobs/" + jobId);
             if (getResponse.getStatusLine().getStatusCode() != HttpStatus.SC_OK) {
-                logger.error("Failed to list job details for job ID: " + jobId);
+                logger.error("Failed to list job details for job ID: {}", jobId);
                 return false;
             }
 
@@ -485,10 +489,55 @@ public class VeeamClientV2 extends VeeamClientBase {
                 return false;
             }
 
-            // Remove the job
-            final HttpResponse response = delete("/v1/jobs/" + jobId);
-            int statusCode = response.getStatusLine().getStatusCode();
-            return statusCode == HttpStatus.SC_NO_CONTENT || statusCode == HttpStatus.SC_OK;
+            // Remove the VM from veeam job
+            // Create a job to update the name and description of the cloned job
+            ObjectNode updateJobData = mapper.createObjectNode();
+            updateJobData.put("id", jobId);
+            updateJobData.put("name", jobData.get("name").asText());
+            updateJobData.put("isDisabled", false);
+            updateJobData.put("description", jobData.get("description").asText());
+
+            // Set to an array with a single InventoryObjectModel for the VM (from includes)
+            ObjectNode virtualMachinesData = mapper.createObjectNode();
+            ArrayNode includesArray = (ArrayNode) jobData.get("virtualMachines").get("includes");
+            if (includesArray != null && includesArray.isArray() && !includesArray.isEmpty()) {
+                for (int i = 0; i < includesArray.size(); i++) {
+                    JsonNode include = includesArray.get(i);
+                    if (TYPE_VIRTUAL_MACHINE.equals(include.get("type").asText()) && vmReference.equals(include.get("urn").asText())) {
+                        includesArray.remove(i);
+                        break;
+                    }
+                }
+            }
+            virtualMachinesData.set("includes", includesArray);
+            updateJobData.set("virtualMachines", virtualMachinesData);
+
+            // Copy essential settings from parent
+            if (jobData.has("repositoryId")) {
+                updateJobData.put("repositoryId", jobData.get("repositoryId").asText());
+            }
+
+            // Copy other necessary fields from parentJobData if required by API (e.g. schedule, storage, etc.)
+            // See https://helpcenter.veeam.com/references/vbr/13/rest/1.3-rev1/tag/Jobs#operation/UpdateJob
+            String[] fieldsToCopy = new String[] {
+                    "type", "guestProcessing", "isHighPriority", "schedule", "storage"
+            };
+            for (String field : fieldsToCopy) {
+                if (jobData.has(field)) {
+                    if ("guestProcessing".equals(field)) {
+                        ObjectNode jobDataField = jobData.get(field).deepCopy();
+                        jobDataField.remove("guestCredentials");
+                        updateJobData.set(field, jobDataField);
+                    } else {
+                        updateJobData.set(field, jobData.get(field));
+                    }
+                }
+            }
+
+            String jsonBody = mapper.writeValueAsString(updateJobData);
+            final HttpResponse updateResponse = put(String.format("/v1/jobs/%s", jobId), jsonBody);
+            int statusCode = updateResponse.getStatusLine().getStatusCode();
+            return statusCode == HttpStatus.SC_OK;
         } catch (IOException e) {
             logger.error("Failed to remove VM from job due to:", e);
         }
@@ -497,7 +546,7 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     @Override
     public boolean deleteJobAndBackup(String jobName) {
-        logger.debug("Deleting job and backup: " + jobName);
+        logger.debug("Deleting job and backup: {}", jobName);
         try {
             // Find job by name
             final HttpResponse listResponse = get("/v1/jobs?nameFilter=" + java.net.URLEncoder.encode(jobName, "UTF-8"));
@@ -510,8 +559,8 @@ public class VeeamClientV2 extends VeeamClientBase {
             JsonNode jobsData = mapper.readTree(listResponse.getEntity().getContent());
             JsonNode dataArray = jobsData.get("data");
 
-            if (dataArray == null || !dataArray.isArray() || dataArray.size() == 0) {
-                logger.warn("Job not found: " + jobName);
+            if (dataArray == null || !dataArray.isArray() || dataArray.isEmpty()) {
+                logger.warn("Job not found: {}", jobName);
                 return false;
             }
 
@@ -606,17 +655,17 @@ public class VeeamClientV2 extends VeeamClientBase {
             ObjectMapper mapper = new ObjectMapper();
             ObjectNode requestBody = mapper.createObjectNode();
             requestBody.put("restorePointId", restorePointId);
-            requestBody.put("restoreMode", "OriginalLocation");
-            requestBody.put("powerOnAfterRestore", false);
+            requestBody.put("type", "OriginalLocation");
+            requestBody.put("powerUp", false);
+            requestBody.put("overwrite", true);
 
             String jsonBody = mapper.writeValueAsString(requestBody);
-            final HttpResponse response = post("/v1/restoreSessions", jsonBody);
+            final HttpResponse response = post("/v1/restore/vmRestore/" + PLATFORM_VSPHERE, jsonBody);
 
-            if (response.getStatusLine().getStatusCode() == HttpStatus.SC_ACCEPTED ||
-                response.getStatusLine().getStatusCode() == HttpStatus.SC_CREATED) {
-
+            if (response.getStatusLine().getStatusCode() == HttpStatus.SC_CREATED) {
                 // Get session ID to monitor
                 JsonNode sessionData = mapper.readTree(response.getEntity().getContent());
+                logger.debug("Restore session response: {}", sessionData.toString());
                 String sessionId = sessionData.get("id").asText();
 
                 // Wait for restore to complete
@@ -630,41 +679,64 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     @Override
     public Pair<Boolean, String> restoreVMToDifferentLocation(String restorePointId, String restoreLocation,
-                                                              String hostIp, String dataStoreUuid) {
-        logger.debug("Restoring VM to different location: " + restoreLocation);
+                                                              String hostIp, String dataStoreUuid, String hierarchyRef) {
+        if (restoreLocation == null) {
+            restoreLocation = RESTORE_VM_SUFFIX + UUID.randomUUID().toString();
+        }
+        logger.debug("Restoring VM from restore point {} to different location: {}", restorePointId, restoreLocation);
         try {
             // Create restore session with different location
             ObjectMapper mapper = new ObjectMapper();
             ObjectNode requestBody = mapper.createObjectNode();
             requestBody.put("restorePointId", restorePointId);
-            requestBody.put("restoreMode", "DifferentLocation");
+            requestBody.put("type", "Customized");
+            requestBody.put("powerUp", false);
 
-            if (restoreLocation != null) {
-                requestBody.put("vmName", restoreLocation);
+            // Add datastore details
+            Pair<String, String> datastoreRef = findDatastoreReference(hierarchyRef, dataStoreUuid);
+            if (datastoreRef == null) {
+                logger.error("Failed to find datastore reference for UUID: {}", dataStoreUuid);
+                return new Pair<>(false, "Failed to find datastore reference");
             }
+            ObjectNode datastoreObject = requestBody.putObject("datastore");
+            datastoreObject.put("diskType", "Source");
+            ObjectNode configurationFileDatastoreObject = datastoreObject.putObject("configurationFileDatastore");
+            configurationFileDatastoreObject.put("platform", PLATFORM_VSPHERE);
+            configurationFileDatastoreObject.put("type", TYPE_DATASTORE);
+            configurationFileDatastoreObject.put("hostName", hierarchyRef);
+            String datastoreUrn = datastoreRef.second();
+            configurationFileDatastoreObject.put("objectId", datastoreUrn.substring(datastoreUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
+            configurationFileDatastoreObject.put("name", datastoreRef.first());
 
-            // Add destination details
-            ObjectNode destination = requestBody.putObject("destination");
-            if (hostIp != null) {
-                destination.put("hostReference", hostIp);
+            // Add folder details
+            Pair<String, String> folderRef = findFolderReference(hierarchyRef);
+            if (folderRef == null) {
+                logger.error("Failed to find folder reference for name: {}", restoreLocation);
+                return new Pair<>(false, "Failed to find folder reference");
             }
-            if (dataStoreUuid != null) {
-                destination.put("datastoreReference", dataStoreUuid);
-            }
+            ObjectNode folderObject = requestBody.putObject("folder");
+            folderObject.put("vmName", restoreLocation);
+            folderObject.put("restoreVmTags", false);
+            ObjectNode folderInFolderObject = folderObject.putObject("folder");
+            folderInFolderObject.put("platform", PLATFORM_VSPHERE);   // TODO: determine platform dynamically if needed
+            folderInFolderObject.put("type", TYPE_FOLDER);
+            folderInFolderObject.put("hostName", hierarchyRef);
+            String folderUrn = folderRef.second();
+            folderInFolderObject.put("objectId", folderUrn.substring(folderUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
+            folderInFolderObject.put("name", folderRef.first());
 
             String jsonBody = mapper.writeValueAsString(requestBody);
-            final HttpResponse response = post("/v1/restoreSessions", jsonBody);
+            final HttpResponse response = post("/v1/restore/vmRestore/" + PLATFORM_VSPHERE, jsonBody);
 
-            if (response.getStatusLine().getStatusCode() == HttpStatus.SC_ACCEPTED ||
-                response.getStatusLine().getStatusCode() == HttpStatus.SC_CREATED) {
-
+            if (response.getStatusLine().getStatusCode() == HttpStatus.SC_CREATED) {
                 JsonNode sessionData = mapper.readTree(response.getEntity().getContent());
+                logger.debug("Restore session response: {}", sessionData.toString());
                 String sessionId = sessionData.get("id").asText();
 
                 boolean success = waitForRestoreCompletion(sessionId);
-                String resultLocation = restoreLocation != null ? restoreLocation : "restored-" + restorePointId;
-                return new Pair<>(success, resultLocation);
+                return new Pair<>(success, restoreLocation);
             }
+            logResponseBody(response, jsonBody);
         } catch (IOException e) {
             logger.error("Failed to restore VM to different location due to:", e);
         }
@@ -763,42 +835,115 @@ public class VeeamClientV2 extends VeeamClientBase {
     // ========================================================================
 
     /**
+     * Get inventory reference from Veeam based on hierarchy type and filter criteria
+     */
+
+    private JsonNode getInventoryFromHierarchy(String hierarchyRef, String hierarchyType, ObjectNode filterData) {
+        logger.debug("Requesting inventory from {} for type: {}", hierarchyRef, hierarchyType);
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            ObjectNode request = mapper.createObjectNode();
+            if (StringUtils.isNotBlank(hierarchyType)) {
+                request.put("hierarchyType", hierarchyType);
+            }
+            if (filterData != null) {
+                request.set("filter", filterData);
+            }
+
+            String jsonBody = mapper.writeValueAsString(request);
+            final HttpResponse response = post("/v1/inventory/" + hierarchyRef, jsonBody);
+
+            int statusCode = response.getStatusLine().getStatusCode();
+            if (statusCode == HttpStatus.SC_OK || statusCode == HttpStatus.SC_CREATED) {
+                return mapper.readTree(response.getEntity().getContent());
+            }
+            logResponseBody(response, jsonBody);
+        } catch (IOException e) {
+            logger.error("Failed to get inventory due to:", e);
+        }
+        return null;
+    }
+
+    /**
      * Find VM reference in Veeam inventory
      */
-    private String findVMReference(String vmName, String hierarchyRef) {
-        logger.debug("Finding VM reference for: " + vmName);
-        try {
-            // Search for VM in inventory
-            String searchPath = "/v1/inventory/" + hierarchyRef;
+    private String findVMReference(String hierarchyRef, String vmName) {
+        logger.debug("Finding VM reference for: {}", vmName);
+        // Search for VM in inventory
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode filterData = mapper.createObjectNode();
+        filterData.put("type", "PredicateExpression");
+        filterData.put("property", "name");
+        filterData.put("operation", "Equals");
+        filterData.put("value", vmName);
 
-            ObjectMapper mapper = new ObjectMapper();
-            ObjectNode filterData = mapper.createObjectNode();
-            filterData.put("type", "PredicateExpression");
-            filterData.put("property", "name");
-            filterData.put("operation", "Equals");
-            filterData.put("value", vmName);
+        JsonNode inventoryData = getInventoryFromHierarchy(hierarchyRef, "VmsAndTemplates", filterData);
 
-            ObjectNode searchData = mapper.createObjectNode();
-            searchData.set("filter", filterData);
-
-            String jsonBody = mapper.writeValueAsString(searchData);
-
-            final HttpResponse response = post(searchPath, jsonBody);
-
-            if (response.getStatusLine().getStatusCode() == HttpStatus.SC_OK) {
-                JsonNode root = mapper.readTree(response.getEntity().getContent());
-                JsonNode dataArray = root.get("data");
-
-                if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
-                    JsonNode vmNode = dataArray.get(0);
-                    if (TYPE_VIRTUAL_MACHINE.equals(vmNode.get("type").asText()) && vmName.equals(vmNode.get("name").asText())) {
-                        return vmNode.get("urn").asText();
-                    }
+        if (inventoryData != null) {
+            JsonNode dataArray = inventoryData.get("data");
+            if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
+                JsonNode vmNode = dataArray.get(0);
+                if (TYPE_VIRTUAL_MACHINE.equals(vmNode.get("type").asText()) && vmName.equals(vmNode.get("name").asText())) {
+                    return vmNode.get("urn").asText();
                 }
             }
-            logResponseBody(response);
-        } catch (IOException e) {
-            logger.error("Failed to find VM reference due to:", e);
+        }
+        return null;
+    }
+
+
+
+    /**
+     * Find Datastore reference in Veeam inventory
+     */
+    private Pair<String, String> findDatastoreReference(String hierarchyRef, String datastoreName) {
+        if (datastoreName.contains("-")) {
+            datastoreName = datastoreName.replace("-","");  // UUIDs without dashes
+        }
+        logger.debug("Finding datastore reference for: {}", datastoreName);
+        // Search for VM in inventory
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode filterData = mapper.createObjectNode();
+        filterData.put("type", "PredicateExpression");
+        filterData.put("property", "name");
+        filterData.put("operation", "Equals");
+        filterData.put("value", datastoreName);
+
+        JsonNode inventoryData = getInventoryFromHierarchy(hierarchyRef, "HostsAndDatastores", filterData);
+
+        if (inventoryData != null) {
+            JsonNode dataArray = inventoryData.get("data");
+            if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
+                JsonNode dataNode = dataArray.get(0);
+                if (TYPE_DATASTORE.equals(dataNode.get("type").asText()) && datastoreName.equals(dataNode.get("name").asText())) {
+                    return new Pair<>(dataNode.get("name").asText(), dataNode.get("urn").asText());
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Find Folder reference in Veeam inventory
+     */
+    private Pair<String, String> findFolderReference(String hierarchyRef) {
+        logger.debug("Finding folder reference from: {}", hierarchyRef);
+
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode filterData = mapper.createObjectNode();
+        filterData.put("type", "PredicateExpression");
+        filterData.put("property", "type");
+        filterData.put("operation", "Equals");
+        filterData.put("value", "Folder");
+
+        JsonNode inventoryData = getInventoryFromHierarchy(hierarchyRef, "VmsAndTemplates", filterData);
+        if (inventoryData != null) {
+            JsonNode dataArray = inventoryData.get("data");
+            for (JsonNode dataNode : dataArray) {
+                if (TYPE_FOLDER.equals(dataNode.get("type").asText()) && !"vCLS".equals(dataNode.get("name").asText())) {
+                    return new Pair<>(dataNode.get("name").asText(), dataNode.get("urn").asText());
+                }
+            }
         }
         return null;
     }
@@ -842,8 +987,9 @@ public class VeeamClientV2 extends VeeamClientBase {
         return false;
     }
 
-    void logResponseBody(HttpResponse response) {
+    void logResponseBody(HttpResponse response, String jsonBody) {
         try {
+            logger.debug("Request body: " + jsonBody);
             if (response.getEntity() != null) {
                 ObjectMapper mapper = new ObjectMapper();
                 JsonNode jsonResponse = mapper.readTree(response.getEntity().getContent());

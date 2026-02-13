@@ -353,10 +353,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     }
 
     @Override
-    public Pair<Boolean, String> restoreBackedUpVolume(Backup backup, Backup.VolumeInfo backupVolumeInfo, String hostIp, String dataStoreUuid, Pair<String, VirtualMachine.State> vmNameAndState) {
+    public Pair<Boolean, String> restoreBackedUpVolume(Backup backup, Backup.VolumeInfo backupVolumeInfo, String hostIp, String dataStoreUuid, VirtualMachine vm) {
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
         final Long zoneId = backup.getZoneId();
         final String restorePointId = backup.getExternalId();
-        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, null, hostIp, dataStoreUuid);
+        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, null, hostIp, dataStoreUuid, hierarchyRef);
     }
 
     @Override
@@ -401,10 +402,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     @Override
     public Pair<Boolean, String> restoreBackupToVM(VirtualMachine vm, Backup backup, String hostIp, String dataStoreUuid) {
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
         final Long zoneId = backup.getZoneId();
         final String restorePointId = backup.getExternalId();
         final String restoreLocation = vm.getInstanceName();
-        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, restoreLocation, hostIp, dataStoreUuid);
+        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, restoreLocation, hostIp, dataStoreUuid, hierarchyRef);
     }
 
     @Override

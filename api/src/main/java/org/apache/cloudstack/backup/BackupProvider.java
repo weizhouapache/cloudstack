@@ -97,7 +97,7 @@ public interface BackupProvider {
     /**
      * Restore a volume from a backup
      */
-    Pair<Boolean, String> restoreBackedUpVolume(Backup backup, Backup.VolumeInfo backupVolumeInfo, String hostIp, String dataStoreUuid, Pair<String, VirtualMachine.State> vmNameAndState);
+    Pair<Boolean, String> restoreBackedUpVolume(Backup backup, Backup.VolumeInfo backupVolumeInfo, String hostIp, String dataStoreUuid, VirtualMachine vm);
 
     /**
      * Syncs backup metrics (backup size, protected size) from the plugin and stores it within the provider

@@ -364,18 +364,13 @@ public class BackupManagerTest {
         BackupVO backupVO = new BackupVO();
         VMInstanceVO vm = mock(VMInstanceVO.class);
         String volumeUuid = "5f4ed903-ac23-4f8a-b595-69c73c40593f";
-        String vmName = "i-2-3-VM";
-        VirtualMachine.State vmState = VirtualMachine.State.Running;
-        Mockito.when(vm.getName()).thenReturn(vmName);
-        Mockito.when(vm.getState()).thenReturn(vmState);
-        Pair<String, VirtualMachine.State> vmNameAndState = new Pair<>(vmName, vmState);
 
         Backup.VolumeInfo volumeInfo = mock(Backup.VolumeInfo.class);
         when(volumeInfo.getUuid()).thenReturn(volumeUuid);
 
         doReturn(new Pair<Boolean, String>(Boolean.TRUE, "Success"))
             .when(backupProvider).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-                any(String.class), any(String.class), any(Pair.class));
+                any(String.class), any(String.class), any(VirtualMachine.class));
 
         Pair<Boolean, String> restoreBackedUpVolume = backupManager.restoreBackedUpVolume(volumeInfo, backupVO, backupProvider, hostPossibleValues, datastoresPossibleValues, vm);
 
@@ -383,7 +378,7 @@ public class BackupManagerTest {
         assertEquals("Success", restoreBackedUpVolume.second());
 
         verify(backupProvider, atLeastOnce()).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-            any(String.class), any(String.class), any(Pair.class));
+            any(String.class), any(String.class), any(VirtualMachine.class));
     }
 
     @Test
@@ -391,18 +386,13 @@ public class BackupManagerTest {
         BackupVO backupVO = new BackupVO();
         VMInstanceVO vm = mock(VMInstanceVO.class);
         String volumeUuid = "5f4ed903-ac23-4f8a-b595-69c73c40593f";
-        String vmName = "i-2-3-VM";
-        VirtualMachine.State vmState = VirtualMachine.State.Running;
-        Mockito.when(vm.getName()).thenReturn(vmName);
-        Mockito.when(vm.getState()).thenReturn(vmState);
-        Pair<String, VirtualMachine.State> vmNameAndState = new Pair<>(vmName, vmState);
 
         Backup.VolumeInfo volumeInfo = mock(Backup.VolumeInfo.class);
         when(volumeInfo.getUuid()).thenReturn(volumeUuid);
 
         doReturn(new Pair<Boolean, String>(Boolean.TRUE, "Success2"))
             .when(backupProvider).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-                any(String.class), any(String.class), any(Pair.class));
+                any(String.class), any(String.class), any(VirtualMachine.class));
 
         Pair<Boolean, String> restoreBackedUpVolume = backupManager.restoreBackedUpVolume(volumeInfo, backupVO, backupProvider, hostPossibleValues, datastoresPossibleValues, vm);
 
@@ -410,7 +400,7 @@ public class BackupManagerTest {
         assertEquals("Success2", restoreBackedUpVolume.second());
 
         verify(backupProvider, atLeastOnce()).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-            any(String.class), any(String.class), any(Pair.class));
+            any(String.class), any(String.class), any(VirtualMachine.class));
     }
 
     @Test
@@ -418,18 +408,13 @@ public class BackupManagerTest {
         BackupVO backupVO = new BackupVO();
         VMInstanceVO vm = mock(VMInstanceVO.class);
         String volumeUuid = "5f4ed903-ac23-4f8a-b595-69c73c40593f";
-        String vmName = "i-2-3-VM";
-        VirtualMachine.State vmState = VirtualMachine.State.Running;
-        Mockito.when(vm.getName()).thenReturn(vmName);
-        Mockito.when(vm.getState()).thenReturn(vmState);
-        Pair<String, VirtualMachine.State> vmNameAndState = new Pair<>(vmName, vmState);
 
         Backup.VolumeInfo volumeInfo = mock(Backup.VolumeInfo.class);
         when(volumeInfo.getUuid()).thenReturn(volumeUuid);
 
         doReturn(new Pair<Boolean, String>(Boolean.TRUE, "Success3"))
             .when(backupProvider).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-                any(String.class), any(String.class), any(Pair.class));
+                any(String.class), any(String.class), any(VirtualMachine.class));
 
         Pair<Boolean, String> restoreBackedUpVolume = backupManager.restoreBackedUpVolume(volumeInfo, backupVO, backupProvider, hostPossibleValues, datastoresPossibleValues, vm);
 
@@ -437,7 +422,7 @@ public class BackupManagerTest {
         assertEquals("Success3", restoreBackedUpVolume.second());
 
         verify(backupProvider, atLeastOnce()).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-            any(String.class), any(String.class), any(Pair.class));
+            any(String.class), any(String.class), any(VirtualMachine.class));
     }
 
     @Test
@@ -445,18 +430,13 @@ public class BackupManagerTest {
         BackupVO backupVO = new BackupVO();
         VMInstanceVO vm = mock(VMInstanceVO.class);
         String volumeUuid = "5f4ed903-ac23-4f8a-b595-69c73c40593f";
-        String vmName = "i-2-3-VM";
-        VirtualMachine.State vmState = VirtualMachine.State.Running;
-        Mockito.when(vm.getName()).thenReturn(vmName);
-        Mockito.when(vm.getState()).thenReturn(vmState);
-        Pair<String, VirtualMachine.State> vmNameAndState = new Pair<>(vmName, vmState);
 
         Backup.VolumeInfo volumeInfo = mock(Backup.VolumeInfo.class);
         when(volumeInfo.getUuid()).thenReturn(volumeUuid);
 
         doReturn(new Pair<Boolean, String>(Boolean.TRUE, "Success4"))
             .when(backupProvider).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-                any(String.class), any(String.class), any(Pair.class));
+                any(String.class), any(String.class), any(VirtualMachine.class));
 
         Pair<Boolean, String> restoreBackedUpVolume = backupManager.restoreBackedUpVolume(volumeInfo, backupVO, backupProvider, hostPossibleValues, datastoresPossibleValues, vm);
 
@@ -464,7 +444,7 @@ public class BackupManagerTest {
         assertEquals("Success4", restoreBackedUpVolume.second());
 
         verify(backupProvider, atLeastOnce()).restoreBackedUpVolume(any(Backup.class), any(Backup.VolumeInfo.class),
-            any(String.class), any(String.class), any(Pair.class));
+            any(String.class), any(String.class), any(VirtualMachine.class));
     }
 
     @Test

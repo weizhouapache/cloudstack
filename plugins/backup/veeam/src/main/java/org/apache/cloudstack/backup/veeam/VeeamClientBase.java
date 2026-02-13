@@ -38,6 +38,8 @@ import com.cloud.utils.Pair;
 public abstract class VeeamClientBase {
     protected Logger logger = LogManager.getLogger(getClass());
 
+    protected static final String RESTORE_VM_SUFFIX = "CS-RSTR-";
+
     protected final Integer veeamServerVersion;
 
     public VeeamClientBase(Integer veeamServerVersion) {
@@ -65,7 +67,7 @@ public abstract class VeeamClientBase {
     // Restore Operations
     public abstract boolean restoreFullVM(final String vmInstanceName, final String restorePointId);
     public abstract Pair<Boolean, String> restoreVMToDifferentLocation(String restorePointId, String restoreLocation,
-                                                                       String hostIp, String dataStoreUuid);
+                                                                       String hostIp, String dataStoreUuid, String hierarchyRef);
 
     // Restore Points
     public abstract List<Backup.RestorePoint> listRestorePoints(String backupName, String hierarchyRef,
