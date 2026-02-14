@@ -61,12 +61,11 @@ public class VeeamPowerShellClient extends VeeamClientBase {
 
     protected String transformPowerShellCommandList(List<String> cmds) {
         StringJoiner joiner = new StringJoiner(";");
-        joiner.add("PowerShell Add-PSSnapin VeeamPSSnapin -ErrorAction SilentlyContinue");
-        joiner.add("Import-Module Veeam.Backup.PowerShell -WarningAction SilentlyContinue");
-        joiner.add("$ProgressPreference='SilentlyContinue'");
+        joiner.add("pwsh -NoProfile -Command \"");
         for (String cmd : cmds) {
             joiner.add(cmd);
         }
+        joiner.add("\"");
         return joiner.toString();
     }
 
@@ -105,7 +104,8 @@ public class VeeamPowerShellClient extends VeeamClientBase {
                 if (line.isEmpty()) continue;
                 String[] parts = line.split(":", 2);
                 if (parts.length == 2) {
-                    policies.add(new VeeamBackupOffering(parts[1].trim(), parts[0].trim()));
+                    // Since Veeam 13, Job operations requires Job Name instead of ID, so we will use Name as UID and ignore the actual GUID. This is a workaround for cloning and adding VMs to jobs which are not possible by ID anymore.
+                    policies.add(new VeeamBackupOffering(parts[1].trim(), parts[1].trim()));
                 }
             }
         }
@@ -116,7 +116,7 @@ public class VeeamPowerShellClient extends VeeamClientBase {
     public Job listJob(String jobId) {
         String guid = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-                "$job = Get-VBRJob -Id " + guid,
+                String.format("$job = Get-VBRJob -Name '%s'", guid),
                 "if ($job) {",
                 "  $job.Id.Guid",
                 "  $job.Name",
@@ -146,7 +146,7 @@ public class VeeamPowerShellClient extends VeeamClientBase {
     public boolean toggleJobSchedule(String jobId) {
         String guid = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-                "$job = Get-VBRJob -Id " + guid,
+                String.format("$job = Get-VBRJob -Name '%s'", guid),
                 "if ($job.IsScheduleEnabled) { Disable-VBRJobSchedule -Job $job } else { Enable-VBRJobSchedule -Job $job }"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
@@ -157,7 +157,7 @@ public class VeeamPowerShellClient extends VeeamClientBase {
     public boolean startBackupJob(String jobId) {
         String guid = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-                "$job = Get-VBRJob -Id " + guid,
+                String.format("$job = Get-VBRJob -Name '%s'", guid),
                 "Start-VBRJob -Job $job"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
@@ -179,52 +179,12 @@ public class VeeamPowerShellClient extends VeeamClientBase {
         // This is a simplification but often enough for backup offerings which are templates.
 
         List<String> cmds = Arrays.asList(
-                "$parent = Get-VBRJob -Id " + parentId,
+                String.format("$parent = Get-VBRJob -Name '%s'", parentId),
                 "$repo = $parent.GetBackupTargetRepository()",
                 "Add-VBRBackupJob -Name \"" + clonedJobName + "\" -Repository $repo -Entity $parent.GetObjectsInJob()",
-                 // Wait! Add-VBRBackupJob needs entities (VMs).
-                 // We are cloning a "template" job which might be empty or have dummy VMs.
-                 // A backup offering in CS is usually a job without VMs or specific settings.
-                 // If the parent job has no objects, Add-VBRBackupJob might fail or require objects.
-                 // CloudStack flow: clone job, THEN add VM.
-                 // So we need to create an empty job? Veeam jobs usually require at least one object.
-                 // Maybe we can create the job when adding the VM?
-                 // But cloneVeeamJob is called before assigning VM.
-
-                 // Let's look at how VeeamClient does it: calls /jobs/ID?action=clone.
-                 // Veeam API handles cloning.
-                 // PowerShell doesn't have a direct clone.
-                 // We can try to use the .NET API via PowerShell.
-                 // [Veeam.Backup.Core.CBackupJob]::Clone($parent.Id, $clonedJobName, ...)
-
-                 // Alternative: Create a new job with dummy object (if possible) or just create it when adding VM.
-                 // But we must return a BackupOffering.
-
-                 // Let's try to use .NET reflection to clone if possible.
-                 // Or, if we cannot clone, we can fail.
-                 // But wait, user asked to implement all methods via PowerShell.
-
-                 // https://forums.veeam.com/powershell-f26/clone-backup-job-t2690.html
-                 // suggests no Copy-Job.
-
-                 // If we cannot clone easily, maybe we create a job using Add-VBRBackupJob.
-                 // But we need to know what to put in it.
-                 // For now, let's assume we can create it with the repository derived from parent.
-                 // But we can't create empty job.
-
-                 // If we assume the parent job is a "template" with some settings, we want those settings.
-                 // For the purpose of this task, I'll attempt to add a job with the same repository.
-                 // To bypass Entity requirement, maybe we don't.
-                 // Maybe I'll leave a comment or try a dummy entity logic?
-                 // No, I'll stick to: Get-VBRJob parent, Get Repo, Add-VBRBackupJob with parent's entities?
-                 // If parent is a template, maybe it has a dummy VM.
-
-                 // Let's implement getting repo and creating job.
-                 "$parent = Get-VBRJob -Id " + parentId,
-                 "$repo = $parent.GetBackupTargetRepository()",
-                 // We'll trust that we can add it or find a way.
-                 // Actually, we can use `Add-VBRViBackupJob`.
-                 "Add-VBRViBackupJob -Name \"" + clonedJobName + "\" -BackupRepository $repo -Entity @()" // This will likely fail if empty.
+                String.format("$parent = Get-VBRJob -Name '%s'", parentId),
+                "$repo = $parent.GetBackupTargetRepository()",
+                "Add-VBRViBackupJob -Name \"" + clonedJobName + "\" -BackupRepository $repo -Entity @()"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
         if (response.first()) {
@@ -241,7 +201,7 @@ public class VeeamPowerShellClient extends VeeamClientBase {
         // Find-VBRViEntity -Name vmInstanceName -Server hierarchyRef ?
 
         List<String> cmds = Arrays.asList(
-                "$job = Get-VBRJob -Name \"" + jobName + "\"", // Retrieve by name as ID might be unstable if we just claimed creation
+                String.format("$job = Get-VBRJob -Name '%s'", jobName),
                 "$server = Get-VBRServer -Name \"" + hierarchyRef + "\"",
                 "$entity = Find-VBRViEntity -Name \"" + vmInstanceName + "\" -Server $server",
                 "if ($entity) { Add-VBRJobObject -Job $job -Objects $entity }"
@@ -254,7 +214,7 @@ public class VeeamPowerShellClient extends VeeamClientBase {
     public boolean removeVMFromVeeamJob(String jobId, String vmInstanceName, String hierarchyRef) {
         String guid = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-           "$job = Get-VBRJob -Id " + guid,
+           String.format("$job = Get-VBRJob -Name '%s'", guid),
            "$object = Get-VBRJobObject -Job $job -Name \"" + vmInstanceName + "\"",
            "if ($object) { Remove-VBRJobObject -Job $job -Objects $object -Confirm:$false }"
         );
