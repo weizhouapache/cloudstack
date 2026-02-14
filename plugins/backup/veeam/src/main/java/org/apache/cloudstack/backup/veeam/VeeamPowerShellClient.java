@@ -104,7 +104,8 @@ public class VeeamPowerShellClient extends VeeamClientBase {
                 if (line.isEmpty()) continue;
                 String[] parts = line.split(":", 2);
                 if (parts.length == 2) {
-                    // Since Veeam 13, Job operations requires Job Name instead of ID, so we will use Name as UID and ignore the actual GUID. This is a workaround for cloning and adding VMs to jobs which are not possible by ID anymore.
+                    // Since Veeam 13, Job operations requires Job Name instead of ID, so we will use Name as UID and ignore the actual GUID.
+                    // This is a workaround for cloning and adding VMs to jobs which are not possible by ID anymore.
                     policies.add(new VeeamBackupOffering(parts[1].trim(), parts[1].trim()));
                 }
             }
@@ -114,9 +115,11 @@ public class VeeamPowerShellClient extends VeeamClientBase {
 
     @Override
     public Job listJob(String jobId) {
-        String guid = jobId.replace("urn:veeam:Job:", "");
+        // jobId is expected to be the Name for V13+ PowerShell client due to listJobs implementation
+        // But let's handle if it comes with prefix
+        String jobName = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-                String.format("$job = Get-VBRJob -Name '%s'", guid),
+                String.format("$job = Get-VBRJob -Name '%s'", jobName),
                 "if ($job) {",
                 "  $job.Id.Guid",
                 "  $job.Name",
@@ -130,7 +133,8 @@ public class VeeamPowerShellClient extends VeeamClientBase {
             String[] parts = response.second().split("\r\n");
             if (parts.length >= 4) {
                 Job job = new Job();
-                job.setUid("urn:veeam:Job:" + parts[0].trim());
+                // Return Name as UID to be consistent with listJobs
+                job.setUid(parts[1].trim());
                 job.setName(parts[1].trim());
                 job.setDescription(parts[2].trim());
                 job.setScheduleEnabled(parts[3].trim());
@@ -144,9 +148,9 @@ public class VeeamPowerShellClient extends VeeamClientBase {
 
     @Override
     public boolean toggleJobSchedule(String jobId) {
-        String guid = jobId.replace("urn:veeam:Job:", "");
+        String jobName = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-                String.format("$job = Get-VBRJob -Name '%s'", guid),
+                String.format("$job = Get-VBRJob -Name '%s'", jobName),
                 "if ($job.IsScheduleEnabled) { Disable-VBRJobSchedule -Job $job } else { Enable-VBRJobSchedule -Job $job }"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
@@ -155,9 +159,9 @@ public class VeeamPowerShellClient extends VeeamClientBase {
 
     @Override
     public boolean startBackupJob(String jobId) {
-        String guid = jobId.replace("urn:veeam:Job:", "");
+        String jobName = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-                String.format("$job = Get-VBRJob -Name '%s'", guid),
+                String.format("$job = Get-VBRJob -Name '%s'", jobName),
                 "Start-VBRJob -Job $job"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
@@ -166,44 +170,32 @@ public class VeeamPowerShellClient extends VeeamClientBase {
 
     @Override
     public BackupOffering cloneVeeamJob(Job parentJob, String clonedJobName) {
-        String parentId = parentJob.getId();
-        // Cloning via PowerShell: copy job? Veeam doesn't have Copy-VBRJob.
-        // We might need to get properties and create new.
-        // However, a simpler way might be creating a new job with same settings.
-        // But for now, let's assume we can use a script block or similar.
-        // Actually, we can use .NET object clone method if available, but unlikely.
-        // Best bet: Get job, Get Repository, Add-VBRBackupJob.
-        // Limitation: might miss some settings.
-
-        // Strategy: Get parent job, get its repository. Create new job with that repository and name.
-        // This is a simplification but often enough for backup offerings which are templates.
+        // parentJob.getId() returns the UID, which we set to Name in listJob/listJobs
+        String parentJobName = parentJob.getId();
 
         List<String> cmds = Arrays.asList(
-                String.format("$parent = Get-VBRJob -Name '%s'", parentId),
+                String.format("$parent = Get-VBRJob -Name '%s'", parentJobName),
                 "$repo = $parent.GetBackupTargetRepository()",
-                "Add-VBRBackupJob -Name \"" + clonedJobName + "\" -Repository $repo -Entity $parent.GetObjectsInJob()",
-                String.format("$parent = Get-VBRJob -Name '%s'", parentId),
-                "$repo = $parent.GetBackupTargetRepository()",
-                "Add-VBRViBackupJob -Name \"" + clonedJobName + "\" -BackupRepository $repo -Entity @()"
+                "$desc = if ($parent.Description) { $parent.Description } else { \"\" }",
+                String.format("$newJob = Add-VBRHvBackupJob -Name \"%s\" -BackupRepository $repo -Description $desc -Entity @()", clonedJobName),
+                "if ($newJob) { $newJob.Id.Guid }"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
-        if (response.first()) {
-            return new VeeamBackupOffering(clonedJobName, clonedJobName); // Assume success
+        if (response.first() && StringUtils.isNotBlank(response.second())) {
+            return new VeeamBackupOffering(clonedJobName, clonedJobName);
         }
         return null;
     }
 
     @Override
     public boolean addVMToVeeamJob(String jobId, String jobName, String parentJobId, String vmInstanceName, String hierarchyRef, VirtualMachine vm) {
-        // jobId is the cloned job.
+        // jobId is the cloned job name.
         // hierarchyRef is the vCenter/Host.
-        // We need to find the VM object to add.
-        // Find-VBRViEntity -Name vmInstanceName -Server hierarchyRef ?
 
         List<String> cmds = Arrays.asList(
                 String.format("$job = Get-VBRJob -Name '%s'", jobName),
                 "$server = Get-VBRServer -Name \"" + hierarchyRef + "\"",
-                "$entity = Find-VBRViEntity -Name \"" + vmInstanceName + "\" -Server $server",
+                "$entity = Find-VBRHvEntity -Name \"" + vmInstanceName + "\" -Server $server",
                 "if ($entity) { Add-VBRJobObject -Job $job -Objects $entity }"
         );
         Pair<Boolean, String> response = executePowerShellCommands(cmds);
@@ -212,9 +204,10 @@ public class VeeamPowerShellClient extends VeeamClientBase {
 
     @Override
     public boolean removeVMFromVeeamJob(String jobId, String vmInstanceName, String hierarchyRef) {
-        String guid = jobId.replace("urn:veeam:Job:", "");
+        // jobId is the job Name
+        String jobName = jobId.replace("urn:veeam:Job:", "");
         List<String> cmds = Arrays.asList(
-           String.format("$job = Get-VBRJob -Name '%s'", guid),
+           String.format("$job = Get-VBRJob -Name '%s'", jobName),
            "$object = Get-VBRJobObject -Job $job -Name \"" + vmInstanceName + "\"",
            "if ($object) { Remove-VBRJobObject -Job $job -Objects $object -Confirm:$false }"
         );
@@ -323,7 +316,7 @@ public class VeeamPowerShellClient extends VeeamClientBase {
                 "$points = Get-VBRRestorePoint",
                 String.format("foreach($point in $points) { if ($point.Id -eq '%s') { $restorePoint = $point; break; } }", restorePointId),
                 String.format("$server = Get-VBRServer -Name \"%s\"", hostIp),
-                String.format("$ds = Find-VBRViDatastore -Server:$server -Name \"%s\"", datastoreId),
+                String.format("$ds = Find-VBRHvDatastore -Server:$server -Name \"%s\"", datastoreId),
                 String.format("$job = Start-VBRRestoreVM -RestorePoint:$restorePoint -Server:$server -Datastore:$ds -VMName \"%s\" -RunAsync", restoreLocation),
                 "while (-not (Get-VBRRestoreSession -Id $job.Id).IsCompleted) { Start-Sleep -Seconds 10 }"
         );
