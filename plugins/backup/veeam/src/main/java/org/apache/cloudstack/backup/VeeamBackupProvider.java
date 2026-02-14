@@ -31,6 +31,7 @@ import org.apache.cloudstack.backup.dao.BackupDao;
 import org.apache.cloudstack.backup.veeam.VeeamClient;
 import org.apache.cloudstack.backup.veeam.VeeamClientBase;
 import org.apache.cloudstack.backup.veeam.VeeamClientV2;
+import org.apache.cloudstack.backup.veeam.VeeamPowerShellClient;
 import org.apache.cloudstack.backup.veeam.api.Job;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
@@ -39,6 +40,8 @@ import org.apache.commons.lang3.BooleanUtils;
 
 import com.cloud.agent.AgentManager;
 import com.cloud.agent.api.Answer;
+import com.cloud.host.HostVO;
+import com.cloud.host.dao.HostDao;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.dc.VmwareDatacenter;
 import com.cloud.hypervisor.vmware.VmwareDatacenterZoneMap;
@@ -98,6 +101,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     @Inject
     private VmwareDatacenterDao vmwareDatacenterDao;
     @Inject
+    private HostDao hostDao;
+    @Inject
     private BackupDao backupDao;
     @Inject
     private VMInstanceDao vmInstanceDao;
@@ -112,8 +117,19 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     private Map<String, Backup.Metric> backupFilesMetricsMap = new HashMap<>();
 
+    private boolean hasKvmHosts(Long zoneId) {
+        List<HostVO> hosts = hostDao.listByDataCenterIdAndHypervisorType(zoneId, Hypervisor.HypervisorType.KVM);
+        return CollectionUtils.isNotEmpty(hosts);
+    }
+
     protected VeeamClientBase getClient(final Long zoneId) {
         try {
+            if (hasKvmHosts(zoneId)) {
+                logger.debug("Zone has KVM hosts, using VeeamPowerShellClient");
+                return new VeeamPowerShellClient(VeeamUrl.valueIn(zoneId), VeeamUsername.valueIn(zoneId),
+                        VeeamPassword.valueIn(zoneId), VeeamApiRequestTimeout.valueIn(zoneId), VeeamRestoreTimeout.valueIn(zoneId));
+            }
+
             Integer version = VeeamVersion.valueIn(zoneId);
             // Use VeeamClientV2 for version 13 and above, VeeamClient for older versions
             if (version != null && version >= 13) {
