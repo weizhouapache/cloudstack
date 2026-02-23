@@ -320,7 +320,14 @@ public class VeeamClientV2 extends VeeamClientBase {
 
     @Override
     public boolean toggleJobSchedule(String jobId) {
-        return true;
+        logger.debug("Enabling backup job: {}", jobId);
+        try {
+            final HttpResponse response = post("/v1/jobs/" + jobId + "/enable", null);
+            return response.getStatusLine().getStatusCode() == HttpStatus.SC_NO_CONTENT;
+        } catch (IOException e) {
+            logger.error("Failed to enable backup job due to:", e);
+        }
+        return false;
     }
 
     @Override
