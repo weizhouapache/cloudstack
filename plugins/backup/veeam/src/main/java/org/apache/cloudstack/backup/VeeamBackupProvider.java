@@ -29,6 +29,8 @@ import javax.inject.Inject;
 
 import org.apache.cloudstack.backup.dao.BackupDao;
 import org.apache.cloudstack.backup.veeam.VeeamClient;
+import org.apache.cloudstack.backup.veeam.VeeamClientBase;
+import org.apache.cloudstack.backup.veeam.VeeamClientV2;
 import org.apache.cloudstack.backup.veeam.api.Job;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
@@ -87,6 +89,10 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     private static ConfigKey<Integer> VeeamTaskPollMaxRetry = new ConfigKey<>("Advanced", Integer.class, "backup.plugin.veeam.task.poll.max.retry", "120",
             "The max number of retrying times when the management server polls for Veeam task status.", true, ConfigKey.Scope.Zone);
 
+    private static ConfigKey<String> VeeamKvmHierarchyRef = new ConfigKey<>("Advanced", String.class, "backup.plugin.veeam.kvm.hierarchy.ref", "",
+            "The hierarchy reference name for KVM VMs in Veeam. This is typically the CloudStack Management Server IP/hostname " +
+            "registered in Veeam B&R as the managed server for KVM backups.", true, ConfigKey.Scope.Zone);
+
     @Inject
     private VmwareDatacenterZoneMapDao vmwareDatacenterZoneMapDao;
     @Inject
@@ -106,11 +112,21 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     private Map<String, Backup.Metric> backupFilesMetricsMap = new HashMap<>();
 
-    protected VeeamClient getClient(final Long zoneId) {
+    protected VeeamClientBase getClient(final Long zoneId) {
         try {
-            return new VeeamClient(VeeamUrl.valueIn(zoneId), VeeamVersion.valueIn(zoneId), VeeamUsername.valueIn(zoneId), VeeamPassword.valueIn(zoneId),
-                    VeeamValidateSSLSecurity.valueIn(zoneId), VeeamApiRequestTimeout.valueIn(zoneId), VeeamRestoreTimeout.valueIn(zoneId),
-                    VeeamTaskPollInterval.valueIn(zoneId), VeeamTaskPollMaxRetry.valueIn(zoneId));
+            Integer version = VeeamVersion.valueIn(zoneId);
+            // Use VeeamClientV2 for version 13 and above, VeeamClient for older versions
+            if (version != null && version >= 13) {
+                logger.debug("Creating VeeamClientV2 for Veeam version " + version);
+                return new VeeamClientV2(VeeamUrl.valueIn(zoneId), version, VeeamUsername.valueIn(zoneId), VeeamPassword.valueIn(zoneId),
+                        VeeamValidateSSLSecurity.valueIn(zoneId), VeeamApiRequestTimeout.valueIn(zoneId), VeeamRestoreTimeout.valueIn(zoneId),
+                        VeeamTaskPollInterval.valueIn(zoneId), VeeamTaskPollMaxRetry.valueIn(zoneId));
+            } else {
+                logger.debug("Creating legacy VeeamClient for Veeam version " + (version != null ? version : "auto-detect"));
+                return new VeeamClient(VeeamUrl.valueIn(zoneId), version, VeeamUsername.valueIn(zoneId), VeeamPassword.valueIn(zoneId),
+                        VeeamValidateSSLSecurity.valueIn(zoneId), VeeamApiRequestTimeout.valueIn(zoneId), VeeamRestoreTimeout.valueIn(zoneId),
+                        VeeamTaskPollInterval.valueIn(zoneId), VeeamTaskPollMaxRetry.valueIn(zoneId));
+            }
         } catch (URISyntaxException e) {
             throw new CloudRuntimeException("Failed to parse Veeam API URL: " + e.getMessage());
         } catch (NoSuchAlgorithmException | KeyManagementException e) {
@@ -145,7 +161,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     private VmwareDatacenter findVmwareDatacenterForVM(final VirtualMachine vm) {
         if (vm == null || vm.getHypervisorType() != Hypervisor.HypervisorType.VMware) {
-            throw new CloudRuntimeException("The Veeam backup provider is only applicable for VMware VMs");
+            return null;
         }
         final VmwareDatacenterZoneMap zoneMap = vmwareDatacenterZoneMapDao.findByZoneId(vm.getDataCenterId());
         if (zoneMap == null) {
@@ -158,46 +174,92 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
         return vmwareDatacenter;
     }
 
+    private String getHierarchyReferenceForVM(final VirtualMachine vm) {
+        if (vm == null) {
+            throw new CloudRuntimeException("VM cannot be null");
+        }
+        if (vm.getHypervisorType() == Hypervisor.HypervisorType.VMware) {
+            final VmwareDatacenter vmwareDC = findVmwareDatacenterForVM(vm);
+            return vmwareDC.getVcenterHost();
+        } else if (vm.getHypervisorType() == Hypervisor.HypervisorType.KVM) {
+            // KVM is only supported with Veeam 13+
+            Integer veeamVersion = VeeamVersion.valueIn(vm.getDataCenterId());
+            if (veeamVersion == null || veeamVersion < 13) {
+                throw new CloudRuntimeException("KVM VM backup is only supported with Veeam 13 or later. " +
+                        "Please upgrade to Veeam 13+ or set backup.plugin.veeam.version=13");
+            }
+
+            String kvmHierarchyRef = VeeamKvmHierarchyRef.valueIn(vm.getDataCenterId());
+            if (kvmHierarchyRef == null || kvmHierarchyRef.isEmpty()) {
+                throw new CloudRuntimeException("Veeam KVM hierarchy reference is not configured for zone: " + vm.getDataCenterId() +
+                        ". Please configure 'backup.plugin.veeam.kvm.hierarchy.ref' with the CloudStack Management Server " +
+                        "IP/hostname registered in Veeam B&R.");
+            }
+            return kvmHierarchyRef;
+        }
+        throw new CloudRuntimeException("The Veeam backup provider is only applicable for VMware and KVM VMs");
+    }
+
+    private void validateSupportedHypervisor(final VirtualMachine vm) {
+        if (vm == null) {
+            throw new CloudRuntimeException("VM cannot be null");
+        }
+
+        // KVM is only supported with Veeam 13+
+        if (vm.getHypervisorType() == Hypervisor.HypervisorType.KVM) {
+            Integer veeamVersion = VeeamVersion.valueIn(vm.getDataCenterId());
+            if (veeamVersion == null || veeamVersion < 13) {
+                throw new CloudRuntimeException("KVM VM backup is only supported with Veeam 13 or later. " +
+                        "Current Veeam version: " + (veeamVersion != null ? veeamVersion : "not set") + ". " +
+                        "Please upgrade to Veeam 13+ to backup KVM VMs.");
+            }
+        }
+
+        if (vm.getHypervisorType() != Hypervisor.HypervisorType.VMware &&
+            vm.getHypervisorType() != Hypervisor.HypervisorType.KVM) {
+            throw new CloudRuntimeException("The Veeam backup provider is only applicable for VMware and KVM VMs");
+        }
+    }
+
     private String getGuestBackupName(final String instanceName, final String uuid) {
         return String.format("%s%s%s", instanceName, BACKUP_IDENTIFIER, uuid);
     }
 
     @Override
     public boolean assignVMToBackupOffering(final VirtualMachine vm, final BackupOffering backupOffering) {
-        final VeeamClient client = getClient(vm.getDataCenterId());
+        validateSupportedHypervisor(vm);
+        final VeeamClientBase client = getClient(vm.getDataCenterId());
         final Job parentJob = client.listJob(backupOffering.getExternalId());
         final String clonedJobName = getGuestBackupName(vm.getInstanceName(), vm.getUuid());
 
-        if (!client.cloneVeeamJob(parentJob, clonedJobName)) {
+        BackupOffering clonedVeeamJob = client.cloneVeeamJob(parentJob, clonedJobName);
+        if (clonedVeeamJob == null) {
             logger.error("Failed to clone pre-defined Veeam job (backup offering) for backup offering [id: {}, name: {}] but will check the list of jobs again if it was eventually succeeded.", backupOffering.getExternalId(), backupOffering.getName());
         }
 
-        for (final BackupOffering job : client.listJobs()) {
-            if (job.getName().equals(clonedJobName)) {
-                final Job clonedJob = client.listJob(job.getExternalId());
-                if (BooleanUtils.isTrue(clonedJob.getScheduleConfigured()) && !clonedJob.getScheduleEnabled()) {
-                    client.toggleJobSchedule(clonedJob.getId());
-                }
-                logger.debug("Veeam job (backup offering) for backup offering [id: {}, name: {}] found, now trying to assign the VM to the job.", backupOffering.getExternalId(), backupOffering.getName());
-                final VmwareDatacenter vmwareDC = findVmwareDatacenterForVM(vm);
-                if (client.addVMToVeeamJob(job.getExternalId(), vm.getInstanceName(), vmwareDC.getVcenterHost())) {
-                    ((VMInstanceVO) vm).setBackupExternalId(job.getExternalId());
-                    return true;
-                }
-            }
+        final Job clonedJob = client.listJob(clonedVeeamJob.getExternalId());
+        if (BooleanUtils.isTrue(clonedJob.getScheduleConfigured()) && !clonedJob.getScheduleEnabled()) {
+            client.toggleJobSchedule(clonedJob.getId());
+        }
+        logger.debug("Veeam job (backup offering) for backup offering [id: {}, name: {}] found, now trying to assign the VM to the job.", backupOffering.getExternalId(), backupOffering.getName());
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
+        if (client.addVMToVeeamJob(clonedVeeamJob.getExternalId(), clonedJobName, parentJob.getId(), vm.getInstanceName(), hierarchyRef, vm)) {
+            ((VMInstanceVO) vm).setBackupExternalId(clonedVeeamJob.getExternalId());
+            return true;
         }
         return false;
     }
 
     @Override
     public boolean removeVMFromBackupOffering(final VirtualMachine vm) {
-        final VeeamClient client = getClient(vm.getDataCenterId());
-        final VmwareDatacenter vmwareDC = findVmwareDatacenterForVM(vm);
+        validateSupportedHypervisor(vm);
+        final VeeamClientBase client = getClient(vm.getDataCenterId());
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
         if (vm.getBackupExternalId() == null) {
             throw new CloudRuntimeException("The VM does not have a backup job assigned.");
         }
         try {
-            if (!client.removeVMFromVeeamJob(vm.getBackupExternalId(), vm.getInstanceName(), vmwareDC.getVcenterHost())) {
+            if (!client.removeVMFromVeeamJob(vm.getBackupExternalId(), vm.getInstanceName(), hierarchyRef)) {
                 logger.warn("Failed to remove VM from Veeam Job id: " + vm.getBackupExternalId());
             }
         } catch (Exception e) {
@@ -220,7 +282,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     @Override
     public Pair<Boolean, Backup> takeBackup(final VirtualMachine vm, Boolean quiesceVM) {
-        final VeeamClient client = getClient(vm.getDataCenterId());
+        final VeeamClientBase client = getClient(vm.getDataCenterId());
         Boolean result = client.startBackupJob(vm.getBackupExternalId());
         return new Pair<>(result, null);
     }
@@ -238,7 +300,7 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
             throw new CloudRuntimeException("Veeam backup provider does not have a safe way to remove a single restore point, which results in all backup chain being removed. "
                     + "Use forced:true to skip this verification and remove the complete backup chain.");
         }
-        VeeamClient client = getClient(vm.getDataCenterId());
+        VeeamClientBase client = getClient(vm.getDataCenterId());
         boolean result = client.deleteBackup(backup.getExternalId());
         if (BooleanUtils.isFalse(result)) {
             return false;
@@ -291,10 +353,11 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
     }
 
     @Override
-    public Pair<Boolean, String> restoreBackedUpVolume(Backup backup, Backup.VolumeInfo backupVolumeInfo, String hostIp, String dataStoreUuid, Pair<String, VirtualMachine.State> vmNameAndState) {
+    public Pair<Boolean, String> restoreBackedUpVolume(Backup backup, Backup.VolumeInfo backupVolumeInfo, String hostIp, String dataStoreUuid, VirtualMachine vm) {
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
         final Long zoneId = backup.getZoneId();
         final String restorePointId = backup.getExternalId();
-        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, null, hostIp, dataStoreUuid);
+        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, null, hostIp, dataStoreUuid, hierarchyRef);
     }
 
     @Override
@@ -331,17 +394,19 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
 
     @Override
     public List<Backup.RestorePoint> listRestorePoints(VirtualMachine vm) {
-        final VmwareDatacenter vmwareDC = findVmwareDatacenterForVM(vm);
+        validateSupportedHypervisor(vm);
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
         String backupName = getGuestBackupName(vm.getInstanceName(), vm.getUuid());
-        return getClient(vm.getDataCenterId()).listRestorePoints(backupName, vmwareDC.getVcenterHost(), vm.getInstanceName(), backupFilesMetricsMap);
+        return getClient(vm.getDataCenterId()).listRestorePoints(backupName, hierarchyRef, vm.getInstanceName(), backupFilesMetricsMap);
     }
 
     @Override
     public Pair<Boolean, String> restoreBackupToVM(VirtualMachine vm, Backup backup, String hostIp, String dataStoreUuid) {
+        final String hierarchyRef = getHierarchyReferenceForVM(vm);
         final Long zoneId = backup.getZoneId();
         final String restorePointId = backup.getExternalId();
         final String restoreLocation = vm.getInstanceName();
-        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, restoreLocation, hostIp, dataStoreUuid);
+        return getClient(zoneId).restoreVMToDifferentLocation(restorePointId, restoreLocation, hostIp, dataStoreUuid, hierarchyRef);
     }
 
     @Override
@@ -379,7 +444,8 @@ public class VeeamBackupProvider extends AdapterBase implements BackupProvider, 
                 VeeamApiRequestTimeout,
                 VeeamRestoreTimeout,
                 VeeamTaskPollInterval,
-                VeeamTaskPollMaxRetry
+                VeeamTaskPollMaxRetry,
+                VeeamKvmHierarchyRef
         };
     }
 
