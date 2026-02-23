@@ -415,7 +415,7 @@ public class VeeamClientV2 extends VeeamClientBase {
                 inventoryObject.put("type", TYPE_VIRTUAL_MACHINE);
                 inventoryObject.put("hostName", firstInclude.get("hostName").asText());
                 String vmUrn = vmReference.second();
-                inventoryObject.put("objectId", vmUrn.substring(vmUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
+                inventoryObject.put("objectId", extractObjectIdFromUrn(vmUrn)); // Extract object ID from URN
                 inventoryObject.put("urn", vmUrn);
 
                 includesArray.removeAll();
@@ -450,7 +450,6 @@ public class VeeamClientV2 extends VeeamClientBase {
             final HttpResponse updateResponse = put(String.format("/v1/jobs/%s", jobId), jsonBody);
 
             int statusCode = updateResponse.getStatusLine().getStatusCode();
-            logResponseBody(updateResponse, jsonBody);
             return statusCode == HttpStatus.SC_OK;
         } catch (IOException e) {
             logger.error("Failed to clone job due to:", e);
@@ -714,7 +713,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             configurationFileDatastoreObject.put("type", TYPE_DATASTORE);
             configurationFileDatastoreObject.put("hostName", hierarchyRef);
             String datastoreUrn = datastoreRef.second();
-            configurationFileDatastoreObject.put("objectId", datastoreUrn.substring(datastoreUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
+            configurationFileDatastoreObject.put("objectId", extractObjectIdFromUrn(datastoreUrn));
             configurationFileDatastoreObject.put("name", datastoreRef.first());
             configurationFileDatastoreObject.put("urn", datastoreUrn);
 
@@ -732,7 +731,7 @@ public class VeeamClientV2 extends VeeamClientBase {
             folderInFolderObject.put("type", TYPE_FOLDER);
             folderInFolderObject.put("hostName", hierarchyRef);
             String folderUrn = folderRef.second();
-            folderInFolderObject.put("objectId", folderUrn.substring(folderUrn.lastIndexOf(":") + 1)); // Extract object ID from URN
+            folderInFolderObject.put("objectId", extractObjectIdFromUrn(folderUrn));
             folderInFolderObject.put("name", folderRef.first());
 
             String jsonBody = mapper.writeValueAsString(requestBody);
@@ -746,7 +745,6 @@ public class VeeamClientV2 extends VeeamClientBase {
                 boolean success = waitForRestoreCompletion(sessionId);
                 return new Pair<>(success, restoreLocation);
             }
-            logResponseBody(response, jsonBody);
         } catch (IOException e) {
             logger.error("Failed to restore VM to different location due to:", e);
         }
@@ -873,7 +871,6 @@ public class VeeamClientV2 extends VeeamClientBase {
             if (statusCode == HttpStatus.SC_OK || statusCode == HttpStatus.SC_CREATED) {
                 return mapper.readTree(response.getEntity().getContent());
             }
-            logResponseBody(response, jsonBody);
         } catch (IOException e) {
             logger.error("Failed to get inventory due to:", e);
         }
@@ -1047,6 +1044,13 @@ public class VeeamClientV2 extends VeeamClientBase {
         } catch (IOException e) {
             logger.error("Failed to read response body due to:", e);
         }
+    }
+
+    String extractObjectIdFromUrn(String urn) {
+        if (urn != null && urn.contains(":")) {
+            return urn.substring(urn.lastIndexOf(":") + 1);
+        }
+        return urn;
     }
 }
 
