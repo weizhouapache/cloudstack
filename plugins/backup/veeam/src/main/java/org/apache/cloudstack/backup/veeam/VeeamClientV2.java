@@ -1033,19 +1033,6 @@ public class VeeamClientV2 extends VeeamClientBase {
         return false;
     }
 
-    void logResponseBody(HttpResponse response, String jsonBody) {
-        try {
-            logger.debug("Request body: " + jsonBody);
-            if (response.getEntity() != null) {
-                ObjectMapper mapper = new ObjectMapper();
-                JsonNode jsonResponse = mapper.readTree(response.getEntity().getContent());
-                logger.debug("Response body: " + jsonResponse.toString());
-            }
-        } catch (IOException e) {
-            logger.error("Failed to read response body due to:", e);
-        }
-    }
-
     String extractObjectIdFromUrn(String urn) {
         if (urn != null && urn.contains(":")) {
             return urn.substring(urn.lastIndexOf(":") + 1);
