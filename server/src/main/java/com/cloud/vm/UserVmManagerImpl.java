@@ -4292,7 +4292,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         if (diskOfferingId != null) {
             List<String> additionalResourceLimitStorageTags = diskOfferingId != null ? getResourceLimitStorageTags(diskOfferingId) : null;
             DiskOfferingVO diskOffering = _diskOfferingDao.findById(diskOfferingId);
-            Long size = verifyAndGetDiskSize(diskOffering, diskSize);
+            Long size = verifyAndGetDiskSize(diskOffering, diskSize, null);
             CheckedReservation additionalVolumeReservation = diskOfferingId != null ? new CheckedReservation(owner, ResourceType.volume, additionalResourceLimitStorageTags, 1L, reservationDao, resourceLimitService) : null;
             checkedReservations.add(additionalVolumeReservation);
             CheckedReservation additionalPrimaryStorageReservation = diskOfferingId != null ? new CheckedReservation(owner, ResourceType.primary_storage, additionalResourceLimitStorageTags, size, reservationDao, resourceLimitService) : null;
@@ -4304,7 +4304,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
             for (VmDiskInfo vmDiskInfo : dataDiskInfoList) {
                 DiskOffering diskOffering = vmDiskInfo.getDiskOffering();
                 List<String> additionalResourceLimitStorageTagsForDataDisk = getResourceLimitStorageTags(vmDiskInfo.getDiskOffering().getId());
-                Long size = verifyAndGetDiskSize(diskOffering, vmDiskInfo.getSize());
+                Long size = verifyAndGetDiskSize(diskOffering, vmDiskInfo.getSize(), null);
                 CheckedReservation additionalVolumeReservation = new CheckedReservation(owner, ResourceType.volume, additionalResourceLimitStorageTagsForDataDisk, 1L, reservationDao, resourceLimitService);
                 checkedReservations.add(additionalVolumeReservation);
                 CheckedReservation additionalPrimaryStorageReservation = new CheckedReservation(owner, ResourceType.primary_storage, additionalResourceLimitStorageTagsForDataDisk, size, reservationDao, resourceLimitService);
@@ -4647,17 +4647,17 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
         }
     }
 
-    private long verifyAndGetDiskSize(DiskOffering diskOffering, Long diskSize) {
+    private long verifyAndGetDiskSize(DiskOffering diskOffering, Long diskSizeInGB, Long diskSizeInBytes) {
         long size = 0l;
         if (diskOffering == null) {
             throw new InvalidParameterValueException("Specified disk offering cannot be found");
         }
         if (diskOffering.isCustomized() && !diskOffering.isComputeOnly()) {
-            if (diskSize == null) {
+            if (diskSizeInGB == null && diskSizeInBytes == null) {
                 throw new InvalidParameterValueException("This disk offering requires a custom size specified");
             }
-            _volumeService.validateCustomDiskOfferingSizeRange(diskSize);
-            size = diskSize * GiB_TO_BYTES;
+            size = diskSizeInGB != null ? diskSizeInGB * GiB_TO_BYTES : diskSizeInBytes;
+            _volumeService.validateCustomDiskOfferingSizeRange(size);
         } else {
             size = diskOffering.getDiskSize();
         }
@@ -4688,7 +4688,7 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
                 throw new InvalidParameterValueException("Root disk size should be a positive number.");
             }
         }
-        long rootDiskSizeInBytes = verifyAndGetDiskSize(rootDiskOffering, rootDiskSizeCustomParam);
+        long rootDiskSizeInBytes = verifyAndGetDiskSize(rootDiskOffering, rootDiskSizeCustomParam, null);
         if (rootDiskSizeInBytes > 0) { //if the size at DiskOffering is not zero then the Service Offering had it configured, it holds priority over the User custom size
             _volumeService.validateVolumeSizeInBytes(rootDiskSizeInBytes);
             long rootDiskSizeInGiB = rootDiskSizeInBytes / GiB_TO_BYTES;

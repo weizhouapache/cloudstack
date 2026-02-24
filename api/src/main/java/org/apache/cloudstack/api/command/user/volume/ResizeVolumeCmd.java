@@ -30,6 +30,7 @@ import org.apache.cloudstack.api.command.user.UserCmd;
 import org.apache.cloudstack.api.response.DiskOfferingResponse;
 import org.apache.cloudstack.api.response.VolumeResponse;
 import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.utils.bytescale.ByteScaleUtils;
 
 import com.cloud.event.EventTypes;
 import com.cloud.exception.InvalidParameterValueException;
@@ -60,8 +61,11 @@ public class ResizeVolumeCmd extends BaseAsyncCmd implements UserCmd {
     @Parameter(name = ApiConstants.MAX_IOPS, type = CommandType.LONG, required = false, description = "New maximum number of IOPS")
     private Long maxIops;
 
-    @Parameter(name = ApiConstants.SIZE, type = CommandType.LONG, required = false, description = "New volume size in GB")
+    @Parameter(name = ApiConstants.SIZE, type = CommandType.LONG, required = false, description = "New volume size in GB. This is mutually exclusive with sizebytes parameter.")
     private Long size;
+
+    @Parameter(name = ApiConstants.SIZEBYTES, type = CommandType.LONG, description = "New volume size in Bytes. This is mutually exclusive with size parameter.")
+    private Long sizeBytes;
 
     @Parameter(name = ApiConstants.SHRINK_OK, type = CommandType.BOOLEAN, required = false, description = "Verify OK to Shrink")
     private boolean shrinkOk;
@@ -117,8 +121,17 @@ public class ResizeVolumeCmd extends BaseAsyncCmd implements UserCmd {
         return maxIops;
     }
 
-    public Long getSize() {
-        return size;
+    public Long getSizeBytes() {
+        if (sizeBytes != null) {
+            if (size != null) {
+                throw new ServerApiException(ApiErrorCode.PARAM_ERROR, "Both size and sizeBytes parameters cannot be provided together. Please provide only one of them.");
+            }
+            return sizeBytes;
+        } else if (size != null) {
+            return size * ByteScaleUtils.GiB;
+        } else {
+            return null;
+        }
     }
 
     public void setSize(Long size) {
@@ -190,8 +203,8 @@ public class ResizeVolumeCmd extends BaseAsyncCmd implements UserCmd {
 
     @Override
     public String getEventDescription() {
-        if (getSize() != null) {
-            return "Volume Id: " + this._uuidMgr.getUuid(Volume.class, getEntityId()) + " to size " + getSize() + " GB";
+        if (getSizeBytes() != null) {
+            return "Volume Id: " + this._uuidMgr.getUuid(Volume.class, getEntityId()) + " to size " + getSizeBytes() + " Bytes";
         } else {
             return "Volume Id: " + this._uuidMgr.getUuid(Volume.class, getEntityId());
         }
@@ -201,8 +214,8 @@ public class ResizeVolumeCmd extends BaseAsyncCmd implements UserCmd {
     public void execute() {
         Volume volume = null;
         try {
-            if (size != null) {
-                CallContext.current().setEventDetails("Volume Id: " + this._uuidMgr.getUuid(Volume.class, getEntityId()) + " to size " + getSize() + " GB");
+            if (getSizeBytes() != null) {
+                CallContext.current().setEventDetails("Volume Id: " + this._uuidMgr.getUuid(Volume.class, getEntityId()) + " to size " + getSizeBytes() + " Bytes");
             } else {
                 CallContext.current().setEventDetails("Volume Id: " + this._uuidMgr.getUuid(Volume.class, getEntityId()));
             }

@@ -37,6 +37,7 @@ import org.apache.cloudstack.api.response.UserVmResponse;
 import org.apache.cloudstack.api.response.VolumeResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
 import org.apache.cloudstack.context.CallContext;
+import org.apache.cloudstack.utils.bytescale.ByteScaleUtils;
 
 import com.cloud.event.EventTypes;
 import com.cloud.exception.ResourceAllocationException;
@@ -83,8 +84,11 @@ public class CreateVolumeCmd extends BaseAsyncCreateCustomIdCmd implements UserC
     @Parameter(name = ApiConstants.NAME, type = CommandType.STRING, description = "the name of the disk volume")
     private String volumeName;
 
-    @Parameter(name = ApiConstants.SIZE, type = CommandType.LONG, description = "Arbitrary volume size")
+    @Parameter(name = ApiConstants.SIZE, type = CommandType.LONG, description = "Arbitrary volume size in Gigabytes. If the disk offering is not custom, then this parameter is ignored. If the disk offering is custom, size or sizebytes is required. This is mutually exclusive with sizebytes parameter.")
     private Long size;
+
+    @Parameter(name = ApiConstants.SIZEBYTES, type = CommandType.LONG, description = "Arbitrary volume size in Bytes. If the disk offering is not custom, then this parameter is ignored. If the disk offering is custom, size or sizebytes is required. This is mutually exclusive with size parameter.")
+    private Long sizeBytes;
 
     @Parameter(name = ApiConstants.MIN_IOPS, type = CommandType.LONG, description = "min iops")
     private Long minIops;
@@ -137,8 +141,17 @@ public class CreateVolumeCmd extends BaseAsyncCreateCustomIdCmd implements UserC
         return volumeName;
     }
 
-    public Long getSize() {
-        return size;
+    public Long getSizeBytes() {
+        if (sizeBytes != null) {
+            if (size != null) {
+                throw new ServerApiException(ApiErrorCode.PARAM_ERROR, "Both size and sizeBytes parameters cannot be provided together. Please provide only one of them.");
+            }
+            return sizeBytes;
+        } else if (size != null) {
+            return size * ByteScaleUtils.GiB;
+        } else {
+            return null;
+        }
     }
 
     public Long getMinIops() {

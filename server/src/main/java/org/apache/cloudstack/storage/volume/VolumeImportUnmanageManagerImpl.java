@@ -71,7 +71,6 @@ import org.apache.cloudstack.engine.orchestration.service.VolumeOrchestrationSer
 import org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao;
 import org.apache.cloudstack.storage.datastore.db.SnapshotDataStoreDao;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolVO;
-import org.apache.cloudstack.utils.bytescale.ByteScaleUtils;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -204,7 +203,7 @@ public class VolumeImportUnmanageManagerImpl implements VolumeImportUnmanageServ
         // 6. get disk offering
         DiskOfferingVO diskOffering = getOrCreateDiskOffering(owner, cmd.getDiskOfferingId(), pool.getDataCenterId(), pool.isLocal());
         if (diskOffering.isCustomized()) {
-            volumeApiService.validateCustomDiskOfferingSizeRange(volume.getVirtualSize() / ByteScaleUtils.GiB);
+            volumeApiService.validateCustomDiskOfferingSizeRange(volume.getVirtualSize());
         }
         if (!volumeApiService.doesStoragePoolSupportDiskOffering(pool, diskOffering)) {
             logFailureAndThrowException(String.format("Disk offering: %s storage tags are not compatible with selected storage pool: %s", diskOffering, pool));

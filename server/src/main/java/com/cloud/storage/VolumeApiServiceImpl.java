@@ -758,7 +758,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         Long zoneId = cmd.getZoneId();
         Long diskOfferingId = null;
         DiskOfferingVO diskOffering = null;
-        Long size = null;
+        Long sizeInBytes = null;
         Long minIops = null;
         Long maxIops = null;
         // Volume VO used for extracting the source template id
@@ -784,14 +784,9 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         if (cmd.getDiskOfferingId() != null) { // create a new volume
 
             diskOfferingId = cmd.getDiskOfferingId();
-            size = cmd.getSize();
-            Long sizeInGB = size;
-            if (size != null) {
-                if (size > 0) {
-                    size = size * 1024 * 1024 * 1024; // user specify size in GB
-                } else {
-                    throw new InvalidParameterValueException("Disk size must be larger than 0");
-                }
+            sizeInBytes = cmd.getSizeBytes();
+            if (sizeInBytes != null && sizeInBytes <= 0) {
+                throw new InvalidParameterValueException("Disk size must be larger than 0");
             }
 
             // Check that the disk offering is specified
@@ -801,20 +796,20 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             }
 
             if (diskOffering.isCustomized()) {
-                if (size == null) {
+                if (sizeInBytes == null) {
                     throw new InvalidParameterValueException("This disk offering requires a custom size specified");
                 }
-                validateCustomDiskOfferingSizeRange(sizeInGB);
+                validateCustomDiskOfferingSizeRange(sizeInBytes);
             }
 
-            if (!diskOffering.isCustomized() && size != null) {
+            if (!diskOffering.isCustomized() && sizeInBytes != null) {
                 throw new InvalidParameterValueException("This disk offering does not allow custom size");
             }
 
             _configMgr.checkDiskOfferingAccess(owner, diskOffering, _dcDao.findById(zoneId));
 
             if (diskOffering.getDiskSize() > 0) {
-                size = diskOffering.getDiskSize();
+                sizeInBytes = diskOffering.getDiskSize();
             }
 
             DiskOfferingDetailVO bandwidthLimitDetail = _diskOfferingDetailsDao.findDetail(diskOfferingId, Volume.BANDWIDTH_LIMIT_IN_MBPS);
@@ -858,8 +853,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
                 maxIops = diskOffering.getMaxIops();
             }
 
-            if (!validateVolumeSizeInBytes(size == null ? 0 : size)) {
-                throw new InvalidParameterValueException(String.format("Invalid size for custom volume creation: %s, max volume size is: %s GB", NumbersUtil.toReadableSize(size), VolumeOrchestrationService.MaxVolumeSize.value()));
+            if (!validateVolumeSizeInBytes(sizeInBytes == null ? 0 : sizeInBytes)) {
+                throw new InvalidParameterValueException(String.format("Invalid size for custom volume creation: %s, max volume size is: %s GB", NumbersUtil.toReadableSize(sizeInBytes), VolumeOrchestrationService.MaxVolumeSize.value()));
             }
         }
 
@@ -900,11 +895,11 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
                 minIops = snapshotCheck.getMinIops();
                 maxIops = snapshotCheck.getMaxIops();
-                size = snapshotCheck.getSize(); // ; disk offering is used for tags purposes
+                sizeInBytes = snapshotCheck.getSize(); // ; disk offering is used for tags purposes
             } else {
-                if (size < snapshotCheck.getSize()) {
+                if (sizeInBytes < snapshotCheck.getSize()) {
                     throw new InvalidParameterValueException(String.format("Invalid size for volume creation: %dGB, snapshot size is: %dGB",
-                            size / (1024 * 1024 * 1024), snapshotCheck.getSize() / (1024 * 1024 * 1024)));
+                            sizeInBytes / GiB_TO_BYTES, snapshotCheck.getSize() / GiB_TO_BYTES));
                 }
             }
 
@@ -938,7 +933,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
         Storage.ProvisioningType provisioningType = diskOffering.getProvisioningType();
 
         // Check that the resource limit for volume & primary storage won't be exceeded
-        _resourceLimitMgr.checkVolumeResourceLimit(owner,displayVolume, size, diskOffering);
+        _resourceLimitMgr.checkVolumeResourceLimit(owner,displayVolume, sizeInBytes, diskOffering);
 
         // Verify that zone exists
         DataCenterVO zone = _dcDao.findById(zoneId);
@@ -973,17 +968,17 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
         String userSpecifiedName = getVolumeNameFromCommand(cmd);
 
-        return commitVolume(cmd.getSnapshotId(), caller, owner, displayVolume, zoneId, diskOfferingId, provisioningType, size, minIops, maxIops, parentVolume, userSpecifiedName,
+        return commitVolume(cmd.getSnapshotId(), caller, owner, displayVolume, zoneId, diskOfferingId, provisioningType, sizeInBytes, minIops, maxIops, parentVolume, userSpecifiedName,
                 _uuidMgr.generateUuid(Volume.class, cmd.getCustomId()), details);
     }
 
     @Override
-    public void validateCustomDiskOfferingSizeRange(Long sizeInGB) {
-        Long customDiskOfferingMaxSize = VolumeOrchestrationService.CustomDiskOfferingMaxSize.value();
-        Long customDiskOfferingMinSize = VolumeOrchestrationService.CustomDiskOfferingMinSize.value();
+    public void validateCustomDiskOfferingSizeRange(Long sizeInBytes) {
+        Long customDiskOfferingMaxSize = VolumeOrchestrationService.CustomDiskOfferingMaxSize.value() * GiB_TO_BYTES;
+        Long customDiskOfferingMinSize = VolumeOrchestrationService.CustomDiskOfferingMinSize.value() * GiB_TO_BYTES;
 
-        if ((sizeInGB < customDiskOfferingMinSize) || (sizeInGB > customDiskOfferingMaxSize)) {
-            throw new InvalidParameterValueException(String.format("Volume size: %s GB is out of allowed range. Min: %s. Max: %s", sizeInGB, customDiskOfferingMinSize, customDiskOfferingMaxSize));
+        if ((sizeInBytes < customDiskOfferingMinSize) || (sizeInBytes > customDiskOfferingMaxSize)) {
+            throw new InvalidParameterValueException(String.format("Volume size: %s Bytes is out of allowed range. Min: %s. Max: %s", sizeInBytes, customDiskOfferingMinSize, customDiskOfferingMaxSize));
         }
     }
 
@@ -1048,9 +1043,9 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     @Override
     public boolean validateVolumeSizeInBytes(long size) {
         long maxVolumeSize = VolumeOrchestrationService.MaxVolumeSize.value();
-        if (size < 0 || (size > 0 && size < (1024 * 1024 * 1024))) {
+        if (size < 0 || (size > 0 && size < GiB_TO_BYTES)) {
             throw new InvalidParameterValueException("Please specify a size of at least 1 GB.");
-        } else if (size > (maxVolumeSize * 1024 * 1024 * 1024)) {
+        } else if (size > (maxVolumeSize * GiB_TO_BYTES)) {
             throw new InvalidParameterValueException(String.format("Requested volume size is %s, but the maximum size allowed is %d GB.", NumbersUtil.toReadableSize(size), maxVolumeSize));
         }
 
@@ -1131,7 +1126,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
     @DB
     @ActionEvent(eventType = EventTypes.EVENT_VOLUME_RESIZE, eventDescription = "resizing volume", async = true)
     public VolumeVO resizeVolume(ResizeVolumeCmd cmd) throws ResourceAllocationException {
-        Long newSize = cmd.getSize();
+        Long newSize = cmd.getSizeBytes();
         Long newMinIops = cmd.getMinIops();
         Long newMaxIops = cmd.getMaxIops();
         Integer newHypervisorSnapshotReserve = null;
@@ -1191,8 +1186,6 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
                                     +   "For more details please check out the Official Resizing Volumes documentation.");
                 }
 
-                // convert from bytes to GiB
-                newSize = newSize << 30;
             } else {
                 // no parameter provided; just use the original size of the volume
                 newSize = volume.getSize();
@@ -1257,7 +1250,7 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
             if (newDiskOffering.getDiskSize() > 0 && !newDiskOffering.isComputeOnly()) {
                 newSize = newDiskOffering.getDiskSize();
             } else if (newDiskOffering.isCustomized()) {
-                newSize = cmd.getSize();
+                newSize = cmd.getSizeBytes();
 
                 if (newSize == null) {
                     throw new InvalidParameterValueException("The new disk offering requires that a size be specified.");
@@ -1265,10 +1258,8 @@ public class VolumeApiServiceImpl extends ManagerBase implements VolumeApiServic
 
                 validateCustomDiskOfferingSizeRange(newSize);
 
-                // convert from GiB to bytes
-                newSize = newSize << 30;
             } else {
-                if (cmd.getSize() != null) {
+                if (cmd.getSizeBytes() != null) {
                     throw new InvalidParameterValueException("You cannot pass in a custom disk size to a non-custom disk offering.");
                 }
 

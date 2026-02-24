@@ -543,6 +543,7 @@ public class ApiConstants {
     public static final String SINCE = "since";
     public static final String SITE_NAME = "sitename";
     public static final String SIZE = "size";
+    public static final String SIZEBYTES = "sizebytes";
     public static final String SIZEGB = "sizegb";
     public static final String SNAPSHOT = "snapshot";
     public static final String SNAPSHOT_ID = "snapshotid";
