@@ -8063,6 +8063,10 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
             logger.debug("No need to ensure an isolated network for the VM because the zone uses basic networks.");
             return null;
         }
+        if (cmd.getDummy() && CollectionUtils.isEmpty(_nicDao.listByVmId(vm.getId()))) {
+            logger.debug("No need to ensure network for the dummy VM because it can be created without any network.");
+            return null;
+        }
 
         List<Long> networkIdList = cmd.getNetworkIds();
         List<Long> securityGroupIdList = cmd.getSecurityGroupIdList();
@@ -8217,6 +8221,11 @@ public class UserVmManagerImpl extends ManagerBase implements UserVmManager, Vir
      */
     protected void updateVmNetwork(AssignVMCmd cmd, Account caller, UserVmVO vm, Account newAccount, VirtualMachineTemplate template)
             throws InsufficientCapacityException, ResourceAllocationException {
+
+        if (cmd.getDummy() && CollectionUtils.isEmpty(_nicDao.listByVmId(vm.getId()))) {
+            logger.debug("No need to update network for the dummy VM because it can be created without any network.");
+            return;
+        }
 
         logger.trace("Updating network for VM [{}].", vm);
 

@@ -85,6 +85,9 @@ public class AssignVMCmd extends BaseCmd  {
                    "In case no security groups are provided the VM is part of the default security group.")
     private List<Long> securityGroupIdList;
 
+    @Parameter(name = ApiConstants.DUMMY, type = CommandType.BOOLEAN, since = "4.23", description = "If true, the VM can be assigned without any network. False by default. This supports KVM only.")
+    private Boolean dummy;
+
     /////////////////////////////////////////////////////
     /////////////////// Accessors ///////////////////////
     /////////////////////////////////////////////////////
@@ -111,6 +114,10 @@ public class AssignVMCmd extends BaseCmd  {
 
     public List<Long> getSecurityGroupIdList() {
         return securityGroupIdList;
+    }
+
+    public Boolean getDummy() {
+        return dummy;
     }
 
     /////////////////////////////////////////////////////
