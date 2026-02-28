@@ -60,8 +60,13 @@ public final class LibvirtPrepareForMigrationCommandWrapper extends CommandWrapp
             return handleRollback(command, libvirtComputingResource);
         }
 
+        if (command.isSource()) {
+            logger.debug("Preparing source host for migration of VM {}", vm.getName());
+            return handleMigrationHostPreparation(command, libvirtComputingResource, null, vm);
+        }
+
         if (logger.isDebugEnabled()) {
-            logger.debug("Preparing host for migrating " + vm);
+            logger.debug("Preparing destination host for migrating " + vm);
         }
 
         final NicTO[] nics = vm.getNics();
@@ -123,21 +128,7 @@ public final class LibvirtPrepareForMigrationCommandWrapper extends CommandWrapp
                 return new PrepareForMigrationAnswer(command, "failed to connect physical disks to host");
             }
 
-            // Activate CLVM volumes in shared mode on destination host for live migration
-            try {
-                List<LibvirtVMDef.DiskDef> disks = libvirtComputingResource.getDisks(conn, vm.getName());
-                LibvirtComputingResource.modifyClvmVolumesStateForMigration(
-                    disks,
-                    libvirtComputingResource,
-                    vm,
-                    LibvirtComputingResource.ClvmVolumeState.SHARED
-                );
-            } catch (Exception e) {
-                logger.warn("Failed to activate CLVM volumes in shared mode on destination for VM {}: {}",
-                    vm.getName(), e.getMessage(), e);
-            }
-
-            logger.info("Successfully prepared destination host for migration of VM {}", vm.getName());
+            handleMigrationHostPreparation(command, libvirtComputingResource, conn, vm);
 
             return createPrepareForMigrationAnswer(command, dpdkInterfaceMapping, libvirtComputingResource, vm);
         } catch (final LibvirtException | CloudRuntimeException | InternalErrorException | URISyntaxException e) {
@@ -178,6 +169,29 @@ public final class LibvirtPrepareForMigrationCommandWrapper extends CommandWrapp
             return new PrepareForMigrationAnswer(command, "failed to disconnect physical disks from host");
         }
 
+        return new PrepareForMigrationAnswer(command);
+    }
+
+    private Answer handleMigrationHostPreparation(PrepareForMigrationCommand command, LibvirtComputingResource libvirtComputingResource,
+                                                  Connect conn, VirtualMachineTO vm) {
+        try {
+            if (conn == null) {
+                final LibvirtUtilitiesHelper libvirtUtilitiesHelper = libvirtComputingResource.getLibvirtUtilitiesHelper();
+                conn = libvirtUtilitiesHelper.getConnectionByVmName(vm.getName());
+            }
+            List<LibvirtVMDef.DiskDef> disks = libvirtComputingResource.getDisks(conn, vm.getName());
+            LibvirtComputingResource.modifyClvmVolumesStateForMigration(
+                disks,
+                libvirtComputingResource,
+                vm,
+                LibvirtComputingResource.ClvmVolumeState.SHARED
+            );
+        } catch (Exception e) {
+            logger.warn("Failed to activate CLVM volumes in shared mode on destination for VM {}: {}",
+                vm.getName(), e.getMessage(), e);
+        }
+
+        logger.info("Successfully prepared host for migration of VM {}", vm.getName());
         return new PrepareForMigrationAnswer(command);
     }
 }

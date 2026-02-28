@@ -3110,7 +3110,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         updateOverCommitRatioForVmProfile(profile, dest.getHost().getClusterId());
 
         final VirtualMachineTO to = toVmTO(profile);
-        final PrepareForMigrationCommand pfmc = new PrepareForMigrationCommand(to);
+        final PrepareForMigrationCommand pfmcDest = new PrepareForMigrationCommand(to, false);
         setVmNetworkDetails(vm, to);
 
         ItWorkVO work = new ItWorkVO(UUID.randomUUID().toString(), _nodeId, State.Migrating, vm.getType(), vm.getId());
@@ -3119,19 +3119,42 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         work.setResourceId(dstHostId);
         work = _workDao.persist(work);
 
-        Answer pfma = null;
+        // For KVM, we need to prepare both source and destination before migration because of the way KVM handles storage during migration.
+        // For other hypervisors, we only need to prepare the destination before migration.
+        if (HypervisorType.KVM.equals(vm.getHypervisorType())) {
+            final PrepareForMigrationCommand pfmcSource = new PrepareForMigrationCommand(to, true);
+            Answer pfmaSource = null;
+            try {
+                pfmaSource = _agentMgr.send(srcHostId, pfmcSource);
+                if (pfmaSource == null || !pfmaSource.getResult()) {
+                    final String details = pfmaSource != null ? pfmaSource.getDetails() : "null answer returned";
+                    pfmaSource = null;
+                    throw new AgentUnavailableException(String.format("Unable to prepare source for migration due to [%s].", details), srcHostId);
+                }
+            } catch (final OperationTimedoutException e1) {
+                throw new AgentUnavailableException("Operation timed out", srcHostId);
+            } finally {
+                if (pfmaSource == null) {
+                    _networkMgr.rollbackNicForMigration(vmSrc, profile);
+                    volumeMgr.release(vm.getId(), dstHostId);
+                    work.setStep(Step.Done);
+                    _workDao.update(work.getId(), work);
+                }
+            }
+        }
+
+        Answer pfmaDest = null;
         try {
-            pfma = _agentMgr.send(dstHostId, pfmc);
-            if (pfma == null || !pfma.getResult()) {
-                final String details = pfma != null ? pfma.getDetails() : "null answer returned";
-                final String msg = "Unable to prepare for migration due to " + details;
-                pfma = null;
-                throw new AgentUnavailableException(msg, dstHostId);
+            pfmaDest = _agentMgr.send(dstHostId, pfmcDest);
+            if (pfmaDest == null || !pfmaDest.getResult()) {
+                final String details = pfmaDest != null ? pfmaDest.getDetails() : "null answer returned";
+                pfmaDest = null;
+                throw new AgentUnavailableException("Unable to prepare destination for migration due to " + details, dstHostId);
             }
         } catch (final OperationTimedoutException e1) {
             throw new AgentUnavailableException("Operation timed out", dstHostId);
         } finally {
-            if (pfma == null) {
+            if (pfmaDest == null) {
                 _networkMgr.rollbackNicForMigration(vmSrc, profile);
                 volumeMgr.release(vm.getId(), dstHostId);
                 work.setStep(Step.Done);
@@ -3173,7 +3196,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         boolean migrated = false;
         Map<String, DpdkTO> dpdkInterfaceMapping = new HashMap<>();
         try {
-            final MigrateCommand mc = buildMigrateCommand(vm, to, dest, pfma, dpdkInterfaceMapping);
+            final MigrateCommand mc = buildMigrateCommand(vm, to, dest, pfmaDest, dpdkInterfaceMapping);
 
             try {
                 final Answer ma = _agentMgr.send(vm.getLastHostId(), mc);
@@ -4903,7 +4926,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         volumeMgr.prepareForMigration(profile, dest);
 
         final VirtualMachineTO to = toVmTO(profile);
-        final PrepareForMigrationCommand pfmc = new PrepareForMigrationCommand(to);
+        final PrepareForMigrationCommand pfmcDest = new PrepareForMigrationCommand(to, false);
 
         ItWorkVO work = new ItWorkVO(UUID.randomUUID().toString(), _nodeId, State.Migrating, vm.getType(), vm.getId());
         work.setStep(Step.Prepare);
@@ -4911,18 +4934,40 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
         work.setResourceId(dstHostId);
         work = _workDao.persist(work);
 
-        Answer pfma = null;
+        // For KVM, we need to prepare both source and destination before migration because of the way KVM handles storage during migration.
+        // For other hypervisors, we only need to prepare the destination before migration.
+        if (HypervisorType.KVM.equals(vm.getHypervisorType())) {
+            final PrepareForMigrationCommand pfmcSource = new PrepareForMigrationCommand(to, true);
+            Answer pfmaSource = null;
+            try {
+                pfmaSource = _agentMgr.send(srcHostId, pfmcSource);
+                if (pfmaSource == null || !pfmaSource.getResult()) {
+                    final String details = pfmaSource != null ? pfmaSource.getDetails() : "null answer returned";
+                    pfmaSource = null;
+                    throw new AgentUnavailableException(String.format("Unable to prepare source for migration due to [%s].", details), srcHostId);
+                }
+            } catch (final OperationTimedoutException e1) {
+                throw new AgentUnavailableException("Operation timed out", srcHostId);
+            } finally {
+                if (pfmaSource == null) {
+                    work.setStep(Step.Done);
+                    _workDao.update(work.getId(), work);
+                }
+            }
+        }
+
+        Answer pfmaDest = null;
         try {
-            pfma = _agentMgr.send(dstHostId, pfmc);
-            if (pfma == null || !pfma.getResult()) {
-                final String details = pfma != null ? pfma.getDetails() : "null answer returned";
-                pfma = null;
+            pfmaDest = _agentMgr.send(dstHostId, pfmcDest);
+            if (pfmaDest == null || !pfmaDest.getResult()) {
+                final String details = pfmaDest != null ? pfmaDest.getDetails() : "null answer returned";
+                pfmaDest = null;
                 throw new AgentUnavailableException(String.format("Unable to prepare for migration to destination host [%s] due to [%s].", dest.getHost(), details), dstHostId);
             }
         } catch (final OperationTimedoutException e1) {
             throw new AgentUnavailableException("Operation timed out", dstHostId);
         } finally {
-            if (pfma == null) {
+            if (pfmaDest == null) {
                 work.setStep(Step.Done);
                 _workDao.update(work.getId(), work);
             }
@@ -4943,7 +4988,7 @@ public class VirtualMachineManagerImpl extends ManagerBase implements VirtualMac
 
         boolean migrated = false;
         try {
-            final MigrateCommand mc = buildMigrateCommand(vm, to, dest, pfma, null);
+            final MigrateCommand mc = buildMigrateCommand(vm, to, dest, pfmaDest, null);
 
             try {
                 final Answer ma = _agentMgr.send(vm.getLastHostId(), mc);

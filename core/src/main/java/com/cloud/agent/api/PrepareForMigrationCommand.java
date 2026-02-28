@@ -25,11 +25,27 @@ public class PrepareForMigrationCommand extends Command {
     private VirtualMachineTO vm;
     private boolean rollback;
 
-    protected PrepareForMigrationCommand() {
+    /**
+     * Indicates if this command is for the source host (true) or destination host (false, default).
+     */
+    private boolean isSource = false; // default: destination
+
+    /**
+     * Legacy constructor that defaults to destination host.
+     * @param vm VirtualMachineTO
+     */
+    public PrepareForMigrationCommand(VirtualMachineTO vm) {
+        this(vm, false);
     }
 
-    public PrepareForMigrationCommand(VirtualMachineTO vm) {
+    /**
+     * Create a PrepareForMigrationCommand for a VM, specifying if this is for the source host.
+     * @param vm VirtualMachineTO
+     * @param isSource true if source host, false if destination host
+     */
+    public PrepareForMigrationCommand(VirtualMachineTO vm, boolean isSource) {
         this.vm = vm;
+        this.isSource = isSource;
     }
 
     public VirtualMachineTO getVirtualMachine() {
@@ -42,6 +58,20 @@ public class PrepareForMigrationCommand extends Command {
 
     public boolean isRollback() {
         return rollback;
+    }
+
+    /**
+     * Returns true if this command is for the source host, false if destination.
+     */
+    public boolean isSource() {
+        return isSource;
+    }
+
+    /**
+     * Set whether this command is for the source host.
+     */
+    public void setSource(boolean isSource) {
+        this.isSource = isSource;
     }
 
     @Override
