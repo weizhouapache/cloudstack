@@ -3641,6 +3641,9 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
                     if (pool.getType() == StoragePoolType.Linstor && isQemuDiscardBugFree(diskBusType)) {
                         disk.setDiscard(DiscardType.UNMAP);
                     }
+                    if (pool.getType() == StoragePoolType.CLVM) {
+                        disk.setDiskFormatType(DiskDef.DiskFmtType.QCOW2);
+                    }
                 } else {
                     if (volume.getType() == Volume.Type.DATADISK && !(isWindowsTemplate && isUefiEnabled)) {
                         disk.defFileBasedDisk(physicalDisk.getPath(), devId, diskBusTypeData, DiskDef.DiskFmtType.QCOW2);
@@ -3995,7 +3998,7 @@ public class LibvirtComputingResource extends ServerResourceBase implements Serv
                 if (attachingPool.getType() == StoragePoolType.RBD) {
                     diskdef.defNetworkBasedDisk(attachingDisk.getPath(), attachingPool.getSourceHost(), attachingPool.getSourcePort(), attachingPool.getAuthUserName(),
                             attachingPool.getUuid(), devId, busT, DiskProtocol.RBD, DiskDef.DiskFmtType.RAW);
-                } else if (attachingPool.getType() == StoragePoolType.PowerFlex) {
+                } else if (attachingPool.getType() == StoragePoolType.PowerFlex || attachingPool.getType() == StoragePoolType.CLVM) {
                     diskdef.defBlockBasedDisk(attachingDisk.getPath(), devId, busT);
                 } else if (attachingPool.getType() == StoragePoolType.Gluster) {
                     diskdef.defNetworkBasedDisk(attachingDisk.getPath(), attachingPool.getSourceHost(), attachingPool.getSourcePort(), null,
