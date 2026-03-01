@@ -74,7 +74,7 @@ public class LibvirtStoragePoolTest extends TestCase {
         assertEquals(rbdPool.getStoragePoolType(), StoragePoolType.RBD);
 
         LibvirtStoragePool clvmPool = new LibvirtStoragePool(uuid, name, StoragePoolType.CLVM, adapter, storage);
-        assertEquals(clvmPool.getDefaultFormat(), PhysicalDiskFormat.RAW);
+        assertEquals(clvmPool.getDefaultFormat(), PhysicalDiskFormat.QCOW2);
         assertEquals(clvmPool.getStoragePoolType(), StoragePoolType.CLVM);
     }
 
