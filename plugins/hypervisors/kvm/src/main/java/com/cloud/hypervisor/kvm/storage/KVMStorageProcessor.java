@@ -1514,7 +1514,7 @@ public class KVMStorageProcessor implements StorageProcessor {
                     final String glusterVolume = attachingPool.getSourceDir().replace("/", "");
                     diskdef.defNetworkBasedDisk(glusterVolume + path.replace(mountpoint, ""), attachingPool.getSourceHost(), attachingPool.getSourcePort(), null,
                             null, devId, busT, DiskProtocol.GLUSTER, DiskDef.DiskFmtType.QCOW2);
-                } else if (attachingPool.getType() == StoragePoolType.PowerFlex) {
+                } else if (attachingPool.getType() == StoragePoolType.PowerFlex || attachingPool.getType() == StoragePoolType.CLVM) {
                     diskdef.defBlockBasedDisk(attachingDisk.getPath(), devId, busT);
                     if (attachingDisk.getFormat() == PhysicalDiskFormat.QCOW2) {
                         diskdef.setDiskFormatType(DiskDef.DiskFmtType.QCOW2);
