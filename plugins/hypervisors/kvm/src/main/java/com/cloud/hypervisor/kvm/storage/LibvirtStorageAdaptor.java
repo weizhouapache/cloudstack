@@ -1621,7 +1621,8 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
                     Map<String, String> info = qemu.info(srcFile);
                     String backingFile = info.get(QemuImg.BACKING_FILE);
                     // qcow2 templates can just be copied into place
-                    if (sourceFormat.equals(destFormat) && backingFile == null && sourcePath.endsWith(".qcow2")) {
+                    if (sourceFormat.equals(destFormat) && backingFile == null && sourcePath.endsWith(".qcow2")
+                            && destPool.getType() != StoragePoolType.CLVM) {
                         String result = Script.runSimpleBashScript("cp -f " + sourcePath + " " + destPath, timeout);
                         if (result != null) {
                             throw new CloudRuntimeException("Failed to create disk: " + result);
@@ -1629,7 +1630,9 @@ public class LibvirtStorageAdaptor implements StorageAdaptor {
                     } else {
                         destFile = new QemuImgFile(destPath, destFormat);
                         try {
-                            boolean isQCOW2 = PhysicalDiskFormat.QCOW2.equals(sourceFormat);
+                            boolean isQCOW2 = PhysicalDiskFormat.QCOW2.equals(sourceFormat)
+                                    && PhysicalDiskFormat.QCOW2.equals(destFormat)
+                                    && destPool.getType() != StoragePoolType.CLVM;
                             qemu.convert(srcFile, destFile, null, null, new QemuImageOptions(srcFile.getFormat(), srcFile.getFileName(), null),
                                     null, false, isQCOW2);
                             Map<String, String> destInfo = qemu.info(destFile);
