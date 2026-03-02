@@ -1606,6 +1606,33 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public Long getExtensionIdForPhysicalNetwork(long physicalNetworkId) {
+        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (map == null) {
+            return null;
+        }
+        return map.getExtensionId();
+    }
+
+    @Override
+    public Extension getExtensionForPhysicalNetwork(long physicalNetworkId) {
+        Long extensionId = getExtensionIdForPhysicalNetwork(physicalNetworkId);
+        if (extensionId == null) {
+            return null;
+        }
+        return extensionDao.findById(extensionId);
+    }
+
+    @Override
+    public String getExtensionScriptPath(Extension extension) {
+        if (extension == null) {
+            return null;
+        }
+        return externalProvisioner.getExtensionPath(extension.getRelativePath());
+    }
+
+    @Override
     public boolean start() {
         long pathStateCheckInterval = PathStateCheckInterval.value();
         long pathStateCheckInitialDelay = Math.min(60, pathStateCheckInterval);
