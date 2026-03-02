@@ -26,6 +26,12 @@ import java.util.Set;
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 
@@ -61,21 +67,37 @@ import com.cloud.vm.VirtualMachineProfile;
  * iptables-based source NAT, static NAT, and port forwarding on a Linux
  * server acting as the network gateway.
  *
- * The script path is resolved dynamically from a {@link Extension} of type
- * {@code NetworkOrchestrator} that is associated with the network's physical
- * network via the Extension Resource Map. Administrators create the extension
- * via the API (e.g. {@code createExtension}), place their script(s) in the
- * extension's path, then associate the extension with a physical network.
+ * <h3>Extension-based configuration</h3>
+ * The script path and network capabilities are resolved dynamically from a
+ * {@link Extension} of type {@code NetworkOrchestrator} that is associated
+ * with the network's physical network via the Extension Resource Map.
  *
- * The element looks for an executable file named by the extension's relative
- * path under the global extensions directory. The script receives a command
- * as the first argument followed by key-value options.
+ * <h3>Network capabilities via JSON</h3>
+ * When creating the extension, pass the network capabilities as a detail
+ * with the key {@code network.capabilities}. The value is a JSON object:
+ * <pre>
+ * {
+ *   "services": ["SourceNat", "StaticNat", "PortForwarding", "Firewall", "Gateway"],
+ *   "capabilities": {
+ *     "SourceNat": {
+ *       "SupportedSourceNatTypes": "peraccount",
+ *       "RedundantRouter": "false"
+ *     },
+ *     "Firewall": {
+ *       "TrafficStatistics": "per public ip"
+ *     }
+ *   }
+ * }
+ * </pre>
+ * If no {@code network.capabilities} detail is set, defaults to all services.
  */
 public class ExternalNetworkElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
         PortForwardingServiceProvider, IpDeployer {
 
-    private static final Map<Service, Map<Capability, String>> capabilities = initCapabilities();
+    public static final String NETWORK_CAPABILITIES_DETAIL_KEY = "network.capabilities";
+
+    private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = initDefaultCapabilities();
 
     @Inject
     private NetworkModel networkModel;
@@ -84,35 +106,100 @@ public class ExternalNetworkElement extends AdapterBase implements
     @Inject
     private ExtensionHelper extensionHelper;
 
-    private static Map<Service, Map<Capability, String>> initCapabilities() {
+    private static Map<Service, Map<Capability, String>> initDefaultCapabilities() {
         Map<Service, Map<Capability, String>> caps = new HashMap<>();
 
-        // Source NAT
         Map<Capability, String> sourceNatCaps = new HashMap<>();
         sourceNatCaps.put(Capability.SupportedSourceNatTypes, "peraccount");
         sourceNatCaps.put(Capability.RedundantRouter, "false");
         caps.put(Service.SourceNat, sourceNatCaps);
 
-        // Static NAT
         caps.put(Service.StaticNat, new HashMap<>());
-
-        // Port Forwarding
         caps.put(Service.PortForwarding, new HashMap<>());
 
-        // Firewall
         Map<Capability, String> firewallCaps = new HashMap<>();
         firewallCaps.put(Capability.TrafficStatistics, "per public ip");
         caps.put(Service.Firewall, firewallCaps);
 
-        // Gateway
         caps.put(Service.Gateway, new HashMap<>());
-
         return caps;
     }
 
     @Override
     public Map<Service, Map<Capability, String>> getCapabilities() {
-        return capabilities;
+        return DEFAULT_CAPABILITIES;
+    }
+
+    /**
+     * Parse network capabilities from the extension's {@code network.capabilities}
+     * JSON detail. Returns the default capabilities if no detail is set.
+     *
+     * @param extensionId the extension ID
+     * @return parsed capabilities map
+     */
+    protected Map<Service, Map<Capability, String>> getCapabilitiesFromExtension(long extensionId) {
+        Map<String, String> details = extensionHelper.getExtensionDetails(extensionId);
+        if (details == null || !details.containsKey(NETWORK_CAPABILITIES_DETAIL_KEY)) {
+            return DEFAULT_CAPABILITIES;
+        }
+        String json = details.get(NETWORK_CAPABILITIES_DETAIL_KEY);
+        return parseNetworkCapabilitiesJson(json);
+    }
+
+    /**
+     * Parse a network capabilities JSON string into a capabilities map.
+     * <p>Expected format:</p>
+     * <pre>
+     * {
+     *   "services": ["SourceNat", "StaticNat", ...],
+     *   "capabilities": {
+     *     "SourceNat": { "SupportedSourceNatTypes": "peraccount" },
+     *     ...
+     *   }
+     * }
+     * </pre>
+     */
+    protected static Map<Service, Map<Capability, String>> parseNetworkCapabilitiesJson(String json) {
+        Map<Service, Map<Capability, String>> caps = new HashMap<>();
+        if (json == null || json.isBlank()) {
+            return DEFAULT_CAPABILITIES;
+        }
+        try {
+            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+
+            // Parse services array
+            JsonArray servicesArray = root.getAsJsonArray("services");
+            if (servicesArray == null || servicesArray.isEmpty()) {
+                return DEFAULT_CAPABILITIES;
+            }
+
+            // Parse capabilities object (optional)
+            JsonObject capabilitiesObj = root.has("capabilities") ?
+                    root.getAsJsonObject("capabilities") : new JsonObject();
+
+            for (JsonElement svcElem : servicesArray) {
+                String svcName = svcElem.getAsString();
+                Service service = Service.getService(svcName);
+                if (service == null) {
+                    continue;
+                }
+
+                Map<Capability, String> svcCaps = new HashMap<>();
+                if (capabilitiesObj.has(svcName)) {
+                    JsonObject svcCapsObj = capabilitiesObj.getAsJsonObject(svcName);
+                    for (Map.Entry<String, JsonElement> entry : svcCapsObj.entrySet()) {
+                        Capability cap = Capability.getCapability(entry.getKey());
+                        if (cap != null) {
+                            svcCaps.put(cap, entry.getValue().getAsString());
+                        }
+                    }
+                }
+                caps.put(service, svcCaps);
+            }
+            return caps;
+        } catch (Exception e) {
+            return DEFAULT_CAPABILITIES;
+        }
     }
 
     @Override

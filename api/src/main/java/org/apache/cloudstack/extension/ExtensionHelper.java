@@ -17,6 +17,8 @@
 
 package org.apache.cloudstack.extension;
 
+import java.util.Map;
+
 public interface ExtensionHelper {
     Long getExtensionIdForCluster(long clusterId);
     Extension getExtension(long id);
@@ -24,4 +26,5 @@ public interface ExtensionHelper {
     Long getExtensionIdForPhysicalNetwork(long physicalNetworkId);
     Extension getExtensionForPhysicalNetwork(long physicalNetworkId);
     String getExtensionScriptPath(Extension extension);
+    Map<String, String> getExtensionDetails(long extensionId);
 }
