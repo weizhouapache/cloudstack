@@ -25,6 +25,7 @@
 /etc/cloudstack/extensions/Proxmox/proxmox.sh
 /etc/cloudstack/extensions/HyperV/hyperv.py
 /etc/cloudstack/extensions/MaaS/maas.py
+/etc/cloudstack/extensions/external-network/entry-point
 /etc/default/cloudstack-management
 /etc/security/limits.d/cloudstack-limits.conf
 /etc/sudoers.d/cloudstack

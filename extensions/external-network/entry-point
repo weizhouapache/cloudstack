@@ -1,0 +1,228 @@
+#!/bin/bash
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+##############################################################################
+# entry-point
+#
+# Wrapper script for the ExternalNetwork CloudStack extension.
+# Runs on the management server; SSHes to the external network device (e.g.
+# a Linux host with network namespaces) and executes external-network.sh
+# inside the designated network namespace.
+#
+# Called by ExternalNetworkElement (Java) with all arguments forwarded:
+#   entry-point <command> [--network-id N] [--vlan V] [--gateway G] ...
+#
+# Connection details are injected as environment variables by ExternalNetworkElement:
+#
+#   CS_NET_DEV_HOST      IP / hostname of the remote network device (required)
+#   CS_NET_DEV_PORT      SSH port                          (default: 22)
+#   CS_NET_DEV_USERNAME  SSH user                          (default: root)
+#   CS_NET_DEV_PASSWORD  SSH password for sshpass          (optional)
+#   CS_NET_DEV_SSHKEY    PEM-encoded SSH private key       (optional; preferred)
+#
+# Per-physical-network details (set via addExternalNetworkDevice or
+# registerExtension details):
+#
+#   CS_NET_NAMESPACE     Linux network namespace on the remote host (required)
+#   CS_NET_SCRIPT_PATH   Full path to external-network.sh on the remote host
+#                        (default: /usr/local/share/cloudstack/external-network.sh)
+#
+# Authentication priority:
+#   1. CS_NET_DEV_SSHKEY  – PEM key is written to a temp file and used with -i
+#   2. CS_NET_DEV_PASSWORD – password is passed via sshpass(1) if available
+#   3. No credentials     – relies on the SSH agent / host key on the mgmt server
+#
+# Exit codes:
+#   0  – remote command succeeded
+#   1  – usage / configuration error
+#   2  – SSH connection / authentication error
+#   3  – remote command returned non-zero
+##############################################################################
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants / defaults
+# ---------------------------------------------------------------------------
+
+DEFAULT_SSH_PORT=22
+DEFAULT_SSH_USER=root
+DEFAULT_SCRIPT_PATH=/usr/local/share/cloudstack/external-network.sh
+LOG_FILE=/var/log/cloudstack/management/extnet-entry-point.log
+TMPDIR_BASE=/tmp
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+log() {
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    printf '[%s] %s\n' "${ts}" "$*" >> "${LOG_FILE}" 2>/dev/null || true
+    printf '%s\n' "$*" >&2
+}
+
+die() {
+    log "ERROR: $*"
+    exit "${2:-1}"
+}
+
+# ---------------------------------------------------------------------------
+# Read connection parameters from environment
+# ---------------------------------------------------------------------------
+
+REMOTE_HOST="${CS_NET_DEV_HOST:-}"
+REMOTE_PORT="${CS_NET_DEV_PORT:-${DEFAULT_SSH_PORT}}"
+REMOTE_USER="${CS_NET_DEV_USERNAME:-${DEFAULT_SSH_USER}}"
+REMOTE_PASS="${CS_NET_DEV_PASSWORD:-}"
+REMOTE_SSHKEY="${CS_NET_DEV_SSHKEY:-}"
+
+NAMESPACE="${CS_NET_NAMESPACE:-}"
+REMOTE_SCRIPT="${CS_NET_SCRIPT_PATH:-${DEFAULT_SCRIPT_PATH}}"
+
+# ---------------------------------------------------------------------------
+# Validate required parameters
+# ---------------------------------------------------------------------------
+
+[ -z "${REMOTE_HOST}" ] && die \
+    "CS_NET_DEV_HOST is not set. Please set it via addExternalNetworkDevice or registerExtension details." 1
+
+[ -z "${NAMESPACE}" ] && die \
+    "CS_NET_NAMESPACE is not set. Please set it via registerExtension details (key=namespace) or addExternalNetworkDevice details." 1
+
+if [ $# -lt 1 ]; then
+    die "Usage: entry-point <command> [arguments...]" 1
+fi
+
+# ---------------------------------------------------------------------------
+# Prepare SSH key if provided
+# ---------------------------------------------------------------------------
+
+KEY_TMPFILE=""
+KEY_TMPDIR=""
+
+cleanup() {
+    local rc=$?
+    if [ -n "${KEY_TMPDIR}" ] && [ -d "${KEY_TMPDIR}" ]; then
+        rm -rf "${KEY_TMPDIR}" 2>/dev/null || true
+    fi
+    exit ${rc}
+}
+trap cleanup EXIT INT TERM
+
+if [ -n "${REMOTE_SSHKEY}" ]; then
+    # Write the PEM key to a temp file with strict permissions
+    KEY_TMPDIR=$(mktemp -d "${TMPDIR_BASE}/.cs-extnet-key-XXXXXX")
+    chmod 700 "${KEY_TMPDIR}"
+    KEY_TMPFILE="${KEY_TMPDIR}/id_extnet"
+    printf '%s\n' "${REMOTE_SSHKEY}" > "${KEY_TMPFILE}"
+    chmod 600 "${KEY_TMPFILE}"
+    log "Using SSH key from CS_NET_DEV_SSHKEY (host=${REMOTE_HOST}:${REMOTE_PORT} user=${REMOTE_USER} ns=${NAMESPACE})"
+fi
+
+# ---------------------------------------------------------------------------
+# Build the remote command:
+#   ip netns exec <namespace> <script> <command> [args...]
+# ---------------------------------------------------------------------------
+
+# Safely quote each argument for the remote shell
+remote_args=()
+for arg in "$@"; do
+    # Single-quote each argument, escaping any embedded single-quotes
+    remote_args+=("'${arg//"'"/"'\\''"}'" )
+done
+
+REMOTE_CMD="ip netns exec '${NAMESPACE}' '${REMOTE_SCRIPT}' ${remote_args[*]}"
+
+log "Remote: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT} cmd=${REMOTE_CMD}"
+
+# ---------------------------------------------------------------------------
+# Common SSH options
+# ---------------------------------------------------------------------------
+
+SSH_OPTS=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -o ConnectTimeout=15
+    -o BatchMode=yes
+    -p "${REMOTE_PORT}"
+)
+
+# Add key file if we have one
+if [ -n "${KEY_TMPFILE}" ]; then
+    SSH_OPTS+=(-i "${KEY_TMPFILE}")
+    # Disable any other identity files to avoid agent confusion
+    SSH_OPTS+=(-o IdentitiesOnly=yes)
+fi
+
+# ---------------------------------------------------------------------------
+# Execute the remote command
+# ---------------------------------------------------------------------------
+
+RC=0
+
+if [ -n "${KEY_TMPFILE}" ]; then
+    # SSH key authentication
+    ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "${REMOTE_CMD}" || RC=$?
+
+elif [ -n "${REMOTE_PASS}" ]; then
+    # Password authentication via sshpass
+    if ! command -v sshpass >/dev/null 2>&1; then
+        die "CS_NET_DEV_PASSWORD is set but 'sshpass' is not installed on the management server. " \
+            "Install sshpass or use an SSH key instead." 2
+    fi
+    # Remove -o BatchMode=yes for password auth (sshpass handles the pty)
+    PASS_OPTS=()
+    for opt in "${SSH_OPTS[@]}"; do
+        [[ "${opt}" == "BatchMode=yes" ]] && continue
+        PASS_OPTS+=("${opt}")
+    done
+    # Also disable agent forwarding for cleaner password auth
+    PASS_OPTS+=(-o IdentitiesOnly=yes -o IdentityFile=/dev/null)
+
+    SSHPASS="${REMOTE_PASS}" sshpass -e \
+        ssh "${PASS_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "${REMOTE_CMD}" || RC=$?
+
+else
+    # No explicit credentials — rely on SSH agent or default keys on the mgmt server
+    log "WARN: No CS_NET_DEV_SSHKEY or CS_NET_DEV_PASSWORD set; relying on SSH agent / host keys"
+    SSH_OPTS_NO_BATCH=()
+    for opt in "${SSH_OPTS[@]}"; do
+        [[ "${opt}" == "BatchMode=yes" ]] && continue
+        SSH_OPTS_NO_BATCH+=("${opt}")
+    done
+    ssh "${SSH_OPTS_NO_BATCH[@]}" "${REMOTE_USER}@${REMOTE_HOST}" "${REMOTE_CMD}" || RC=$?
+fi
+
+# ---------------------------------------------------------------------------
+# Report result
+# ---------------------------------------------------------------------------
+
+if [ ${RC} -ne 0 ]; then
+    if [ ${RC} -eq 255 ]; then
+        log "SSH connection failed (rc=255): check host=${REMOTE_HOST}, port=${REMOTE_PORT}, user=${REMOTE_USER}, credentials"
+        exit 2
+    fi
+    log "Remote script returned rc=${RC}"
+    exit 3
+fi
+
+log "Command '${1}' completed successfully"
+exit 0
+
