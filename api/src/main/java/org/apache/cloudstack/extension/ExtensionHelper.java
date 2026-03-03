@@ -82,4 +82,11 @@ public interface ExtensionHelper {
      * registered (i.e. have an entry in extension_resource_map of type PhysicalNetwork).
      */
     List<Long> listPhysicalNetworkIdsWithExtension();
+
+    /**
+     * Returns all NetworkOrchestrator extensions registered with the given
+     * physical network. Multiple extensions can be registered with one network,
+     * each appearing as its own service provider tab named after the extension.
+     */
+    List<Extension> listExtensionsForPhysicalNetwork(long physicalNetworkId);
 }

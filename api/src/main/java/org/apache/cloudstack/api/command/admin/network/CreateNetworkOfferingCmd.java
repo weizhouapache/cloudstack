@@ -53,13 +53,14 @@ import com.cloud.user.Account;
 
 import static com.cloud.network.Network.Service.Dhcp;
 import static com.cloud.network.Network.Service.Dns;
+import static com.cloud.network.Network.Service.Firewall;
+import static com.cloud.network.Network.Service.Gateway;
 import static com.cloud.network.Network.Service.Lb;
 import static com.cloud.network.Network.Service.StaticNat;
 import static com.cloud.network.Network.Service.SourceNat;
 import static com.cloud.network.Network.Service.PortForwarding;
 import static com.cloud.network.Network.Service.NetworkACL;
 import static com.cloud.network.Network.Service.UserData;
-import static com.cloud.network.Network.Service.Firewall;
 
 import static org.apache.cloudstack.api.command.utils.OfferingUtils.isNetrisNatted;
 import static org.apache.cloudstack.api.command.utils.OfferingUtils.isNetrisRouted;
@@ -270,7 +271,7 @@ public class CreateNetworkOfferingCmd extends BaseCmd {
     }
 
     public boolean isExternalNetworkProvider() {
-        return Arrays.asList("NSX", "Netris").stream()
+        return Arrays.asList("NSX", "Netris", "ExternalNetwork").stream()
                 .anyMatch(s -> provider != null && s.equalsIgnoreCase(provider));
     }
 
@@ -282,6 +283,10 @@ public class CreateNetworkOfferingCmd extends BaseCmd {
         return provider != null && provider.equalsIgnoreCase("Netris");
     }
 
+    public boolean isForExternalNetwork() {
+        return provider != null && provider.equalsIgnoreCase("ExternalNetwork");
+    }
+
     public String getProvider() {
         return provider;
     }
@@ -289,6 +294,20 @@ public class CreateNetworkOfferingCmd extends BaseCmd {
     public List<String> getSupportedServices() {
         if (!isExternalNetworkProvider()) {
             return supportedServices == null ? new ArrayList<String>() : supportedServices;
+        } else if (isForExternalNetwork()) {
+            // ExternalNetwork: NATTED mode — SourceNat, StaticNat, PortForwarding, Firewall, Gateway
+            // Dhcp/Dns/UserData are handled by VirtualRouter
+            List<String> services = new ArrayList<>(List.of(
+                    Dhcp.getName(),
+                    Dns.getName(),
+                    UserData.getName(),
+                    SourceNat.getName(),
+                    StaticNat.getName(),
+                    PortForwarding.getName(),
+                    Firewall.getName(),
+                    Gateway.getName()
+            ));
+            return services;
         } else {
             List<String> services = new ArrayList<>(List.of(
                     Dhcp.getName(),
@@ -396,6 +415,21 @@ public class CreateNetworkOfferingCmd extends BaseCmd {
     }
 
     private void getServiceProviderMapForExternalProvider(Map<String, List<String>> serviceProviderMap, String provider) {
+        // ExternalNetwork: simple NATTED mode — Dhcp/Dns/UserData via VirtualRouter;
+        // SourceNat, StaticNat, PortForwarding, Firewall, Gateway via ExternalNetwork
+        if (isForExternalNetwork()) {
+            String routerProvider = VirtualRouterProvider.Type.VirtualRouter.name();
+            serviceProviderMap.put(Dhcp.getName(), List.of(routerProvider));
+            serviceProviderMap.put(Dns.getName(), List.of(routerProvider));
+            serviceProviderMap.put(UserData.getName(), List.of(routerProvider));
+            serviceProviderMap.put(SourceNat.getName(), List.of(provider));
+            serviceProviderMap.put(StaticNat.getName(), List.of(provider));
+            serviceProviderMap.put(PortForwarding.getName(), List.of(provider));
+            serviceProviderMap.put(Firewall.getName(), List.of(provider));
+            serviceProviderMap.put(Gateway.getName(), List.of(provider));
+            return;
+        }
+        // NSX / Netris
         String routerProvider = Boolean.TRUE.equals(getForVpc()) ? VirtualRouterProvider.Type.VPCVirtualRouter.name() :
                 VirtualRouterProvider.Type.VirtualRouter.name();
         List<String> unsupportedServices = new ArrayList<>(List.of("Vpn", "Gateway", "SecurityGroup", "Connectivity", "BaremetalPxeService"));

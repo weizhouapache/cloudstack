@@ -25,7 +25,7 @@
       :loading="loading"
       :columns="listCols"
       :dataSource="dataSource"
-      :rowKey="record => record.id || record.name || record.nvpdeviceid || record.resourceid"
+      :rowKey="record => record.id || record.name || record.nvpdeviceid || record.resourceid || record.physicalnetworkid"
       :pagination="false"
       :scroll="scrollable">
       <template #bodyCell="{ column, text, record }">
@@ -67,6 +67,7 @@
               <span v-else-if="resource.name==='CiscoVnmc' && title==='listCiscoAsa1000vResources'">
                 {{ $t('label.delete.ciscoasa1000v') }}
               </span>
+              <span v-else-if="resource.name==='ExternalNetwork'">{{ $t('label.delete.external.network.device') }}</span>
             </template>
             <tooltip-button
               v-if="resource.name==='Ovs'"
@@ -85,6 +86,12 @@
               :loading="actionLoading"
               @onClick="onDelete(record)"/>
           </a-tooltip>
+        </template>
+        <template v-if="column.key === 'details'">
+          <span v-if="text && typeof text === 'object'">
+            <a-tag v-for="(val, key) in text" :key="key" style="margin-bottom: 2px;">{{ key }}: {{ val }}</a-tag>
+          </span>
+          <span v-else>{{ text }}</span>
         </template>
         <template v-if="column.key === 'lbdevicestate'">
           <status :text="text ? text : ''" displayText />
@@ -268,6 +275,13 @@ export default {
 
           name = record.hostname
           params.resourceid = record.resourceid
+          break
+        case 'ExternalNetwork':
+          label = 'label.delete.external.network.device'
+          name = record.host
+          apiName = 'deleteExternalNetworkDevice'
+          confirmation = 'message.confirm.delete.external.network.device'
+          params.physicalnetworkid = record.physicalnetworkid
           break
         default:
           break

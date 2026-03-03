@@ -60,10 +60,10 @@
             <a-radio-button value="isolated">
               {{ $t('label.isolated') }}
             </a-radio-button>
-            <a-radio-button value="l2" v-if="form.provider !== 'NSX' && form.provider !== 'Netris'">
+            <a-radio-button value="l2" v-if="form.provider !== 'NSX' && form.provider !== 'Netris' && form.provider !== 'ExternalNetwork'">
               {{ $t('label.l2') }}
             </a-radio-button>
-            <a-radio-button value="shared" v-if="form.provider !== 'NSX' && form.provider !== 'Netris'">
+            <a-radio-button value="shared" v-if="form.provider !== 'NSX' && form.provider !== 'Netris' && form.provider !== 'ExternalNetwork'">
               {{ $t('label.shared') }}
             </a-radio-button>
           </a-radio-group>
@@ -137,7 +137,17 @@
                 :placeholder="apiParams.provider.description" >
                 <a-select-option :value="'NSX'" :label="$t('label.nsx')"> {{ $t('label.nsx') }} </a-select-option>
                 <a-select-option :value="'Netris'" :label="$t('label.netris')"> {{ $t('label.netris') }} </a-select-option>
-              </a-select>
+                <a-select-option :value="'ExternalNetwork'" :label="$t('label.external.network')"> {{ $t('label.external.network') }} </a-select-option>
+                <!-- Dynamic extension-based providers registered to guest physical networks -->
+                <!-- Note: value must be 'ExternalNetwork' for NetworkElement routing; name is for display only -->
+                <a-select-option
+                  v-for="ext in availableExtensionProviders"
+                  :key="'ExternalNetwork_' + ext.name"
+                  :value="'ExternalNetwork'"
+                  :label="ext.name">
+                  {{ ext.name }} <span style="color: #aaa">({{ $t('label.external.network.provider') }})</span>
+                </a-select-option>
+            </a-select>
             </a-form-item>
           </a-col>
         </a-row>
@@ -207,7 +217,7 @@
         </a-form-item>
         <a-row :gutter="12">
           <a-col :md="12" :lg="12">
-            <a-form-item name="promiscuousmode" ref="promiscuousmode" v-if="form.provider !== 'NSX' && form.provider !== 'Netris'">
+            <a-form-item name="promiscuousmode" ref="promiscuousmode" v-if="form.provider !== 'NSX' && form.provider !== 'Netris' && form.provider !== 'ExternalNetwork'">
               <template #label>
                 <tooltip-label :title="$t('label.promiscuousmode')" :tooltip="$t('message.network.offering.promiscuous.mode')"/>
               </template>
@@ -302,8 +312,8 @@
                   <CheckBoxSelectPair
                     :resourceKey="item.name"
                     :checkBoxLabel="item.description"
-                    :forExternalNetProvider="form.provider === 'NSX' || form.provider === 'Netris'"
-                    :defaultCheckBoxValue="form.provider === 'NSX' || form.provider === 'Netris'"
+                    :forExternalNetProvider="form.provider === 'NSX' || form.provider === 'Netris' || form.provider === 'ExternalNetwork'"
+                    :defaultCheckBoxValue="form.provider === 'NSX' || form.provider === 'Netris' || form.provider === 'ExternalNetwork'"
                     :selectOptions="!supportedServiceLoading ? item.provider: []"
                     @handle-checkselectpair-change="handleSupportedServiceChange"/>
                 </a-list-item>
@@ -667,8 +677,15 @@ export default {
         description: 'Netris',
         enabled: true
       },
+      ExternalNetwork: {
+        name: 'ExternalNetwork',
+        description: 'External Network',
+        enabled: true
+      },
       nsxSupportedServicesMap: {},
-      netrisSupportedServicesMap: {}
+      netrisSupportedServicesMap: {},
+      externalNetworkSupportedServicesMap: {},
+      availableExtensionProviders: []
     }
   },
   beforeCreate () {
@@ -730,6 +747,19 @@ export default {
       this.fetchServiceOfferingData()
       this.fetchIpv6NetworkOfferingConfiguration()
       this.fetchRoutedNetworkConfiguration()
+      this.fetchExtensionProviders()
+    },
+    fetchExtensionProviders () {
+      // Load all NetworkOrchestrator extensions that are registered to any physical network
+      // These appear as additional selectable providers in the provider dropdown
+      getAPI('listExtensions', { type: 'NetworkOrchestrator' }).then(json => {
+        const allExts = (json.listextensionsresponse && json.listextensionsresponse.extension) || []
+        // Filter to those that have at least one physical network registration
+        // For simplicity, show all enabled NetworkOrchestrator extensions
+        this.availableExtensionProviders = allExts.filter(e => e.state === 'Enabled')
+      }).catch(() => {
+        this.availableExtensionProviders = []
+      })
     },
     isAdmin () {
       return isAdmin()
@@ -941,6 +971,8 @@ export default {
             return Object.keys(this.nsxSupportedServicesMap).includes(svc.name)
           } else if (this.provider === 'Netris') {
             return Object.keys(this.netrisSupportedServicesMap).includes(svc.name)
+          } else if (this.provider === 'ExternalNetwork') {
+            return Object.keys(this.externalNetworkSupportedServicesMap).includes(svc.name)
           }
         })
         supportedServices = supportedServices.map(svc => {
@@ -949,6 +981,8 @@ export default {
               svc.provider = [this.NSX]
             } else if (this.provider === 'Netris') {
               svc.provider = [this.Netris]
+            } else if (this.provider === 'ExternalNetwork') {
+              svc.provider = [this.ExternalNetwork]
             }
           } else {
             if (this.forVpc) {
@@ -1027,8 +1061,46 @@ export default {
           ...(this.forVpc && { NetworkACL: this.Netris }),
           ...(!this.forVpc && { Firewall: this.Netris })
         }
+      } else if (this.provider === 'ExternalNetwork') {
+        // ExternalNetwork or any dynamic extension provider:
+        // Services come from the extension's network.capabilities.
+        const extProviderObj = {
+          name: 'ExternalNetwork',
+          description: 'External Network',
+          enabled: true
+        }
+        const svcMap = { Dhcp: this.VR, Dns: this.VR, UserData: this.VR }
+        // Try to infer services from the selected extension's capabilities
+        const selectedExtName = this.extNetProviderForm && this.extNetProviderForm.selectedExtName
+        const extDef = this.availableExtensionProviders.find(e => e.name === selectedExtName)
+        const services = this._getExtensionServices(extDef)
+        if (services.length > 0) {
+          services.forEach(svc => {
+            if (!['Dhcp', 'Dns', 'UserData'].includes(svc)) {
+              svcMap[svc] = extProviderObj
+            }
+          })
+        } else {
+          // Default services if none defined in extension
+          svcMap.SourceNat = extProviderObj
+          svcMap.StaticNat = extProviderObj
+          svcMap.PortForwarding = extProviderObj
+          svcMap.Firewall = extProviderObj
+          svcMap.Gateway = extProviderObj
+        }
+        this.externalNetworkSupportedServicesMap = svcMap
+        this.ExternalNetwork = extProviderObj
       }
       this.fetchSupportedServiceData()
+    },
+    _getExtensionServices (extDef) {
+      if (!extDef || !extDef.details || !extDef.details['network.capabilities']) return []
+      try {
+        const caps = JSON.parse(extDef.details['network.capabilities'])
+        return (caps && caps.services) ? caps.services : []
+      } catch (e) {
+        return []
+      }
     },
     handleForNetworkModeChange (networkMode) {
       this.networkmode = networkMode

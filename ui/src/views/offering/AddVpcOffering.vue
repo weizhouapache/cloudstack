@@ -85,6 +85,15 @@
                 :placeholder="apiParams.provider.description" >
                 <a-select-option :value="'NSX'" :label="$t('label.nsx')"> {{ $t('label.nsx') }} </a-select-option>
                 <a-select-option :value="'Netris'" :label="$t('label.netris')"> {{ $t('label.netris') }} </a-select-option>
+                <!-- Dynamic extension-based providers registered to guest physical networks -->
+                <!-- Note: value must be 'ExternalNetwork' for NetworkElement routing; name is for display only -->
+                <a-select-option
+                  v-for="ext in availableExtensionProviders"
+                  :key="'ExternalNetwork_' + ext.name"
+                  :value="'ExternalNetwork'"
+                  :label="ext.name">
+                  {{ ext.name }} <span style="color: #aaa">({{ $t('label.external.network.provider') }})</span>
+                </a-select-option>
               </a-select>
             </a-form-item>
           </a-col>
@@ -327,7 +336,8 @@ export default {
         description: 'Netris',
         enabled: true
       },
-      nsxSupportedServicesMap: {}
+      nsxSupportedServicesMap: {},
+      availableExtensionProviders: []
     }
   },
   beforeCreate () {
@@ -374,6 +384,15 @@ export default {
       this.fetchSupportedServiceData()
       this.fetchIpv6NetworkOfferingConfiguration()
       this.fetchRoutedNetworkConfiguration()
+      this.fetchExtensionProviders()
+    },
+    fetchExtensionProviders () {
+      getAPI('listExtensions', { type: 'NetworkOrchestrator' }).then(json => {
+        const allExts = (json.listextensionsresponse && json.listextensionsresponse.extension) || []
+        this.availableExtensionProviders = allExts.filter(e => e.state === 'Enabled')
+      }).catch(() => {
+        this.availableExtensionProviders = []
+      })
     },
     isAdmin () {
       return isAdmin()

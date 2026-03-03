@@ -143,6 +143,10 @@ import com.cloud.utils.db.SearchBuilder;
 import com.cloud.utils.db.SearchCriteria;
 import com.cloud.utils.db.Transaction;
 import com.cloud.utils.db.TransactionCallbackWithException;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineManager;
@@ -670,24 +674,67 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         Long id = cmd.getExtensionId();
         String name = cmd.getName();
         String keyword = cmd.getKeyword();
+        String typeStr = cmd.getType();
+        String resourceIdStr = cmd.getResourceId();
+        String resourceTypeStr = cmd.getResourceType();
+
+        // If resourceId + resourceType are specified, return only extensions registered to that resource
+        if (StringUtils.isNotBlank(resourceIdStr) && StringUtils.isNotBlank(resourceTypeStr)) {
+            if (!EnumUtils.isValidEnum(ExtensionResourceMap.ResourceType.class, resourceTypeStr)) {
+                throw new InvalidParameterValueException("Invalid resourcetype: " + resourceTypeStr);
+            }
+            ExtensionResourceMap.ResourceType resType = ExtensionResourceMap.ResourceType.valueOf(resourceTypeStr);
+            // Resolve resourceId to a DB id
+            long resolvedResourceId;
+            if (ExtensionResourceMap.ResourceType.PhysicalNetwork.equals(resType)) {
+                PhysicalNetworkVO pn = physicalNetworkDao.findByUuid(resourceIdStr);
+                if (pn == null) {
+                    try { pn = physicalNetworkDao.findById(Long.parseLong(resourceIdStr)); } catch (NumberFormatException ignored) {}
+                }
+                if (pn == null) throw new InvalidParameterValueException("Invalid physical network ID: " + resourceIdStr);
+                resolvedResourceId = pn.getId();
+            } else {
+                try { resolvedResourceId = Long.parseLong(resourceIdStr); } catch (NumberFormatException e) {
+                    throw new InvalidParameterValueException("Invalid resource ID: " + resourceIdStr);
+                }
+            }
+            List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(resolvedResourceId, resType);
+            List<ExtensionResponse> responses = new ArrayList<>();
+            for (ExtensionResourceMapVO map : maps) {
+                ExtensionVO ext = extensionDao.findById(map.getExtensionId());
+                if (ext == null) continue;
+                if (typeStr != null && !typeStr.equalsIgnoreCase(ext.getType().name())) continue;
+                if (name != null && !name.equalsIgnoreCase(ext.getName())) continue;
+                responses.add(createExtensionResponse(ext, cmd.getDetails()));
+            }
+            return responses;
+        }
+
         final SearchBuilder<ExtensionVO> sb = extensionDao.createSearchBuilder();
         final Filter searchFilter = new Filter(ExtensionVO.class, "id", false, cmd.getStartIndex(), cmd.getPageSizeVal());
 
         sb.and("id", sb.entity().getId(), SearchCriteria.Op.EQ);
         sb.and("name", sb.entity().getName(), SearchCriteria.Op.EQ);
         sb.and("keyword", sb.entity().getName(), SearchCriteria.Op.LIKE);
+        sb.and("type", sb.entity().getType(), SearchCriteria.Op.EQ);
+        sb.done();
         final SearchCriteria<ExtensionVO> sc = sb.create();
 
         if (id != null) {
             sc.setParameters("id", id);
         }
-
         if (name != null) {
             sc.setParameters("name", name);
         }
-
         if (keyword != null) {
             sc.setParameters("keyword",  "%" + keyword + "%");
+        }
+        if (typeStr != null) {
+            Extension.Type type = EnumUtils.getEnum(Extension.Type.class, typeStr);
+            if (type == null) {
+                throw new InvalidParameterValueException("Invalid type: " + typeStr);
+            }
+            sc.setParameters("type", type);
         }
 
         final Pair<List<ExtensionVO>, Integer> result = extensionDao.searchAndCount(sc, searchFilter);
@@ -903,20 +950,29 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     protected ExtensionResourceMap registerExtensionWithPhysicalNetwork(PhysicalNetworkVO physicalNetwork,
                   Extension extension, Map<String, String> details) {
+        // Only NetworkOrchestrator extensions can be registered with physical networks
+        if (!Extension.Type.NetworkOrchestrator.equals(extension.getType())) {
+            throw new InvalidParameterValueException(String.format(
+                    "Only extensions of type %s can be registered with a physical network. "
+                    + "Extension '%s' is of type %s.",
+                    Extension.Type.NetworkOrchestrator.name(),
+                    extension.getName(), extension.getType().name()));
+        }
+
+        // Block registering the exact same extension twice on the same physical network
         final ExtensionResourceMap.ResourceType resourceType = ExtensionResourceMap.ResourceType.PhysicalNetwork;
-        ExtensionResourceMapVO existing =
-                extensionResourceMapDao.findByResourceIdAndType(physicalNetwork.getId(), resourceType);
+        List<ExtensionResourceMapVO> existing = extensionResourceMapDao.listByResourceIdAndType(
+                physicalNetwork.getId(), resourceType);
         if (existing != null) {
-            if (existing.getExtensionId() == extension.getId()) {
-                throw new CloudRuntimeException(String.format(
-                        "Extension: %s is already registered with this physical network: %s",
-                        extension.getName(), physicalNetwork.getId()));
-            } else {
-                throw new CloudRuntimeException(String.format(
-                        "An extension is already registered with this physical network: %s",
-                        physicalNetwork.getId()));
+            for (ExtensionResourceMapVO ex : existing) {
+                if (ex.getExtensionId() == extension.getId()) {
+                    throw new CloudRuntimeException(String.format(
+                            "Extension '%s' is already registered with physical network %s",
+                            extension.getName(), physicalNetwork.getId()));
+                }
             }
         }
+
         return Transaction.execute((TransactionCallbackWithException<ExtensionResourceMap, CloudRuntimeException>) status -> {
             ExtensionResourceMapVO extensionMap = new ExtensionResourceMapVO(extension.getId(),
                     physicalNetwork.getId(), resourceType);
@@ -924,13 +980,108 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             List<ExtensionResourceMapDetailsVO> detailsVOList = new ArrayList<>();
             if (MapUtils.isNotEmpty(details)) {
                 for (Map.Entry<String, String> entry : details.entrySet()) {
+                    // Sensitive keys (password, sshkey) stored with display=false
+                    boolean display = !SENSITIVE_DETAIL_KEYS.contains(entry.getKey().toLowerCase());
                     detailsVOList.add(new ExtensionResourceMapDetailsVO(savedExtensionMap.getId(),
-                            entry.getKey(), entry.getValue()));
+                            entry.getKey(), entry.getValue(), display));
                 }
                 extensionResourceMapDetailsDao.saveDetails(detailsVOList);
             }
             return extensionMap;
         });
+    }
+
+    /** Keys that are always stored with display=false (sensitive). */
+    private static final java.util.Set<String> SENSITIVE_DETAIL_KEYS =
+            java.util.Set.of("password", "sshkey");
+
+    /**
+     * Validates that the comma-separated or JSON-array {@code servicesValue} is a
+     * subset of the services declared in the extension's {@code network.capabilities}
+     * detail.  Throws {@link InvalidParameterValueException} if any service in the
+     * request is not offered by the extension.
+     */
+    protected void validateNetworkServicesSubset(Extension extension, String servicesValue) {
+        if (StringUtils.isBlank(servicesValue)) {
+            return;
+        }
+        // Parse the extension's network.capabilities JSON to get the declared services
+        Map<String, String> extDetails = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
+        if (extDetails == null || !extDetails.containsKey("network.capabilities")) {
+            // No capabilities declared → accept any services
+            return;
+        }
+        String capsJson = extDetails.get("network.capabilities");
+        java.util.Set<String> allowedServices = parseServicesFromCapabilitiesJson(capsJson);
+        if (allowedServices.isEmpty()) {
+            return;
+        }
+
+        // Parse the requested services: either comma-separated string or JSON array
+        List<String> requested = parseServicesList(servicesValue);
+        List<String> invalid = requested.stream()
+                .filter(s -> !allowedServices.contains(s))
+                .collect(java.util.stream.Collectors.toList());
+        if (!invalid.isEmpty()) {
+            throw new InvalidParameterValueException(String.format(
+                    "The following services are not supported by extension '%s': %s. "
+                    + "Supported services are: %s",
+                    extension.getName(), invalid, allowedServices));
+        }
+    }
+
+    /**
+     * Parses the {@code services} array from a {@code network.capabilities} JSON string.
+     * Returns an empty set if parsing fails or services are not defined.
+     */
+    private java.util.Set<String> parseServicesFromCapabilitiesJson(String json) {
+        if (StringUtils.isBlank(json)) {
+            return java.util.Collections.emptySet();
+        }
+        try {
+            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+            JsonArray arr = root.getAsJsonArray("services");
+            if (arr == null) {
+                return java.util.Collections.emptySet();
+            }
+            java.util.Set<String> services = new HashSet<>();
+            for (JsonElement el : arr) {
+                services.add(el.getAsString());
+            }
+            return services;
+        } catch (Exception e) {
+            logger.warn("Failed to parse network.capabilities JSON: {}", e.getMessage());
+            return java.util.Collections.emptySet();
+        }
+    }
+
+    /**
+     * Parses a services list from either a comma-separated string (e.g.
+     * {@code "SourceNat,StaticNat"}) or a JSON array (e.g.
+     * {@code ["SourceNat","StaticNat"]}).
+     */
+    private List<String> parseServicesList(String value) {
+        if (StringUtils.isBlank(value)) {
+            return java.util.Collections.emptyList();
+        }
+        value = value.trim();
+        if (value.startsWith("[")) {
+            try {
+                JsonArray arr = JsonParser.parseString(value).getAsJsonArray();
+                List<String> result = new ArrayList<>();
+                for (JsonElement el : arr) {
+                    result.add(el.getAsString().trim());
+                }
+                return result;
+            } catch (Exception e) {
+                // fall through to comma-split
+            }
+        }
+        // Comma-separated
+        return java.util.Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(java.util.stream.Collectors.toList());
     }
 
     @Override
@@ -980,13 +1131,18 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         if (physicalNetwork == null) {
             throw new InvalidParameterValueException("Invalid physical network ID specified");
         }
-        ExtensionResourceMapVO existing = extensionResourceMapDao.findByResourceIdAndType(
+        // Find the specific map entry for this extension+physical-network combination
+        List<ExtensionResourceMapVO> existingList = extensionResourceMapDao.listByResourceIdAndType(
                 physicalNetwork.getId(), ExtensionResourceMap.ResourceType.PhysicalNetwork);
-        if (existing == null) {
+        if (existingList == null || existingList.isEmpty()) {
             return;
         }
-        extensionResourceMapDao.remove(existing.getId());
-        extensionResourceMapDetailsDao.removeDetails(existing.getId());
+        for (ExtensionResourceMapVO existing : existingList) {
+            if (extensionId == null || existing.getExtensionId() == extensionId) {
+                extensionResourceMapDao.remove(existing.getId());
+                extensionResourceMapDetailsDao.removeDetails(existing.getId());
+            }
+        }
     }
 
     @Override
@@ -1687,12 +1843,13 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     @Override
     public Long getExtensionIdForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
+        // Returns the first (primary) extension for backward compatibility
+        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(physicalNetworkId,
                 ExtensionResourceMap.ResourceType.PhysicalNetwork);
-        if (map == null) {
+        if (maps == null || maps.isEmpty()) {
             return null;
         }
-        return map.getExtensionId();
+        return maps.get(0).getExtensionId();
     }
 
     @Override
@@ -1717,10 +1874,27 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         return extensionDetailsDao.listDetailsKeyPairs(extensionId);
     }
 
+    /** Find map entry for a given physicalNetworkId + extensionId combination. */
+    private ExtensionResourceMapVO findMapForPhysicalNetworkAndExtension(long physicalNetworkId, long extensionId) {
+        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(physicalNetworkId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (maps == null) return null;
+        for (ExtensionResourceMapVO m : maps) {
+            if (m.getExtensionId() == extensionId) return m;
+        }
+        return null;
+    }
+
+    /** Find the first map entry for a given physicalNetworkId. */
+    private ExtensionResourceMapVO findFirstMapForPhysicalNetwork(long physicalNetworkId) {
+        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(physicalNetworkId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        return (maps != null && !maps.isEmpty()) ? maps.get(0) : null;
+    }
+
     @Override
     public Map<String, String> getResourceMapDetailsForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        ExtensionResourceMapVO map = findFirstMapForPhysicalNetwork(physicalNetworkId);
         if (map == null) {
             return new java.util.HashMap<>();
         }
@@ -1730,8 +1904,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     @Override
     public Map<String, String> getAllResourceMapDetailsForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        ExtensionResourceMapVO map = findFirstMapForPhysicalNetwork(physicalNetworkId);
         if (map == null) {
             return new java.util.HashMap<>();
         }
@@ -1741,8 +1914,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     @Override
     public Long getResourceMapIdForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        ExtensionResourceMapVO map = findFirstMapForPhysicalNetwork(physicalNetworkId);
         return map != null ? map.getId() : null;
     }
 
@@ -1774,6 +1946,23 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     @Override
     public List<Long> listPhysicalNetworkIdsWithExtension() {
         return extensionResourceMapDao.listResourceIdsByType(ExtensionResourceMap.ResourceType.PhysicalNetwork);
+    }
+
+    @Override
+    public List<Extension> listExtensionsForPhysicalNetwork(long physicalNetworkId) {
+        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(
+                physicalNetworkId, ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (maps == null || maps.isEmpty()) {
+            return new ArrayList<>();
+        }
+        List<Extension> result = new ArrayList<>();
+        for (ExtensionResourceMapVO map : maps) {
+            ExtensionVO ext = extensionDao.findById(map.getExtensionId());
+            if (ext != null) {
+                result.add(ext);
+            }
+        }
+        return result;
     }
 
     @Override

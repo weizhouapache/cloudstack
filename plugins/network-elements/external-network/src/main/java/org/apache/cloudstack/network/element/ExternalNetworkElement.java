@@ -19,6 +19,7 @@ package org.apache.cloudstack.network.element;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -161,13 +162,92 @@ public class ExternalNetworkElement extends AdapterBase implements
      * @param extensionId the extension ID
      * @return parsed capabilities map
      */
-    protected Map<Service, Map<Capability, String>> getCapabilitiesFromExtension(long extensionId) {
+    public Map<Service, Map<Capability, String>> getCapabilitiesFromExtension(long extensionId) {
         Map<String, String> details = extensionHelper.getExtensionDetails(extensionId);
         if (details == null || !details.containsKey(NETWORK_CAPABILITIES_DETAIL_KEY)) {
             return DEFAULT_CAPABILITIES;
         }
         String json = details.get(NETWORK_CAPABILITIES_DETAIL_KEY);
         return parseNetworkCapabilitiesJson(json);
+    }
+
+    /**
+     * Returns the effective capabilities for a specific physical network, which
+     * is the intersection of:
+     * <ol>
+     *   <li>The extension-level {@code network.capabilities} JSON (what the
+     *       extension can do in total), and</li>
+     *   <li>The {@code services} detail stored in
+     *       {@code extension_resource_map_details} when the extension was
+     *       registered with this physical network (what was enabled per
+     *       physical network).</li>
+     * </ol>
+     *
+     * <p>If no {@code services} detail is set on the resource map, all
+     * extension-level capabilities are returned unchanged.</p>
+     *
+     * @param physicalNetworkId the physical network ID
+     * @return effective capabilities map for this physical network
+     */
+    public Map<Service, Map<Capability, String>> getCapabilitiesForPhysicalNetwork(long physicalNetworkId) {
+        Extension extension = extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
+        if (extension == null) {
+            return DEFAULT_CAPABILITIES;
+        }
+
+        // Start with extension-level capabilities
+        Map<Service, Map<Capability, String>> extCaps = getCapabilitiesFromExtension(extension.getId());
+
+        // Check if a 'services' subset was declared at registration time
+        Map<String, String> resourceMapDetails =
+                extensionHelper.getResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
+        String servicesValue = resourceMapDetails != null ? resourceMapDetails.get("services") : null;
+        if (servicesValue == null || servicesValue.isBlank()) {
+            // No restriction — return full extension capabilities
+            return extCaps;
+        }
+
+        // Parse the registered services list
+        Set<String> enabledServiceNames = new HashSet<>(parseServicesList(servicesValue));
+        if (enabledServiceNames.isEmpty()) {
+            return extCaps;
+        }
+
+        // Filter to only the services in the enabled set
+        Map<Service, Map<Capability, String>> filtered = new HashMap<>();
+        for (Map.Entry<Service, Map<Capability, String>> entry : extCaps.entrySet()) {
+            if (enabledServiceNames.contains(entry.getKey().getName())) {
+                filtered.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return filtered.isEmpty() ? extCaps : filtered;
+    }
+
+    /**
+     * Parses a comma-separated or JSON-array services value into a list.
+     */
+    private List<String> parseServicesList(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        value = value.trim();
+        if (value.startsWith("[")) {
+            try {
+                com.google.gson.JsonArray arr =
+                        com.google.gson.JsonParser.parseString(value).getAsJsonArray();
+                List<String> result = new ArrayList<>();
+                for (com.google.gson.JsonElement el : arr) {
+                    result.add(el.getAsString().trim());
+                }
+                return result;
+            } catch (Exception e) {
+                // fall through to comma-split
+            }
+        }
+        return java.util.Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(java.util.stream.Collectors.toList());
     }
 
     /**

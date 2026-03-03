@@ -1488,6 +1488,55 @@ export default {
           groupMap: (selection) => { return selection.map(x => { return { id: x } }) }
         }
       ]
+    },
+    {
+      name: 'externalnetworkdevice',
+      title: 'label.external.network.devices',
+      icon: 'cluster-outlined',
+      docHelp: 'adminguide/networking_and_traffic.html',
+      permission: ['listExternalNetworkDevices'],
+      columns: ['host', 'port', 'physicalnetworkid'],
+      details: ['host', 'port', 'physicalnetworkid'],
+      searchFilters: ['physicalnetworkid'],
+      show: () => { return isAdmin() && 'listExternalNetworkDevices' in store.getters.apis },
+      tabs: [
+        {
+          name: 'details',
+          component: shallowRef(defineAsyncComponent(() => import('@/components/view/DetailsTab.vue')))
+        }
+      ],
+      actions: [
+        {
+          api: 'addExternalNetworkDevice',
+          icon: 'plus-outlined',
+          label: 'label.add.external.network.device',
+          listView: true,
+          popup: true,
+          component: shallowRef(defineAsyncComponent(() => import('@/views/network/AddExternalNetworkDevice.vue')))
+        },
+        {
+          api: 'updateExternalNetworkDevice',
+          icon: 'edit-outlined',
+          label: 'label.edit',
+          dataView: true,
+          args: ['host', 'port'],
+          mapping: {
+            physicalnetworkid: {
+              value: (record) => { return record.physicalnetworkid }
+            }
+          }
+        },
+        {
+          api: 'deleteExternalNetworkDevice',
+          icon: 'delete-outlined',
+          label: 'label.delete.external.network.device',
+          message: 'message.confirm.delete.external.network.device',
+          dataView: true,
+          groupAction: true,
+          popup: true,
+          groupMap: (selection) => { return selection.map(x => { return { physicalnetworkid: x } }) }
+        }
+      ]
     }
   ]
 }

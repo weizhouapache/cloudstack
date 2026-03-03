@@ -108,7 +108,7 @@ from nose.plugins.attrib import attr
 
 _multiprocess_shared_ = True
 
-EXTERNAL_NETWORK_PROVIDER_NAME = 'ExternalNetwork'
+EXTERNAL_NETWORK_PROVIDER_NAME = 'ExternalNetwork'  # default fallback; replaced with extension name in tests
 
 # SSH port on the Marvin node that the management server connects to
 MARVIN_SSH_PORT = 22
@@ -493,6 +493,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
     def setUp(self):
         self.cleanup              = []
         self.provider_id          = None
+        self.provider_name        = None
         self.extension            = None
         self.physical_network     = None
         self.extension_path       = None
@@ -772,7 +773,11 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         # Returns the private key PEM to pass to addExternalNetworkDevice
         ssh_key_pem = self._deploy_to_mgmt_server(self.extension_path, MGMT_KEY_PATH)
 
-        # ---- Step 8a: Register extension with physical network (no credentials here) ----
+        # ---- Step 8a: Register extension with physical network ----
+        # Services are automatically derived from extension's network.capabilities.
+        # No need to pass 'services' detail — it is no longer validated or required.
+        # Device credentials (host, port, username, sshkey) are stored separately
+        # via addExternalNetworkDevice (step 8b).
         self.extension.register(
             self.apiclient,
             self.physical_network.id,
@@ -780,6 +785,9 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         )
         self.logger.info("Extension registered to physical network %s",
                          self.physical_network.id)
+
+        # The NSP name is now the extension's name (not hardcoded 'ExternalNetwork')
+        provider_name = ext_name
 
         # ---- Step 8b: Add external network device via addExternalNetworkDevice ----
         # Device details (host, port, username, sshkey) are stored as
@@ -825,25 +833,29 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.logger.info("External network device updated: port=%s", updated.port)
 
         # ---- Step 9: Add + enable ExternalNetwork provider ----
-        provider = self._find_provider(self.physical_network.id,
-                                       EXTERNAL_NETWORK_PROVIDER_NAME)
+        # NSP must be named 'ExternalNetwork' so that the NetworkElement.canHandle() works.
+        # The extension name is used for UI display only (shown as the tab label).
+        # Services come from the extension's network.capabilities automatically.
+        provider_name = EXTERNAL_NETWORK_PROVIDER_NAME  # always 'ExternalNetwork'
+        provider = self._find_provider(self.physical_network.id, provider_name)
         if provider is None:
             provider = self._add_provider(
                 self.physical_network.id,
-                EXTERNAL_NETWORK_PROVIDER_NAME,
-                service_list=['SourceNat', 'StaticNat',
-                              'PortForwarding', 'Firewall', 'Gateway']
+                provider_name
             )
         self.provider_id = provider.id
+        self.provider_name = provider_name
         if provider.state != 'Enabled':
             self._update_provider_state(provider.id, 'Enabled')
         self.assertEqual('Enabled',
-            self._find_provider(self.physical_network.id,
-                                EXTERNAL_NETWORK_PROVIDER_NAME).state)
+            self._find_provider(self.physical_network.id, provider_name).state)
+        self.logger.info("Provider '%s' enabled", provider_name)
 
         # ---- Step 10: Create network offering ----
+        # serviceProviderList must use 'ExternalNetwork' — that's the Provider.getName()
+        # that ExternalNetworkElement.getProvider() returns.
         nw_offering = NetworkOffering.create(self.apiclient, {
-            "name":             "ExtNet-Offering",
+            "name":             "ExtNet-Offering-%s" % random_gen(),
             "displaytext":      "ExtNet Offering (netns smoke test)",
             "guestiptype":      "Isolated",
             "traffictype":      "GUEST",
