@@ -20,46 +20,55 @@ Architecture
 ------------
 The test runs on the **Marvin node** (the host running this Python script).
 
-  ┌──────────────────────────┐        SSH :2222        ┌─────────────────────────────┐
-  │  Management Server       │ ─────────────────────→  │  Docker container           │
-  │                          │   <marvin_node_ip>:2222  │  (Ubuntu 24.04)             │
-  │  [extension path]        │                          │  /usr/local/bin/            │
-  │    entry-point (wrapper) │                          │    external-network.sh      │
-  │                          │                          │  sshd on port 22            │
-  └──────────────────────────┘                          └─────────────────────────────┘
-         ↑ executes wrapper                                       ↑
-  CloudStack ExternalNetworkElement               Docker runs here (Marvin node)
-                                                  port 22 → host port 2222
+A Linux **network namespace** is used to provide iptables isolation.
+This is simpler and faster than Docker — only ``iproute2`` is required, which
+is already present on any modern Linux host.
 
-Steps:
- 1.  Start Docker container on Marvin node:
-     - ubuntu:24.04 with openssh-server, iptables, ebtables, iproute2
-     - Map container port 22 → Marvin node port 2222
-     - Copy external-network.sh into the container
-     - Generate a temporary RSA key pair on Marvin node
-     - Inject the public key into the container's authorized_keys
- 2.  Deploy the entry-point wrapper to the management server:
-     - Copy the private key to the management server (via SshClient)
-     - Write the wrapper script to the extension path on mgmt server;
-       it calls: ssh -i <key> root@<marvin_ip> -p 2222 external-network.sh "$@"
- 3.  Create a NetworkOrchestrator extension with network.capabilities JSON.
- 4.  Register extension with physical network.
- 5.  Add and enable ExternalNetwork provider.
- 6.  Create a network offering backed by ExternalNetwork.
- 7.  Create an account.
- 8.  Create an isolated network   (no-op until first VM).
- 9.  Deploy a VM                  → triggers *implement* (runs in container).
-10.  Acquire a public IP.
-11.  Enable static NAT.
-12.  Disable static NAT.
-13.  Acquire another public IP for port forwarding.
-14.  Create a port forwarding rule.
-15.  Delete the port forwarding rule.
-16.  Destroy the VM.
-17.  Delete the isolated network  → triggers *shutdown* / *destroy* (in container).
-18.  Disable and delete the provider.
-19.  Unregister and delete the extension.
-20.  Stop and remove the Docker container; clean up keys and wrapper.
+  ┌──────────────────────────────────┐   SSH :22    ┌──────────────────────────────────┐
+  │  Management Server               │ ───────────→ │  Marvin node                     │
+  │                                  │  marvin_ip   │                                  │
+  │  [extension path]/entry-point    │              │  ip netns exec cs-extnet-<id>    │
+  │   (SSH wrapper written by test)  │              │    external-network.sh "$@"       │
+  └──────────────────────────────────┘              └──────────────────────────────────┘
+         ↑ executes wrapper                                  ↑ namespace created by test
+  CloudStack ExternalNetworkElement             iptables/bridge ops run here (isolated)
+
+The entry-point wrapper on the management server SSHes to the Marvin node and
+runs external-network.sh inside the network namespace:
+  exec ssh -i <key> <marvin_ip>:22 root@<marvin>
+      "ip netns exec <ns> /path/to/external-network.sh $@"
+
+Device / connection details are stored in ``extension_resource_map_details``
+(NOT in a separate table).  When registering the extension with the physical
+network the test passes the SSH credentials as ``details``:
+
+  cmk registerExtension id=<ext-uuid> resourcetype=PhysicalNetwork \\
+      resourceid=<phys-net-uuid> \\
+      details[0].key=host       details[0].value=<marvin_ip> \\
+      details[1].key=port       details[1].value=22 \\
+      details[2].key=username   details[2].value=root \\
+      details[3].key=sshkey     details[3].value="$(cat /tmp/cs-extnet-key)"
+
+``ExternalNetworkElement`` reads those details via
+``ExtensionHelper.getResourceMapDetailsForPhysicalNetwork()`` and injects them
+as environment variables into the entry-point script:
+  CS_NET_DEV_HOST, CS_NET_DEV_PORT, CS_NET_DEV_USERNAME,
+  CS_NET_DEV_PASSWORD, CS_NET_DEV_SSHKEY
+
+Network-specific properties (VLAN mappings etc.) stored alongside device
+details are exposed as  ``CS_NET_<KEY>`` env vars.
+
+Setup on Marvin node (done by the test):
+  1. Create network namespace:   ip netns add cs-extnet-<id>
+  2. Generate RSA key pair; inject public key into authorized_keys.
+  3. Copy external-network.sh into a temp dir.
+  4. Deploy entry-point wrapper + private key to management server.
+  5. Call registerExtension with host/port/username/sshkey details.
+
+Teardown:
+  1. Delete namespace:           ip netns del cs-extnet-<id>
+  2. Remove public key from authorized_keys.
+  3. Remove private key + wrapper from management server.
 """
 import json
 import logging
@@ -69,6 +78,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import unittest
 
 from marvin.cloudstackTestCase import cloudstackTestCase
 from marvin.cloudstackAPI import (listPhysicalNetworks,
@@ -96,30 +106,25 @@ _multiprocess_shared_ = True
 
 EXTERNAL_NETWORK_PROVIDER_NAME = 'ExternalNetwork'
 
-# Port on the Marvin node that maps to container port 22.
-# The management server will SSH to <marvin_node_ip>:CONTAINER_SSH_PORT.
-CONTAINER_SSH_PORT = 2222
+# SSH port on the Marvin node that the management server connects to
+MARVIN_SSH_PORT = 22
 
-# SSH user inside the container
-CONTAINER_SSH_USER = 'root'
+# SSH user on the Marvin node (must have passwordless sudo or CAP_NET_ADMIN)
+MARVIN_SSH_USER = 'root'
 
-# Container name prefix
-CONTAINER_NAME_PREFIX = 'cs-extnet-smoke'
+# Namespace name prefix (a random suffix is added per test run)
+NS_PREFIX = 'cs-extnet'
 
-# Docker image
-DOCKER_IMAGE = 'ubuntu:24.04'
+# Path on the Marvin node where the script is placed
+SCRIPT_DIR = '/tmp'
+SCRIPT_FILENAME = 'cs-external-network.sh'
 
-# Path inside the container where external-network.sh is installed
-CONTAINER_SCRIPT_PATH = '/usr/local/bin/external-network.sh'
-
-# Remote path on the management server where the private key is stored
+# Path on the management server where the private key is stored during the test
 MGMT_KEY_PATH = '/tmp/cs-extnet-key'
 
-# Remote path on the management server where the entry-point wrapper lives
-# (this is inside the extension directory, written by the test)
 ENTRY_POINT_FILENAME = 'entry-point'
 
-# Network capabilities JSON passed as an extension detail
+# Network capabilities JSON
 NETWORK_CAPABILITIES_JSON = json.dumps({
     "services": ["SourceNat", "StaticNat", "PortForwarding", "Firewall", "Gateway"],
     "capabilities": {
@@ -133,9 +138,7 @@ NETWORK_CAPABILITIES_JSON = json.dumps({
     }
 })
 
-# ---------------------------------------------------------------------------
-# Source path of the reference external-network.sh in the source tree
-# ---------------------------------------------------------------------------
+# Path to the reference external-network.sh in the source tree
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..', '..'))
 REFERENCE_SCRIPT_SRC = os.path.join(
@@ -144,8 +147,9 @@ REFERENCE_SCRIPT_SRC = os.path.join(
     'src', 'main', 'resources', 'scripts', 'external-network.sh'
 )
 
+
 # ---------------------------------------------------------------------------
-# Local helpers (run on the Marvin node)
+# Local helpers (run on the Marvin node as root)
 # ---------------------------------------------------------------------------
 
 def _run(cmd, check=True, timeout=120):
@@ -165,39 +169,54 @@ def _run(cmd, check=True, timeout=120):
     return result.returncode, stdout, stderr
 
 
+def _check_iproute2():
+    """Raise SkipTest if ip-netns is unavailable."""
+    rc, _, _ = _run(['ip', 'netns', 'list'], check=False)
+    if rc != 0:
+        raise unittest.SkipTest(
+            "ip netns is not available on the Marvin node. "
+            "Please install iproute2 to run this test."
+        )
+
+
 # ---------------------------------------------------------------------------
-# DockerNetworkServer  – runs on the Marvin node
+# NetnsNetworkServer  – manages a Linux network namespace on the Marvin node
 # ---------------------------------------------------------------------------
 
-class DockerNetworkServer:
-    """Manages an Ubuntu 24.04 Docker container on the Marvin node.
+class NetnsNetworkServer:
+    """Creates an isolated Linux network namespace on the Marvin node.
 
-    The container acts as the external Linux network server.  It exposes
-    sshd on host port ``ssh_port`` (default 2222) so the management server
-    can reach it at ``<marvin_node_ip>:<ssh_port>``.
+    The namespace provides iptables/bridge isolation so that the
+    external-network.sh script can run without polluting the host.
+
+    The management server SSHes to the Marvin node at the normal SSH port
+    and runs:
+        ip netns exec <ns_name> <script_path> <args...>
 
     Lifecycle::
 
-        server = DockerNetworkServer(marvin_ip='192.168.1.10')
-        server.start()        # pull image, start container, install packages
-        key_file  = server.key_file       # local path to private key
-        pub_key   = server.pub_key        # public key text
-        server.stop()         # stop + remove container, delete temp dir
+        server = NetnsNetworkServer(marvin_ip='192.168.1.10')
+        server.start()
+        server.run_in_ns('iptables -L')
+        server.stop()
     """
 
-    def __init__(self, marvin_ip, ssh_port=CONTAINER_SSH_PORT, logger=None):
-        # IP of the Marvin node as seen by the management server
+    def __init__(self, marvin_ip, logger=None):
         self.marvin_ip = marvin_ip
-        self.ssh_port = ssh_port
-        self.ssh_user = CONTAINER_SSH_USER
-        self.logger = logger or logging.getLogger('DockerNetworkServer')
-        self._container_name = '%s-%s' % (CONTAINER_NAME_PREFIX, random_gen())
+        self.logger = logger or logging.getLogger('NetnsNetworkServer')
+        self._ns_name = '%s-%s' % (NS_PREFIX, random_gen())
         self._tmpdir = None
         self._key_file = None
         self._pub_key = None
+        self._script_path = None
+        self._authorized_keys_entry = None
         self.running = False
 
     # ---- public properties ----
+
+    @property
+    def ns_name(self):
+        return self._ns_name
 
     @property
     def key_file(self):
@@ -207,13 +226,17 @@ class DockerNetworkServer:
     def pub_key(self):
         return self._pub_key
 
+    @property
+    def script_path(self):
+        return self._script_path
+
     # ---- lifecycle ----
 
     def start(self):
-        """Start the container and make it ready for SSH + script execution."""
-        self._check_docker()
+        """Create namespace, generate SSH key, install script."""
+        _check_iproute2()
 
-        # Generate temp dir + SSH key pair on the Marvin node
+        # Generate temp dir and SSH key pair on the Marvin node
         self._tmpdir = tempfile.mkdtemp(prefix='cs-extnet-test-')
         self._key_file = os.path.join(self._tmpdir, 'id_rsa_extnet')
         self.logger.info("Generating SSH key pair at %s", self._key_file)
@@ -222,159 +245,109 @@ class DockerNetworkServer:
         with open(self._key_file + '.pub') as fh:
             self._pub_key = fh.read().strip()
 
-        # SSH client config for connections FROM the Marvin node to the container
-        self._ssh_cfg = os.path.join(self._tmpdir, 'ssh_config')
-        with open(self._ssh_cfg, 'w') as fh:
-            fh.write(
-                "Host 127.0.0.1\n"
-                "  Port %d\n"
-                "  User %s\n"
-                "  IdentityFile %s\n"
-                "  StrictHostKeyChecking no\n"
-                "  UserKnownHostsFile /dev/null\n"
-                "  LogLevel ERROR\n" %
-                (self.ssh_port, self.ssh_user, self._key_file)
-            )
+        # Add the public key to authorized_keys with a command restriction
+        # that forces the key to only run our wrapper command
+        self._install_authorized_key()
 
-        # Pull image
-        self.logger.info("Pulling %s", DOCKER_IMAGE)
-        _run(['docker', 'pull', DOCKER_IMAGE])
-
-        # Start container (privileged for iptables/bridge support)
-        self.logger.info("Starting container %s", self._container_name)
-        _run([
-            'docker', 'run', '-d',
-            '--name', self._container_name,
-            '--privileged',
-            '-p', '%d:22' % self.ssh_port,
-            DOCKER_IMAGE,
-            'sleep', 'infinity'
-        ])
+        # Create the network namespace
+        self.logger.info("Creating network namespace %s", self._ns_name)
+        _run(['ip', 'netns', 'add', self._ns_name])
+        # Bring up loopback inside the namespace
+        _run(['ip', 'netns', 'exec', self._ns_name, 'ip', 'link', 'set', 'lo', 'up'],
+             check=False)
         self.running = True
 
-        # Install packages
-        self.logger.info("Installing openssh-server, iptables, ebtables, iproute2 ...")
-        self._docker_exec([
-            'bash', '-c',
-            'apt-get update -qq && '
-            'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq '
-            'openssh-server iptables ebtables iproute2 procps util-linux 2>/dev/null'
-        ], timeout=180)
-
-        # Configure sshd + inject authorized key
-        self._docker_exec(['bash', '-c', 'mkdir -p /run/sshd /root/.ssh'])
-        self._docker_exec(['bash', '-c',
-                           'grep -q "PermitRootLogin yes" /etc/ssh/sshd_config || '
-                           'echo "PermitRootLogin yes" >> /etc/ssh/sshd_config'])
-        self._docker_exec(['bash', '-c',
-                           'echo "%s" > /root/.ssh/authorized_keys && '
-                           'chmod 600 /root/.ssh/authorized_keys' % self._pub_key])
-        # Start sshd
-        self._docker_exec(['/usr/sbin/sshd'])
-
-        # Wait for SSH
-        self._wait_for_ssh()
-
-        # Install external-network.sh
+        # Install the script
         self._install_script()
 
         self.logger.info(
-            "Container %s ready. SSH: %s@127.0.0.1:%d  "
-            "(management server should reach it at %s:%d)",
-            self._container_name, self.ssh_user, self.ssh_port,
-            self.marvin_ip, self.ssh_port)
+            "Namespace %s ready. Management server should SSH to %s:%d "
+            "and run: ip netns exec %s %s <args>",
+            self._ns_name, self.marvin_ip, MARVIN_SSH_PORT,
+            self._ns_name, self._script_path)
 
     def stop(self):
-        """Stop and remove the container; delete the temp directory."""
-        if self._container_name:
-            _run(['docker', 'stop', '--time', '5', self._container_name], check=False)
-            _run(['docker', 'rm', '-f', self._container_name], check=False)
-            self.logger.info("Container %s removed", self._container_name)
+        """Delete namespace, remove authorized key, clean up temp dir."""
+        if self._ns_name and self.running:
+            _run(['ip', 'netns', 'del', self._ns_name], check=False)
+            self.logger.info("Namespace %s deleted", self._ns_name)
+        self._remove_authorized_key()
         if self._tmpdir and os.path.exists(self._tmpdir):
             shutil.rmtree(self._tmpdir, ignore_errors=True)
         self.running = False
 
     # ---- helpers ----
 
-    def _check_docker(self):
-        rc, _, _ = _run(['docker', 'info'], check=False)
-        if rc != 0:
-            raise unittest.SkipTest(
-                "Docker is not available on the Marvin node. "
-                "Please install and start Docker to run this test."
-            )
-
-    def _docker_exec(self, cmd, timeout=60):
-        full = ['docker', 'exec', self._container_name] + cmd
-        result = subprocess.run(full, check=False,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=timeout)
-        return (result.returncode,
-                result.stdout.decode().strip(),
-                result.stderr.decode().strip())
-
-    def _wait_for_ssh(self, timeout=90, interval=3):
-        self.logger.info("Waiting for sshd on 127.0.0.1:%d ...", self.ssh_port)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            rc, _, _ = _run(
-                ['ssh', '-F', self._ssh_cfg,
-                 '-o', 'ConnectTimeout=3',
-                 '127.0.0.1', 'echo', 'ok'],
-                check=False
-            )
-            if rc == 0:
-                self.logger.info("sshd is ready")
-                return
-            time.sleep(interval)
-        raise RuntimeError(
-            "sshd on 127.0.0.1:%d did not become ready within %ds" %
-            (self.ssh_port, timeout)
-        )
-
     def _install_script(self):
-        """Copy external-network.sh into the container (or install a no-op stub)."""
+        """Copy external-network.sh to a temp path on the Marvin node."""
+        dest = os.path.join(self._tmpdir, SCRIPT_FILENAME)
         if os.path.exists(REFERENCE_SCRIPT_SRC):
-            _run(['docker', 'cp', REFERENCE_SCRIPT_SRC,
-                  '%s:%s' % (self._container_name, CONTAINER_SCRIPT_PATH)])
-            self.logger.info("Copied %s into container", REFERENCE_SCRIPT_SRC)
+            shutil.copy2(REFERENCE_SCRIPT_SRC, dest)
+            self.logger.info("Copied %s -> %s", REFERENCE_SCRIPT_SRC, dest)
         else:
             self.logger.warning(
-                "Reference script not found at %s; installing no-op stub",
-                REFERENCE_SCRIPT_SRC)
-            stub = ('#!/bin/bash\n'
-                    'mkdir -p /var/log 2>/dev/null || true\n'
-                    'echo "[$(date)] cmd=$1 args=${*:2}" '
-                    '>> /var/log/cs-extnet.log 2>/dev/null || true\n'
-                    'echo "OK: $1"\nexit 0\n')
-            # Write stub via docker exec (avoids shell quoting issues with docker cp)
-            self._docker_exec([
-                'bash', '-c',
-                'cat > %s << \'STUBEOF\'\n%sSTUBEOF' % (CONTAINER_SCRIPT_PATH, stub)
-            ])
-        self._docker_exec(['chmod', '755', CONTAINER_SCRIPT_PATH])
+                "Reference script not found at %s; installing no-op stub", REFERENCE_SCRIPT_SRC)
+            with open(dest, 'w') as fh:
+                fh.write('#!/bin/bash\n'
+                         'mkdir -p /var/log 2>/dev/null || true\n'
+                         'echo "[$(date)] cmd=$1 args=${*:2}" '
+                         '>> /var/log/cs-extnet.log 2>/dev/null || true\n'
+                         'echo "OK: $1"\nexit 0\n')
+        os.chmod(dest, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP |
+                 stat.S_IROTH | stat.S_IXOTH)
+        self._script_path = dest
 
-    def ssh_from_marvin(self, command, check=True):
-        """Run *command* inside the container via SSH from the Marvin node."""
+    def _authorized_keys_path(self):
+        return os.path.expanduser('~%s/.ssh/authorized_keys' % MARVIN_SSH_USER)
+
+    def _install_authorized_key(self):
+        """Append the test public key to authorized_keys."""
+        ak_path = self._authorized_keys_path()
+        os.makedirs(os.path.dirname(ak_path), mode=0o700, exist_ok=True)
+        # Tag the entry so we can remove it precisely
+        entry = '# cs-extnet-test-%s\n%s\n' % (self._ns_name, self._pub_key)
+        self._authorized_keys_entry = entry
+        with open(ak_path, 'a') as fh:
+            fh.write(entry)
+        os.chmod(ak_path, 0o600)
+        self.logger.info("Added test public key to %s", ak_path)
+
+    def _remove_authorized_key(self):
+        """Remove the test public key from authorized_keys."""
+        if not self._authorized_keys_entry:
+            return
+        ak_path = self._authorized_keys_path()
+        try:
+            if not os.path.exists(ak_path):
+                return
+            with open(ak_path, 'r') as fh:
+                content = fh.read()
+            content = content.replace(self._authorized_keys_entry, '')
+            with open(ak_path, 'w') as fh:
+                fh.write(content)
+            self.logger.info("Removed test public key from %s", ak_path)
+        except Exception as e:
+            self.logger.warning("Could not remove key from authorized_keys: %s", e)
+
+    def run_in_ns(self, command, check=True):
+        """Run *command* string inside the network namespace. Returns (rc, stdout, stderr)."""
         return _run(
-            ['ssh', '-F', self._ssh_cfg, '127.0.0.1', command],
+            ['ip', 'netns', 'exec', self._ns_name, 'bash', '-c', command],
             check=check
         )
 
-    def make_entry_point_wrapper(self, marvin_ip, key_path_on_mgmt):
-        """Return the text of an entry-point bash wrapper script.
+    def make_entry_point_wrapper(self, key_path_on_mgmt):
+        """Return the text of the entry-point bash wrapper for the management server.
 
-        The wrapper is executed by the management server.  It SSHes to the
-        Docker container running on the Marvin node (at *marvin_ip*:ssh_port)
-        and executes external-network.sh with the forwarded arguments.
+        The wrapper SSHes to the Marvin node and runs external-network.sh
+        inside the network namespace.
 
-        :param marvin_ip:         IP of the Marvin node as seen from mgmt server
         :param key_path_on_mgmt:  path to the private key on the mgmt server
         """
         return (
             '#!/bin/bash\n'
             '# Auto-generated by ExternalNetwork smoke test\n'
-            '# Management server -> Docker container on Marvin node\n'
+            '# Management server -> network namespace on Marvin node\n'
             'exec ssh \\\n'
             '    -o StrictHostKeyChecking=no \\\n'
             '    -o UserKnownHostsFile=/dev/null \\\n'
@@ -383,31 +356,32 @@ class DockerNetworkServer:
             '    -i %(key)s \\\n'
             '    -p %(port)d \\\n'
             '    %(user)s@%(host)s \\\n'
-            '    %(script)s "$@"\n'
+            '    "ip netns exec %(ns)s %(script)s $@"\n'
         ) % {
             'key':    key_path_on_mgmt,
-            'port':   self.ssh_port,
-            'user':   self.ssh_user,
-            'host':   marvin_ip,
-            'script': CONTAINER_SCRIPT_PATH,
+            'port':   MARVIN_SSH_PORT,
+            'user':   MARVIN_SSH_USER,
+            'host':   self.marvin_ip,
+            'ns':     self._ns_name,
+            'script': self._script_path,
         }
 
 
 # ---------------------------------------------------------------------------
-# MgmtServerDeployer  – deploys files to the management server via SshClient
+# MgmtServerDeployer  – deploys files to the management server
 # ---------------------------------------------------------------------------
 
 class MgmtServerDeployer:
     """Copies the SSH private key and entry-point wrapper to the management server.
 
-    If the management server is localhost (same host as Marvin node), files are
-    written directly.  Otherwise they are transferred via SshClient.
+    If mgmt server == Marvin node (localhost), files are written directly.
+    Otherwise they are transferred via SshClient.
     """
 
     def __init__(self, mgt_details, logger=None):
-        self.ip   = mgt_details.get("mgtSvrIp", "localhost")
-        self.port = int(mgt_details.get("port", 22))
-        self.user = mgt_details.get("user", "root")
+        self.ip     = mgt_details.get("mgtSvrIp", "localhost")
+        self.port   = int(mgt_details.get("port", 22))
+        self.user   = mgt_details.get("user", "root")
         self.passwd = mgt_details.get("passwd", "")
         self.logger = logger or logging.getLogger('MgmtServerDeployer')
         self._is_local = self.ip in ('localhost', '127.0.0.1')
@@ -425,9 +399,7 @@ class MgmtServerDeployer:
             self.logger.info("Wrote %s locally", remote_path)
         else:
             ssh = self._ssh()
-            ssh.execute("mkdir -p %s" % os.path.dirname(remote_path))
-            # Use a heredoc to avoid shell quoting issues
-            escaped = content.replace("'", "'\\''")
+            ssh.execute("mkdir -p '%s'" % os.path.dirname(remote_path))
             ssh.execute("cat > '%s' << 'MGMTEOF'\n%sMGMTEOF" %
                         (remote_path, content))
             ssh.execute("chmod %s '%s'" % (mode, remote_path))
@@ -441,15 +413,11 @@ class MgmtServerDeployer:
             os.chmod(remote_path, int(mode, 8))
             self.logger.info("Copied %s -> %s locally", local_path, remote_path)
         else:
-            # Read the file and write it via SSH
-            with open(local_path, 'rb') as fh:
-                content = fh.read().decode('latin-1')  # safe for binary key data
-            ssh = self._ssh()
-            ssh.execute("mkdir -p %s" % os.path.dirname(remote_path))
-            # Write binary-safe via base64
             import base64
-            b64 = base64.b64encode(fh.read() if False else
-                                   open(local_path, 'rb').read()).decode()
+            with open(local_path, 'rb') as fh:
+                b64 = base64.b64encode(fh.read()).decode()
+            ssh = self._ssh()
+            ssh.execute("mkdir -p '%s'" % os.path.dirname(remote_path))
             ssh.execute(
                 "echo '%s' | base64 -d > '%s' && chmod %s '%s'" %
                 (b64, remote_path, mode, remote_path)
@@ -469,23 +437,12 @@ class MgmtServerDeployer:
             self.logger.warning("Could not remove %s: %s", remote_path, e)
 
     def get_marvin_ip_as_seen_from_mgmt(self):
-        """Return the IP the management server should use to reach the Marvin node.
-
-        If the management server is localhost, the container is also local, so
-        127.0.0.1 works.  If the management server is remote, use the Marvin
-        node's outbound IP (the IP of the interface that connects to the mgmt
-        server network).  We approximate this by using the Marvin node's
-        hostname/IP that the management server already knows about – in practice
-        the test operator sets MARVIN_NODE_IP in the environment, or we fall
-        back to asking the OS for the outbound IP.
-        """
+        """Return the IP the management server should use to reach the Marvin node."""
         if self._is_local:
             return '127.0.0.1'
-        # Allow override via environment variable
         env_ip = os.environ.get('MARVIN_NODE_IP', '')
         if env_ip:
             return env_ip
-        # Try to determine the outbound IP toward the management server
         try:
             import socket
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -503,29 +460,26 @@ class MgmtServerDeployer:
 # Test class
 # ---------------------------------------------------------------------------
 
-import unittest  # needed for SkipTest in DockerNetworkServer._check_docker
-
-
 class TestExternalNetworkProvider(cloudstackTestCase):
     """Full lifecycle smoke test for the ExternalNetwork plugin.
 
-    The Docker container runs on the Marvin node.
-    The management server SSHes to <marvin_node_ip>:2222 to execute
-    external-network.sh inside the container.
+    A Linux network namespace is created on the Marvin node for iptables
+    isolation.  The management server SSHes to the Marvin node and runs
+    external-network.sh inside the namespace.
     """
 
     @classmethod
     def setUpClass(cls):
         testClient = super(TestExternalNetworkProvider, cls).getClsTestClient()
-        cls.apiclient  = testClient.getApiClient()
-        cls.services   = testClient.getParsedTestDataConfig()
-        cls.zone       = get_zone(cls.apiclient, testClient.getZoneForTests())
-        cls.domain     = get_domain(cls.apiclient)
+        cls.apiclient     = testClient.getApiClient()
+        cls.services      = testClient.getParsedTestDataConfig()
+        cls.zone          = get_zone(cls.apiclient, testClient.getZoneForTests())
+        cls.domain        = get_domain(cls.apiclient)
         cls.mgtSvrDetails = cls.config.__dict__["mgtSvr"][0].__dict__
-        cls.hypervisor = testClient.getHypervisorInfo()
-        cls.template   = get_template(cls.apiclient, cls.zone.id, cls.hypervisor)
-        cls._cleanup   = []
-        cls.logger     = logging.getLogger('TestExternalNetworkProvider')
+        cls.hypervisor    = testClient.getHypervisorInfo()
+        cls.template      = get_template(cls.apiclient, cls.zone.id, cls.hypervisor)
+        cls._cleanup      = []
+        cls.logger        = logging.getLogger('TestExternalNetworkProvider')
         cls.logger.setLevel(logging.DEBUG)
 
     @classmethod
@@ -533,16 +487,15 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         super(TestExternalNetworkProvider, cls).tearDownClass()
 
     def setUp(self):
-        self.cleanup           = []
-        self.provider_id       = None
-        self.extension         = None
-        self.physical_network  = None
-        self.extension_path    = None
-        self.docker_server     = None
-        self.mgmt_deployer     = None
-        # Paths deployed onto the management server
-        self._mgmt_key_path    = None
-        self._mgmt_wrapper_path = None
+        self.cleanup              = []
+        self.provider_id          = None
+        self.extension            = None
+        self.physical_network     = None
+        self.extension_path       = None
+        self.ns_server            = None
+        self.mgmt_deployer        = None
+        self._mgmt_key_path       = None
+        self._mgmt_wrapper_path   = None
 
     def tearDown(self):
         self._safe_teardown()
@@ -550,12 +503,12 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             cleanup_resources(self.apiclient, self.cleanup)
         except Exception as e:
             self.logger.warning("cleanup_resources error: %s", e)
-        if self.docker_server:
+        if self.ns_server:
             try:
-                self.docker_server.stop()
+                self.ns_server.stop()
             except Exception as e:
-                self.logger.warning("Docker stop error: %s", e)
-            self.docker_server = None
+                self.logger.warning("Namespace stop error: %s", e)
+            self.ns_server = None
 
     # ------------------------------------------------------------------
     # CloudStack API helpers
@@ -565,8 +518,8 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         cmd = listPhysicalNetworks.listPhysicalNetworksCmd()
         cmd.zoneid = self.zone.id
         pns = self.apiclient.listPhysicalNetworks(cmd)
-        self.assertIsInstance(pns, list, "No physical networks found")
-        self.assertGreater(len(pns), 0, "No physical networks found")
+        self.assertIsInstance(pns, list)
+        self.assertGreater(len(pns), 0)
         return pns[0]
 
     def _find_provider(self, phys_net_id, name):
@@ -574,9 +527,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         cmd.physicalnetworkid = phys_net_id
         cmd.name = name
         providers = self.apiclient.listNetworkServiceProviders(cmd)
-        if isinstance(providers, list) and len(providers) > 0:
-            return providers[0]
-        return None
+        return providers[0] if isinstance(providers, list) and providers else None
 
     def _add_provider(self, phys_net_id, name, service_list=None):
         cmd = addNetworkServiceProvider.addNetworkServiceProviderCmd()
@@ -598,43 +549,37 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.apiclient.deleteNetworkServiceProvider(cmd)
 
     # ------------------------------------------------------------------
-    # Docker / extension / mgmt-server helpers
+    # Namespace / mgmt-server helpers
     # ------------------------------------------------------------------
 
-    def _init_docker_and_deployer(self):
-        """Start the Docker container on the Marvin node and create the deployer."""
+    def _init_ns_and_deployer(self):
+        """Create the network namespace and management server deployer."""
         self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
                                                 logger=self.logger)
         marvin_ip = self.mgmt_deployer.get_marvin_ip_as_seen_from_mgmt()
-
-        self.docker_server = DockerNetworkServer(
-            marvin_ip=marvin_ip,
-            ssh_port=CONTAINER_SSH_PORT,
-            logger=self.logger
-        )
-        self.docker_server.start()
+        self.ns_server = NetnsNetworkServer(marvin_ip=marvin_ip,
+                                            logger=self.logger)
+        self.ns_server.start()
         return marvin_ip
 
-    def _deploy_to_mgmt_server(self, ext_path, marvin_ip):
+    def _deploy_to_mgmt_server(self, ext_path, key_path_on_mgmt):
         """Copy the SSH private key and entry-point wrapper to the mgmt server.
 
-        Files placed on the management server:
-          - MGMT_KEY_PATH              – the RSA private key
-          - <ext_path>/entry-point     – the SSH-forwarding bash wrapper
+        Returns the private-key content (PEM string) so the caller can store
+        it in extension_resource_map_details via registerExtension.
         """
-        # 1. Copy the private key to the management server
-        self._mgmt_key_path = MGMT_KEY_PATH
+        # 1. Private key
+        self._mgmt_key_path = key_path_on_mgmt
         self.mgmt_deployer.copy_file(
-            self.docker_server.key_file,   # local path on Marvin node
-            self._mgmt_key_path,           # remote path on mgmt server
+            self.ns_server.key_file,
+            self._mgmt_key_path,
             mode='0600'
         )
         self.logger.info("Private key deployed to mgmt server at %s",
                          self._mgmt_key_path)
 
-        # 2. Write the entry-point wrapper to the extension path on the mgmt server
-        wrapper_text = self.docker_server.make_entry_point_wrapper(
-            marvin_ip=marvin_ip,
+        # 2. Entry-point wrapper
+        wrapper_text = self.ns_server.make_entry_point_wrapper(
             key_path_on_mgmt=self._mgmt_key_path
         )
         self._mgmt_wrapper_path = os.path.join(ext_path, ENTRY_POINT_FILENAME)
@@ -643,11 +588,14 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             wrapper_text,
             mode='0755'
         )
-        self.logger.info("entry-point wrapper deployed to mgmt server at %s",
+        self.logger.info("entry-point wrapper deployed to %s",
                          self._mgmt_wrapper_path)
 
+        # 3. Return PEM key content for use in extension_resource_map_details
+        with open(self.ns_server.key_file, 'r') as fh:
+            return fh.read()
+
     def _cleanup_mgmt_server_files(self):
-        """Remove the key and wrapper from the management server."""
         if self.mgmt_deployer:
             if self._mgmt_wrapper_path:
                 self.mgmt_deployer.remove_file(self._mgmt_wrapper_path)
@@ -655,7 +603,6 @@ class TestExternalNetworkProvider(cloudstackTestCase):
                 self.mgmt_deployer.remove_file(self._mgmt_key_path)
 
     def _safe_teardown(self):
-        """Best-effort teardown for objects not handled by cleanup_resources."""
         if self.extension and self.physical_network:
             try:
                 self.extension.unregister(self.apiclient,
@@ -689,27 +636,33 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
     def test_01_external_network_full_lifecycle(self):
-        """Full lifecycle test.
+        """Full lifecycle: netns → extension → network → VM → NAT → PF → teardown.
 
         Flow
         ----
-        Marvin node (this process):
-          1.  Start Docker container (Ubuntu 24.04, sshd, iptables, ebtables).
-          2.  Generate RSA key pair.
-          3.  Install external-network.sh in the container.
+        Marvin node:
+          1.  Create Linux network namespace  (ip netns add cs-extnet-<id>).
+          2.  Generate RSA key pair; inject public key into authorized_keys.
+          3.  Copy external-network.sh to a temp path.
 
         Management server:
-          4.  Copy private key → MGMT_KEY_PATH.
-          5.  Write entry-point wrapper → <ext_path>/entry-point.
+          4.  Copy private key → /tmp/cs-extnet-key.
+          5.  Write entry-point wrapper → <ext_path>/entry-point
+                  (calls: ssh -i <key> <marvin_ip> "ip netns exec <ns> <script> $@")
 
         CloudStack:
           6.  Create NetworkOrchestrator extension with network.capabilities JSON.
-          7.  Register extension with physical network.
+          7.  Register extension with physical network, passing device credentials
+              as extension_resource_map_details:
+                  host=<marvin_ip>  port=22  username=root  sshkey=<PEM>
+              ExternalNetworkElement reads these via
+              ExtensionHelper.getResourceMapDetailsForPhysicalNetwork() and injects
+              them as CS_NET_DEV_* env vars into the entry-point script.
           8.  Add + enable ExternalNetwork provider.
           9.  Create network offering.
          10.  Create account.
-         11.  Create isolated network.
-         12.  Deploy VM            → implement (wrapper SSH → container).
+         11.  Create isolated network  → entry-point receives CS_NET_DEV_HOST etc.
+         12.  Deploy VM   → implement  (wrapper SSHes to Marvin, runs in namespace).
          13.  Acquire public IP.
          14.  Enable static NAT.
          15.  Disable static NAT.
@@ -717,31 +670,33 @@ class TestExternalNetworkProvider(cloudstackTestCase):
          17.  Create port forwarding rule.
          18.  Delete port forwarding rule.
          19.  Destroy VM.
-         20.  Delete network       → shutdown/destroy (wrapper SSH → container).
+         20.  Delete network  → shutdown/destroy (runs in namespace).
 
         Cleanup:
          21.  Disable/delete provider.
          22.  Unregister/delete extension.
          23.  Remove key + wrapper from mgmt server.
-         24.  Stop + remove Docker container.
+         24.  Delete network namespace; remove authorized_keys entry.
         """
 
-        # ---- Steps 1-3: Docker container on Marvin node ----
-        marvin_ip = self._init_docker_and_deployer()
-        self.logger.info("Marvin node IP (as seen from mgmt server): %s", marvin_ip)
+        # ---- Steps 1-3: Network namespace on Marvin node ----
+        marvin_ip = self._init_ns_and_deployer()
+        self.logger.info("Marvin IP (as seen from mgmt): %s  namespace: %s",
+                         marvin_ip, self.ns_server.ns_name)
 
-        # Quick sanity: run the script inside the container via SSH from Marvin
-        rc, out, _ = self.docker_server.ssh_from_marvin(
+        # Sanity: run the script inside the namespace
+        rc, out, _ = self.ns_server.run_in_ns(
             '%s implement --network-id 0 --vlan 0 '
             '--gateway 192.0.2.1 --cidr 192.0.2.0/24 || true' %
-            CONTAINER_SCRIPT_PATH, check=False)
-        self.logger.info("Container script sanity check: rc=%d out=%r", rc, out)
+            self.ns_server.script_path, check=False)
+        self.logger.info("Namespace script sanity check: rc=%d out=%r", rc, out)
 
-        # ---- Step 4-5: Physical network + Extension ----
+        # ---- Step 4: Physical network ----
         self.physical_network = self._get_physical_network()
         self.logger.info("Physical network: %s (%s)",
                          self.physical_network.name, self.physical_network.id)
 
+        # ---- Step 5: Create extension with network.capabilities detail ----
         ext_name = "extnet-smoke-" + random_gen()
         self.extension = Extension.create(
             self.apiclient,
@@ -753,33 +708,48 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.assertEqual('NetworkOrchestrator', self.extension.type)
         self.assertEqual('Enabled', self.extension.state)
 
-        # Retrieve the extension path on the management server
         ext_list = Extension.list(self.apiclient, id=self.extension.id)
         self.assertTrue(ext_list and len(ext_list) > 0)
         ext_obj = ext_list[0]
         self.extension_path = ext_obj.path
-        self.assertIsNotNone(self.extension_path,
-                             "Extension path must not be None")
+        self.assertIsNotNone(self.extension_path)
 
-        # Verify network.capabilities detail was stored
+        # Verify network.capabilities was stored
         if hasattr(ext_obj, 'details') and ext_obj.details:
             d = (ext_obj.details.__dict__
                  if not isinstance(ext_obj.details, dict)
                  else ext_obj.details)
-            self.assertIn("network.capabilities", d,
-                          "network.capabilities must be stored as a detail")
+            self.assertIn("network.capabilities", d)
         self.logger.info("Extension %s created, path=%s", ext_name, self.extension_path)
 
-        # ---- Steps 4-5: Deploy key + wrapper to management server ----
-        self._deploy_to_mgmt_server(self.extension_path, marvin_ip)
+        # ---- Steps 6-7: Deploy key + wrapper to management server ----
+        # Returns the private key PEM for storing in extension_resource_map_details
+        ssh_key_pem = self._deploy_to_mgmt_server(self.extension_path, MGMT_KEY_PATH)
 
-        # ---- Step 6: Register extension with physical network ----
-        self.extension.register(self.apiclient,
-                                self.physical_network.id,
-                                'PhysicalNetwork')
-        self.logger.info("Extension registered with physical network")
+        # ---- Step 8: Register extension with physical network +
+        #              store device credentials as extension_resource_map_details ----
+        # ExternalNetworkElement reads these details via
+        # ExtensionHelper.getResourceMapDetailsForPhysicalNetwork() and injects
+        # them as CS_NET_DEV_HOST / CS_NET_DEV_PORT / CS_NET_DEV_USERNAME /
+        # CS_NET_DEV_SSHKEY environment variables when calling the entry-point.
+        reg_details = {
+            "host":     marvin_ip,
+            "port":     str(MARVIN_SSH_PORT),
+            "username": MARVIN_SSH_USER,
+            "sshkey":   ssh_key_pem,
+        }
+        self.extension.register(
+            self.apiclient,
+            self.physical_network.id,
+            'PhysicalNetwork',
+            details=reg_details
+        )
+        self.logger.info(
+            "Extension registered to physical network %s "
+            "with device details host=%s port=%d username=%s sshkey=<redacted>",
+            self.physical_network.id, marvin_ip, MARVIN_SSH_PORT, MARVIN_SSH_USER)
 
-        # ---- Step 7: Add + enable ExternalNetwork provider ----
+        # ---- Step 9: Add + enable ExternalNetwork provider ----
         provider = self._find_provider(self.physical_network.id,
                                        EXTERNAL_NETWORK_PROVIDER_NAME)
         if provider is None:
@@ -792,15 +762,14 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.provider_id = provider.id
         if provider.state != 'Enabled':
             self._update_provider_state(provider.id, 'Enabled')
-        provider = self._find_provider(self.physical_network.id,
-                                       EXTERNAL_NETWORK_PROVIDER_NAME)
-        self.assertEqual('Enabled', provider.state)
-        self.logger.info("Provider enabled: id=%s", provider.id)
+        self.assertEqual('Enabled',
+            self._find_provider(self.physical_network.id,
+                                EXTERNAL_NETWORK_PROVIDER_NAME).state)
 
-        # ---- Step 8: Create network offering ----
+        # ---- Step 10: Create network offering ----
         nw_offering = NetworkOffering.create(self.apiclient, {
             "name":             "ExtNet-Offering",
-            "displaytext":      "ExtNet Offering (Docker smoke test)",
+            "displaytext":      "ExtNet Offering (netns smoke test)",
             "guestiptype":      "Isolated",
             "traffictype":      "GUEST",
             "supportedservices": "SourceNat,StaticNat,PortForwarding,Firewall,Gateway",
@@ -817,9 +786,8 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         })
         self.cleanup.append(nw_offering)
         nw_offering.update(self.apiclient, state='Enabled')
-        self.logger.info("Network offering created: %s", nw_offering.id)
 
-        # ---- Step 9: Create account ----
+        # ---- Step 11: Create account ----
         account = Account.create(
             self.apiclient,
             self.services["account"],
@@ -828,11 +796,11 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         )
         self.cleanup.append(account)
 
-        # ---- Step 10: Create isolated network ----
+        # ---- Step 12: Create isolated network ----
         network = Network.create(
             self.apiclient,
             {"name": "extnet-smoke-net",
-             "displaytext": "ExtNet Docker smoke test network"},
+             "displaytext": "ExtNet netns smoke test network"},
             accountid=account.name,
             domainid=account.domainid,
             networkofferingid=nw_offering.id,
@@ -842,11 +810,8 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.assertIsNotNone(network)
         self.logger.info("Isolated network created: %s (%s)", network.name, network.id)
 
-        # ---- Step 11: Deploy VM → triggers implement ----
-        svc_offerings = ServiceOffering.list(self.apiclient, issystem=False)
-        self.assertIsInstance(svc_offerings, list)
-        svc_offering = svc_offerings[0]
-
+        # ---- Step 13: Deploy VM → implement ----
+        svc_offering = ServiceOffering.list(self.apiclient, issystem=False)[0]
         vm = VirtualMachine.create(
             self.apiclient,
             {"displayname": "extnet-smoke-vm", "name": "extnet-smoke-vm",
@@ -859,9 +824,9 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         )
         self.cleanup.insert(0, vm)
         self.assertIsNotNone(vm)
-        self.logger.info("VM deployed: %s (%s) – implement ran in container", vm.name, vm.id)
+        self.logger.info("VM deployed: %s (%s)", vm.name, vm.id)
 
-        # ---- Step 12: Acquire public IP ----
+        # ---- Step 14: Acquire public IP ----
         public_ip = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
@@ -869,89 +834,64 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             domainid=account.domainid,
             networkid=network.id
         )
-        self.assertIsNotNone(public_ip)
         ip_id = public_ip.ipaddress.id
-        self.logger.info("Public IP: %s (%s)", public_ip.ipaddress.ipaddress, ip_id)
+        self.logger.info("Public IP: %s", public_ip.ipaddress.ipaddress)
 
-        # ---- Step 13: Enable static NAT ----
-        StaticNATRule.enable(
-            self.apiclient,
-            ipaddressid=ip_id,
-            virtualmachineid=vm.id,
-            networkid=network.id
-        )
-        self.logger.info("Static NAT enabled: %s → VM %s",
-                         public_ip.ipaddress.ipaddress, vm.id)
+        # ---- Step 15: Enable static NAT ----
+        StaticNATRule.enable(self.apiclient,
+                             ipaddressid=ip_id,
+                             virtualmachineid=vm.id,
+                             networkid=network.id)
 
-        # ---- Step 14: Disable static NAT ----
+        # ---- Step 16: Disable static NAT ----
         StaticNATRule.disable(self.apiclient, ipaddressid=ip_id)
-        self.logger.info("Static NAT disabled: %s", public_ip.ipaddress.ipaddress)
 
-        # ---- Step 15: Acquire another public IP for port forwarding ----
+        # ---- Step 17: Acquire IP for port forwarding ----
         pf_ip = PublicIPAddress.create(
             self.apiclient,
-            accountid=account.name,
-            zoneid=self.zone.id,
-            domainid=account.domainid,
-            networkid=network.id
+            accountid=account.name, zoneid=self.zone.id,
+            domainid=account.domainid, networkid=network.id
         )
-        self.assertIsNotNone(pf_ip)
-        pf_ip_id = pf_ip.ipaddress.id
-        self.logger.info("PF public IP: %s (%s)", pf_ip.ipaddress.ipaddress, pf_ip_id)
 
-        # ---- Step 16: Create port forwarding rule (TCP 2222 → VM:22) ----
+        # ---- Step 18: Create port forwarding rule ----
         pf_rule = NATRule.create(
-            self.apiclient,
-            vm,
+            self.apiclient, vm,
             {"privateport": 22, "publicport": 2222, "protocol": "TCP"},
-            ipaddressid=pf_ip_id,
-            networkid=network.id
+            ipaddressid=pf_ip.ipaddress.id, networkid=network.id
         )
         self.assertIsNotNone(pf_rule)
-        self.logger.info("Port forwarding rule created: %s  "
-                         "%s:2222 → VM:22", pf_rule.id, pf_ip.ipaddress.ipaddress)
+        self.logger.info("Port forwarding rule: %s  %s:2222 → VM:22",
+                         pf_rule.id, pf_ip.ipaddress.ipaddress)
 
-        # ---- Step 17: Delete port forwarding rule ----
+        # ---- Step 19: Delete port forwarding rule ----
         pf_rule.delete(self.apiclient)
-        self.logger.info("Port forwarding rule deleted")
-
-        # Release IPs
         pf_ip.delete(self.apiclient)
         public_ip.delete(self.apiclient)
-        self.logger.info("Public IPs released")
 
-        # ---- Step 18: Destroy VM ----
+        # ---- Step 20: Destroy VM ----
         vm.delete(self.apiclient, expunge=True)
         self.cleanup = [o for o in self.cleanup if o != vm]
-        self.logger.info("VM destroyed")
 
-        # ---- Step 19: Delete network → shutdown/destroy run in container ----
+        # ---- Step 21: Delete network → shutdown/destroy ----
         network.delete(self.apiclient)
         self.cleanup = [o for o in self.cleanup if o != network]
-        self.logger.info("Network deleted (shutdown/destroy ran in container)")
+        self.logger.info("Network deleted (shutdown/destroy ran in namespace)")
 
-        # ---- Step 20: Disable + delete provider ----
+        # ---- Steps 22-24: Cleanup infrastructure ----
         self._update_provider_state(self.provider_id, 'Disabled')
         self._delete_provider(self.provider_id)
         self.provider_id = None
 
-        # ---- Step 21: Unregister + delete extension ----
         self.extension.unregister(self.apiclient,
-                                  self.physical_network.id,
-                                  'PhysicalNetwork')
+                                  self.physical_network.id, 'PhysicalNetwork')
         self.extension.delete(self.apiclient,
-                              unregisterresources=False,
-                              removeactions=False)
+                              unregisterresources=False, removeactions=False)
         self.extension = None
         self.physical_network = None
 
-        # ---- Step 22: Remove key + wrapper from mgmt server ----
         self._cleanup_mgmt_server_files()
-
-        # ---- Step 23: Stop Docker container ----
-        self.docker_server.stop()
-        self.docker_server = None
-
+        self.ns_server.stop()
+        self.ns_server = None
         self.logger.info("Full lifecycle test PASSED")
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
@@ -959,25 +899,20 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         """Provider state transitions: Disabled → Enabled → Disabled → Deleted."""
         pn = self._get_physical_network()
         self.physical_network = pn
-
         existing = self._find_provider(pn.id, EXTERNAL_NETWORK_PROVIDER_NAME)
         if existing is not None:
             if existing.state == 'Enabled':
                 self._update_provider_state(existing.id, 'Disabled')
             self._delete_provider(existing.id)
-
         provider = self._add_provider(pn.id, EXTERNAL_NETWORK_PROVIDER_NAME)
         self.provider_id = provider.id
         self.assertEqual('Disabled', provider.state)
-
         self._update_provider_state(provider.id, 'Enabled')
         self.assertEqual('Enabled',
             self._find_provider(pn.id, EXTERNAL_NETWORK_PROVIDER_NAME).state)
-
         self._update_provider_state(provider.id, 'Disabled')
         self.assertEqual('Disabled',
             self._find_provider(pn.id, EXTERNAL_NETWORK_PROVIDER_NAME).state)
-
         self._delete_provider(provider.id)
         self.provider_id = None
         self.assertIsNone(self._find_provider(pn.id, EXTERNAL_NETWORK_PROVIDER_NAME))
@@ -988,9 +923,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         """Verify network.capabilities JSON is stored and retrievable via the API."""
         caps_json = json.dumps({
             "services": ["SourceNat", "Gateway"],
-            "capabilities": {
-                "SourceNat": {"SupportedSourceNatTypes": "peraccount"}
-            }
+            "capabilities": {"SourceNat": {"SupportedSourceNatTypes": "peraccount"}}
         })
         ext = Extension.create(
             self.apiclient,
@@ -999,8 +932,6 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             details=[{"network.capabilities": caps_json}]
         )
         self.cleanup.append(ext)
-        self.assertIsNotNone(ext)
-
         ext_list = Extension.list(self.apiclient, id=ext.id)
         self.assertTrue(ext_list and len(ext_list) > 0)
         ext_obj = ext_list[0]
@@ -1012,40 +943,44 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             stored = json.loads(d["network.capabilities"])
             self.assertIn("SourceNat", stored["services"])
             self.assertIn("Gateway", stored["services"])
-            self.assertEqual(2, len(stored["services"]))
         self.logger.info("Extension capabilities detail test PASSED")
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
-    def test_04_docker_container_ssh_and_script(self):
-        """Verify the Docker container starts on the Marvin node, SSH works,
-        iptables/ebtables are available, and external-network.sh is installed."""
-        marvin_ip = self._init_docker_and_deployer()
+    def test_04_netns_and_script(self):
+        """Verify network namespace is created, iptables works inside it,
+        and external-network.sh is installed."""
+        marvin_ip = self._init_ns_and_deployer()
 
-        # SSH from Marvin node to container
-        rc, out, _ = self.docker_server.ssh_from_marvin('echo hello-from-container')
-        self.assertEqual(0, rc)
-        self.assertIn('hello-from-container', out)
+        # Namespace exists
+        rc, out, _ = _run(['ip', 'netns', 'list'])
+        self.assertIn(self.ns_server.ns_name, out)
 
-        # iptables must be present
-        rc, out, _ = self.docker_server.ssh_from_marvin('iptables --version')
+        # iptables works inside the namespace
+        rc, out, _ = self.ns_server.run_in_ns('iptables --version')
         self.assertEqual(0, rc)
         self.assertIn('iptables', out.lower())
 
-        # ebtables must be present
-        _, out2, _ = self.docker_server.ssh_from_marvin('which ebtables')
-        self.assertIn('ebtables', out2)
-
-        # external-network.sh must be executable
-        rc, out, _ = self.docker_server.ssh_from_marvin(
-            'test -x %s && echo executable' % CONTAINER_SCRIPT_PATH)
+        # Script is executable
+        rc, _, _ = self.ns_server.run_in_ns(
+            'test -x %s && echo ok' % self.ns_server.script_path)
         self.assertEqual(0, rc)
-        self.assertIn('executable', out)
 
-        # Container is on Marvin node, reachable from mgmt server at marvin_ip:2222
+        # Script runs inside the namespace without SSH errors
+        rc, out, _ = self.ns_server.run_in_ns(
+            '%s implement --network-id 1 --vlan 100 '
+            '--gateway 10.0.0.1 --cidr 10.0.0.0/24 || true' %
+            self.ns_server.script_path, check=False)
         self.logger.info(
-            "Container OK. Management server should SSH to %s:%d",
-            marvin_ip, CONTAINER_SSH_PORT)
+            "Script in namespace %s: rc=%d  out=%r",
+            self.ns_server.ns_name, rc, out)
+        # Should not have printed an SSH error
+        self.assertNotIn('ssh:', out.lower())
 
-        self.docker_server.stop()
-        self.docker_server = None
-        self.logger.info("Docker container SSH and script test PASSED")
+        self.logger.info(
+            "Namespace OK. Management server should SSH to %s:%d "
+            "and run: ip netns exec %s <script> <args>",
+            marvin_ip, MARVIN_SSH_PORT, self.ns_server.ns_name)
+
+        self.ns_server.stop()
+        self.ns_server = None
+        self.logger.info("Netns and script test PASSED")

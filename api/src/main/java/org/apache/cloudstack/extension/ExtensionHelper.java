@@ -27,4 +27,16 @@ public interface ExtensionHelper {
     Extension getExtensionForPhysicalNetwork(long physicalNetworkId);
     String getExtensionScriptPath(Extension extension);
     Map<String, String> getExtensionDetails(long extensionId);
+
+    /**
+     * Returns the extension_resource_map_details for the extension registered
+     * to the given physical network.  These details hold device-access
+     * information (host, port, username, password, sshkey) and any other
+     * per-physical-network properties set at registration time via
+     * {@code registerExtension physicalnetworkid=<id> details[0].key=host ...}.
+     *
+     * @param physicalNetworkId  the physical network ID
+     * @return key/value details, or an empty map if none are set
+     */
+    Map<String, String> getResourceMapDetailsForPhysicalNetwork(long physicalNetworkId);
 }

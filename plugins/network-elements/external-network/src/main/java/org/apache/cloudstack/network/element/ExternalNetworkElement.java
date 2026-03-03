@@ -72,6 +72,28 @@ import com.cloud.vm.VirtualMachineProfile;
  * {@link Extension} of type {@code NetworkOrchestrator} that is associated
  * with the network's physical network via the Extension Resource Map.
  *
+ * <h3>Device credentials via extension_resource_map_details</h3>
+ * When registering the extension to a physical network, pass the network
+ * device properties as details:
+ * <pre>
+ *   cmk registerExtension id=&lt;ext-uuid&gt; resourcetype=PhysicalNetwork \
+ *       resourceid=&lt;phys-net-uuid&gt; \
+ *       details[0].key=host       details[0].value=192.168.1.10 \
+ *       details[1].key=port       details[1].value=22 \
+ *       details[2].key=username   details[2].value=root \
+ *       details[3].key=sshkey     details[3].value="$(cat /root/.ssh/id_rsa)"
+ * </pre>
+ * These details are passed to the entry-point script as environment variables
+ * prefixed with {@code CS_NET_DEV_}: e.g. {@code CS_NET_DEV_HOST},
+ * {@code CS_NET_DEV_PORT}, {@code CS_NET_DEV_USERNAME},
+ * {@code CS_NET_DEV_PASSWORD}, {@code CS_NET_DEV_SSHKEY}.
+ * Sensitive fields (password, sshkey) are omitted from debug logs.
+ *
+ * <h3>Network details via extension_resource_map_details (per network)</h3>
+ * Additional per-network properties (VLAN mappings, gateway overrides, etc.)
+ * are also stored as {@code extension_resource_map_details} and exposed to
+ * the script as {@code CS_NET_*} environment variables.
+ *
  * <h3>Network capabilities via JSON</h3>
  * When creating the extension, pass the network capabilities as a detail
  * with the key {@code network.capabilities}. The value is a JSON object:
@@ -402,11 +424,41 @@ public class ExternalNetworkElement extends AdapterBase implements
         return true;
     }
 
+    // ---- Credential / detail key constants ----
+
+    /** Well-known keys stored in extension_resource_map_details (PhysicalNetwork binding). */
+    public static final String DETAIL_HOST     = "host";
+    public static final String DETAIL_PORT     = "port";
+    public static final String DETAIL_USERNAME = "username";
+    public static final String DETAIL_PASSWORD = "password";
+    public static final String DETAIL_SSHKEY   = "sshkey";
+
+    /** Env-var prefix for device-access details passed to the script. */
+    private static final String ENV_DEV_PREFIX  = "CS_NET_DEV_";
+    /** Env-var prefix for generic resource-map details passed to the script. */
+    private static final String ENV_MAP_PREFIX  = "CS_NET_";
+
+    /** Details that are sensitive and must not appear in log output. */
+    private static final java.util.Set<String> SENSITIVE_KEYS =
+            java.util.Set.of(DETAIL_PASSWORD, DETAIL_SSHKEY);
+
     // ---- Extension-based script resolution ----
 
     /**
      * Resolves the script path from the NetworkOrchestrator extension associated
      * with the network's physical network and executes it.
+     *
+     * Device credentials and other per-physical-network details stored in
+     * {@code extension_resource_map_details} are passed to the script as
+     * environment variables:
+     * <ul>
+     *   <li>{@code CS_NET_DEV_HOST} – IP / hostname of the network device</li>
+     *   <li>{@code CS_NET_DEV_PORT} – SSH port (default 22)</li>
+     *   <li>{@code CS_NET_DEV_USERNAME} – SSH username</li>
+     *   <li>{@code CS_NET_DEV_PASSWORD} – SSH password (sensitive, not logged)</li>
+     *   <li>{@code CS_NET_DEV_SSHKEY} – SSH private key PEM (sensitive, not logged)</li>
+     *   <li>{@code CS_NET_<KEY>} – any other detail key, upper-cased</li>
+     * </ul>
      */
     protected boolean executeScript(Network network, String command, String... args) {
         File scriptFile = resolveScriptFile(network);
@@ -423,9 +475,13 @@ public class ExternalNetworkElement extends AdapterBase implements
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
             pb.redirectErrorStream(true);
-            pb.environment().put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-            Process process = pb.start();
+            Map<String, String> env = pb.environment();
+            env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
+            // Inject device credentials and other resource-map details as env vars
+            injectResourceMapEnv(env, network.getPhysicalNetworkId());
+
+            Process process = pb.start();
             byte[] output = process.getInputStream().readAllBytes();
             int exitCode = process.waitFor();
 
@@ -442,6 +498,47 @@ public class ExternalNetworkElement extends AdapterBase implements
         } catch (Exception e) {
             logger.error("Failed to execute external network script: {}", e.getMessage(), e);
             throw new CloudRuntimeException("Failed to execute external network script", e);
+        }
+    }
+
+    /**
+     * Loads the {@code extension_resource_map_details} for the given physical
+     * network and injects them into the process environment.
+     *
+     * <p>Well-known device-access keys (host, port, username, password, sshkey)
+     * are mapped to {@code CS_NET_DEV_<KEY>}; all other keys become
+     * {@code CS_NET_<KEY>} (upper-cased).
+     */
+    protected void injectResourceMapEnv(Map<String, String> env, Long physicalNetworkId) {
+        if (physicalNetworkId == null) {
+            return;
+        }
+        Map<String, String> details = extensionHelper.getResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+
+        java.util.Set<String> deviceKeys = java.util.Set.of(
+                DETAIL_HOST, DETAIL_PORT, DETAIL_USERNAME, DETAIL_PASSWORD, DETAIL_SSHKEY);
+
+        for (Map.Entry<String, String> entry : details.entrySet()) {
+            String key   = entry.getKey();
+            String value = entry.getValue();
+            if (value == null) {
+                continue;
+            }
+            String envKey;
+            if (deviceKeys.contains(key.toLowerCase())) {
+                envKey = ENV_DEV_PREFIX + key.toUpperCase();
+            } else {
+                envKey = ENV_MAP_PREFIX + key.toUpperCase();
+            }
+            env.put(envKey, value);
+            if (!SENSITIVE_KEYS.contains(key.toLowerCase())) {
+                logger.debug("  env {}={}", envKey, value);
+            } else {
+                logger.debug("  env {}=<redacted>", envKey);
+            }
         }
     }
 

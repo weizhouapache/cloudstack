@@ -1718,6 +1718,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public Map<String, String> getResourceMapDetailsForPhysicalNetwork(long physicalNetworkId) {
+        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (map == null) {
+            return new java.util.HashMap<>();
+        }
+        Map<String, String> details = extensionResourceMapDetailsDao.listDetailsKeyPairs(map.getId());
+        return details != null ? details : new java.util.HashMap<>();
+    }
+
+    @Override
     public boolean start() {
         long pathStateCheckInterval = PathStateCheckInterval.value();
         long pathStateCheckInitialDelay = Math.min(60, pathStateCheckInterval);
