@@ -1029,8 +1029,6 @@ public class ExtensionsManagerImplTest {
         RegisterExtensionCmd cmd = mock(RegisterExtensionCmd.class);
         when(cmd.getResourceType()).thenReturn(ExtensionResourceMap.ResourceType.Cluster.name());
         when(cmd.getResourceId()).thenReturn(UUID.randomUUID().toString());
-        ClusterVO clusterVO = mock(ClusterVO.class);
-        when(clusterDao.findByUuid(anyString())).thenReturn(clusterVO);
         extensionsManager.registerExtensionWithResource(cmd);
     }
 
@@ -2067,6 +2065,211 @@ public class ExtensionsManagerImplTest {
             assertNull(result.get(ApiConstants.ROLE_NAME));
             assertNull(result.get(ApiConstants.ROLE_TYPE));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for ExtensionHelper methods (external network device support)
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void getExtensionForPhysicalNetworkReturnsExtensionWhenRegistered() {
+        long physNetId = 10L;
+        long extensionId = 5L;
+        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
+        when(mapVO.getExtensionId()).thenReturn(extensionId);
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(mapVO);
+        ExtensionVO ext = mock(ExtensionVO.class);
+        when(extensionDao.findById(extensionId)).thenReturn(ext);
+
+        Extension result = extensionsManager.getExtensionForPhysicalNetwork(physNetId);
+
+        assertNotNull(result);
+        assertEquals(ext, result);
+    }
+
+    @Test
+    public void getExtensionForPhysicalNetworkReturnsNullWhenNotRegistered() {
+        long physNetId = 10L;
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(null);
+
+        Extension result = extensionsManager.getExtensionForPhysicalNetwork(physNetId);
+
+        assertNull(result);
+    }
+
+    @Test
+    public void getResourceMapIdForPhysicalNetworkReturnsIdWhenRegistered() {
+        long physNetId = 10L;
+        long mapId = 99L;
+        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
+        when(mapVO.getId()).thenReturn(mapId);
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(mapVO);
+
+        Long result = extensionsManager.getResourceMapIdForPhysicalNetwork(physNetId);
+
+        assertNotNull(result);
+        assertEquals(Long.valueOf(mapId), result);
+    }
+
+    @Test
+    public void getResourceMapIdForPhysicalNetworkReturnsNullWhenNotRegistered() {
+        long physNetId = 10L;
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(null);
+
+        Long result = extensionsManager.getResourceMapIdForPhysicalNetwork(physNetId);
+
+        assertNull(result);
+    }
+
+    @Test
+    public void getResourceMapDetailsForPhysicalNetworkReturnsDisplayDetailsOnly() {
+        long physNetId = 10L;
+        long mapId = 99L;
+        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
+        when(mapVO.getId()).thenReturn(mapId);
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(mapVO);
+        Map<String, String> displayDetails = Map.of("host", "192.168.1.1", "port", "22");
+        when(extensionResourceMapDetailsDao.listDetailsKeyPairs(mapId, true)).thenReturn(displayDetails);
+
+        Map<String, String> result = extensionsManager.getResourceMapDetailsForPhysicalNetwork(physNetId);
+
+        assertNotNull(result);
+        assertEquals(displayDetails, result);
+        verify(extensionResourceMapDetailsDao).listDetailsKeyPairs(mapId, true);
+    }
+
+    @Test
+    public void getResourceMapDetailsForPhysicalNetworkReturnsEmptyMapWhenNotRegistered() {
+        long physNetId = 10L;
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(null);
+
+        Map<String, String> result = extensionsManager.getResourceMapDetailsForPhysicalNetwork(physNetId);
+
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    public void getAllResourceMapDetailsForPhysicalNetworkReturnsAllDetails() {
+        long physNetId = 10L;
+        long mapId = 99L;
+        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
+        when(mapVO.getId()).thenReturn(mapId);
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(mapVO);
+        Map<String, String> allDetails = Map.of("host", "192.168.1.1", "port", "22",
+                "username", "root", "sshkey", "-----BEGIN RSA-----");
+        when(extensionResourceMapDetailsDao.listDetailsKeyPairs(mapId)).thenReturn(allDetails);
+
+        Map<String, String> result = extensionsManager.getAllResourceMapDetailsForPhysicalNetwork(physNetId);
+
+        assertNotNull(result);
+        assertEquals(allDetails, result);
+        // Must call without display filter so hidden keys (sshkey) are included
+        verify(extensionResourceMapDetailsDao).listDetailsKeyPairs(mapId);
+    }
+
+    @Test
+    public void getAllResourceMapDetailsForPhysicalNetworkReturnsEmptyMapWhenNotRegistered() {
+        long physNetId = 10L;
+        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(null);
+
+        Map<String, String> result = extensionsManager.getAllResourceMapDetailsForPhysicalNetwork(physNetId);
+
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    public void updateResourceMapDetailsSavesDetailsWithCorrectDisplayFlags() {
+        long mapId = 99L;
+        Map<String, String> details = new HashMap<>();
+        details.put("host", "192.168.1.1");
+        details.put("port", "22");
+        details.put("sshkey", "-----BEGIN RSA-----");
+        // host and port are display=true; sshkey is display=false
+        java.util.Set<String> displayKeys = java.util.Set.of("host", "port");
+
+        extensionsManager.updateResourceMapDetails(mapId, details, displayKeys);
+
+        // saveDetails must be called once with a list containing all 3 entries
+        verify(extensionResourceMapDetailsDao).saveDetails(any(List.class));
+    }
+
+    @Test
+    public void updateResourceMapDetailsDoesNothingForEmptyMap() {
+        long mapId = 99L;
+        extensionsManager.updateResourceMapDetails(mapId, new HashMap<>(),
+                java.util.Set.of("host"));
+
+        verify(extensionResourceMapDetailsDao, never()).saveDetails(any());
+    }
+
+    @Test
+    public void updateResourceMapDetailsDoesNothingForNullMap() {
+        long mapId = 99L;
+        extensionsManager.updateResourceMapDetails(mapId, null,
+                java.util.Set.of("host"));
+
+        verify(extensionResourceMapDetailsDao, never()).saveDetails(any());
+    }
+
+    @Test
+    public void removeResourceMapDetailsCallsRemoveDetailForEachKey() {
+        long mapId = 99L;
+        List<String> keys = List.of("sshkey", "password");
+
+        extensionsManager.removeResourceMapDetails(mapId, keys);
+
+        verify(extensionResourceMapDetailsDao).removeDetail(mapId, "sshkey");
+        verify(extensionResourceMapDetailsDao).removeDetail(mapId, "password");
+    }
+
+    @Test
+    public void removeResourceMapDetailsDoesNothingForEmptyList() {
+        long mapId = 99L;
+        extensionsManager.removeResourceMapDetails(mapId, Collections.emptyList());
+
+        verify(extensionResourceMapDetailsDao, never()).removeDetail(anyLong(), anyString());
+    }
+
+    @Test
+    public void removeResourceMapDetailsDoesNothingForNullList() {
+        long mapId = 99L;
+        extensionsManager.removeResourceMapDetails(mapId, null);
+
+        verify(extensionResourceMapDetailsDao, never()).removeDetail(anyLong(), anyString());
+    }
+
+    @Test
+    public void listPhysicalNetworkIdsWithExtensionReturnsMappedIds() {
+        List<Long> expectedIds = List.of(1L, 2L, 3L);
+        when(extensionResourceMapDao.listResourceIdsByType(
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(expectedIds);
+
+        List<Long> result = extensionsManager.listPhysicalNetworkIdsWithExtension();
+
+        assertNotNull(result);
+        assertEquals(3, result.size());
+        assertEquals(expectedIds, result);
+    }
+
+    @Test
+    public void listPhysicalNetworkIdsWithExtensionReturnsEmptyListWhenNone() {
+        when(extensionResourceMapDao.listResourceIdsByType(
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(Collections.emptyList());
+
+        List<Long> result = extensionsManager.listPhysicalNetworkIdsWithExtension();
+
+        assertNotNull(result);
+        assertTrue(result.isEmpty());
     }
 
 }

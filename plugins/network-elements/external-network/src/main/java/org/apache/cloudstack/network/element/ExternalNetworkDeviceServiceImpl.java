@@ -37,9 +37,6 @@ import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.utils.component.ManagerBase;
-import com.cloud.utils.exception.CloudRuntimeException;
-
-import org.apache.commons.collections.MapUtils;
 
 /**
  * Implements {@link ExternalNetworkDeviceService} by storing all device details
