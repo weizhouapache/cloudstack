@@ -86,6 +86,7 @@ import org.apache.cloudstack.framework.extensions.dao.ExtensionResourceMapDao;
 import org.apache.cloudstack.framework.extensions.dao.ExtensionResourceMapDetailsDao;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionCustomActionDetailsVO;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionCustomActionVO;
+import org.apache.cloudstack.framework.extensions.vo.ExtensionResourceMapDetailsVO;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionResourceMapVO;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionVO;
 import org.apache.cloudstack.utils.identity.ManagementServerNode;
@@ -2489,14 +2490,11 @@ public class ExtensionsManagerImplTest {
 
         // Verify saveDetails was called with a list containing the right display flags
         verify(extensionResourceMapDetailsDao).saveDetails(argThat(list -> {
-            for (Object item : list) {
-                if (item instanceof org.apache.cloudstack.framework.extensions.vo.ExtensionResourceMapDetailsVO) {
-                    var detail = (org.apache.cloudstack.framework.extensions.vo.ExtensionResourceMapDetailsVO) item;
+            for (ExtensionResourceMapDetailsVO detail : list) {
                     if ("sshkey".equals(detail.getName()) && detail.isDisplay()) return false;
                     if ("password".equals(detail.getName()) && detail.isDisplay()) return false;
                     if ("host".equals(detail.getName()) && !detail.isDisplay()) return false;
                     if ("username".equals(detail.getName()) && !detail.isDisplay()) return false;
-                }
             }
             return true;
         }));

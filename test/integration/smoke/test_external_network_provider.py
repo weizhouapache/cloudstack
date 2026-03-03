@@ -34,41 +34,45 @@ is already present on any modern Linux host.
   CloudStack ExternalNetworkElement             iptables/bridge ops run here (isolated)
 
 The entry-point wrapper on the management server SSHes to the Marvin node and
-runs external-network.sh inside the network namespace:
-  exec ssh -i <key> <marvin_ip>:22 root@<marvin>
-      "ip netns exec <ns> /path/to/external-network.sh $@"
+runs external-network.sh inside the network namespace.
 
-Device / connection details are stored in ``extension_resource_map_details``
-(NOT in a separate table).  When registering the extension with the physical
-network the test passes the SSH credentials as ``details``:
+Two-step setup:
+  Step 1 — Register extension with physical network (no credentials):
+    cmk registerExtension id=<ext-uuid> resourcetype=PhysicalNetwork \\
+        resourceid=<phys-net-uuid>
 
-  cmk registerExtension id=<ext-uuid> resourcetype=PhysicalNetwork \\
-      resourceid=<phys-net-uuid> \\
-      details[0].key=host       details[0].value=<marvin_ip> \\
-      details[1].key=port       details[1].value=22 \\
-      details[2].key=username   details[2].value=root \\
-      details[3].key=sshkey     details[3].value="$(cat /tmp/cs-extnet-key)"
+  Step 2 — Add external network device (host/port + sensitive details):
+    cmk addExternalNetworkDevice physicalnetworkid=<phys-net-uuid> \\
+        host=<marvin_ip> port=22 \\
+        details[0].key=username details[0].value=root \\
+        details[1].key=sshkey   details[1].value="$(cat /tmp/cs-extnet-key)"
 
-``ExternalNetworkElement`` reads those details via
-``ExtensionHelper.getResourceMapDetailsForPhysicalNetwork()`` and injects them
+    Sensitive fields (password, sshkey) are stored with display=false and are
+    never returned by listExternalNetworkDevices.
+
+``ExternalNetworkElement`` reads all details (including hidden) via
+``ExtensionHelper.getAllResourceMapDetailsForPhysicalNetwork()`` and injects them
 as environment variables into the entry-point script:
   CS_NET_DEV_HOST, CS_NET_DEV_PORT, CS_NET_DEV_USERNAME,
   CS_NET_DEV_PASSWORD, CS_NET_DEV_SSHKEY
 
-Network-specific properties (VLAN mappings etc.) stored alongside device
-details are exposed as  ``CS_NET_<KEY>`` env vars.
+Network service provider (NSP) name is always ``ExternalNetwork``, regardless
+of how many extensions are registered. The UI shows each extension as its own
+tab named after the extension, all sharing the single ExternalNetwork NSP.
 
 Setup on Marvin node (done by the test):
   1. Create network namespace:   ip netns add cs-extnet-<id>
   2. Generate RSA key pair; inject public key into authorized_keys.
   3. Copy external-network.sh into a temp dir.
   4. Deploy entry-point wrapper + private key to management server.
-  5. Call registerExtension with host/port/username/sshkey details.
+  5. Call addExternalNetworkDevice with host/port/username/sshkey details.
 
 Teardown:
-  1. Delete namespace:           ip netns del cs-extnet-<id>
-  2. Remove public key from authorized_keys.
-  3. Remove private key + wrapper from management server.
+  1. Delete external network device.
+  2. Unregister extension from physical network.
+  3. Delete namespace:           ip netns del cs-extnet-<id>
+  4. Remove public key from authorized_keys.
+  5. Remove private key + wrapper from management server.
 """
 import json
 import logging
@@ -700,30 +704,38 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
         CloudStack:
           6.  Create NetworkOrchestrator extension with network.capabilities JSON.
-          7.  Register extension with physical network (no credentials here).
+              Services are stored in the extension's ``network.capabilities`` detail.
+          7.  Register extension with physical network (no service validation needed).
           8a. addExternalNetworkDevice: store host/port/username/sshkey as
               extension_resource_map_details (sshkey stored with display=false).
           8b. listExternalNetworkDevices: verify device returned without sshkey.
           8c. updateExternalNetworkDevice: update a detail (e.g. port).
-          9.  Add + enable ExternalNetwork provider.
-          9.  Create network offering.
-         10.  Create account.
-         11.  Create isolated network  → entry-point receives CS_NET_DEV_HOST etc.
-         12.  Deploy VM   → implement  (wrapper SSHes to Marvin, runs in namespace).
-         13.  Acquire public IP.
-         14.  Enable static NAT.
-         15.  Disable static NAT.
-         16.  Acquire public IP for PF.
-         17.  Create port forwarding rule.
-         18.  Delete port forwarding rule.
-         19.  Destroy VM.
-         20.  Delete network  → shutdown/destroy (runs in namespace).
+          9.  Add + enable ExternalNetwork provider (NSP always named 'ExternalNetwork').
+         10.  Create network offering using 'ExternalNetwork' as service provider.
+         11.  Create account.
+         12.  Create isolated network  → entry-point receives CS_NET_DEV_HOST etc.
+         13.  Deploy VM   → implement  (wrapper SSHes to Marvin, runs in namespace).
+         14.  Acquire public IP.
+         15.  Enable static NAT.
+         16.  Disable static NAT.
+         17.  Acquire public IP for PF.
+         18.  Create port forwarding rule.
+         19.  Delete port forwarding rule.
+         20.  Destroy VM.
+         21.  Delete network  → shutdown/destroy (runs in namespace).
 
         Cleanup:
-         21.  Disable/delete provider.
-         22.  Unregister/delete extension.
-         23.  Remove key + wrapper from mgmt server.
-         24.  Delete network namespace; remove authorized_keys entry.
+         22.  Disable/delete provider.
+         23.  Unregister/delete extension.
+         24.  Remove key + wrapper from mgmt server.
+         25.  Delete network namespace; remove authorized_keys entry.
+
+        Notes:
+          - The network service provider is always registered as 'ExternalNetwork'
+            regardless of the extension name. The UI shows the extension name
+            as the tab label for each registered extension.
+          - The extension can be enabled/disabled via updateExtension(state=Enabled/Disabled).
+          - The extension can only be deleted when not registered to any resources.
         """
 
         # ---- Steps 1-3: Network namespace on Marvin node ----
@@ -786,8 +798,6 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.logger.info("Extension registered to physical network %s",
                          self.physical_network.id)
 
-        # The NSP name is now the extension's name (not hardcoded 'ExternalNetwork')
-        provider_name = ext_name
 
         # ---- Step 8b: Add external network device via addExternalNetworkDevice ----
         # Device details (host, port, username, sshkey) are stored as
@@ -1071,3 +1081,130 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.ns_server.stop()
         self.ns_server = None
         self.logger.info("Netns and script test PASSED")
+
+    @attr(tags=["advanced", "smoke"], required_hardware="false")
+    def test_05_extension_enable_disable_and_delete_restriction(self):
+        """Extension enable/disable via updateExtension and delete restriction.
+
+        Verifies:
+        - Admin can create a NetworkOrchestrator extension (default Enabled).
+        - Admin can disable the extension (state=Disabled).
+        - Admin can re-enable the extension (state=Enabled).
+        - Extension cannot be deleted while registered to a physical network.
+        - After unregistering, extension can be deleted.
+        """
+        pn = self._get_physical_network()
+        self.physical_network = pn
+
+        # Create extension
+        ext_name = "extnet-lifecycle-" + random_gen()
+        self.extension = Extension.create(
+            self.apiclient,
+            name=ext_name,
+            type='NetworkOrchestrator',
+            details=[{"network.capabilities": NETWORK_CAPABILITIES_JSON}]
+        )
+        self.assertIsNotNone(self.extension)
+        self.assertEqual('Enabled', self.extension.state,
+                         "Extension should be Enabled by default")
+
+        # Disable extension
+        self.extension.update(self.apiclient, state='Disabled')
+        ext_list = Extension.list(self.apiclient, id=self.extension.id)
+        self.assertEqual('Disabled', ext_list[0].state,
+                         "Extension should be Disabled after update")
+        self.logger.info("Extension disabled OK")
+
+        # Re-enable extension
+        self.extension.update(self.apiclient, state='Enabled')
+        ext_list = Extension.list(self.apiclient, id=self.extension.id)
+        self.assertEqual('Enabled', ext_list[0].state,
+                         "Extension should be Enabled after re-enable")
+        self.logger.info("Extension re-enabled OK")
+
+        # Register with physical network
+        self.extension.register(self.apiclient, pn.id, 'PhysicalNetwork')
+        self.logger.info("Extension registered to physical network %s", pn.id)
+
+        # Attempt to delete while registered → should fail
+        try:
+            self.extension.delete(self.apiclient,
+                                  unregisterresources=False, removeactions=False)
+            self.fail("Expected error when deleting extension while registered")
+        except Exception as e:
+            self.logger.info("Expected error when deleting while registered: %s", e)
+
+        # Unregister, then delete
+        self.extension.unregister(self.apiclient, pn.id, 'PhysicalNetwork')
+        self.extension.delete(self.apiclient,
+                              unregisterresources=False, removeactions=False)
+        self.extension = None
+        self.physical_network = None
+        self.logger.info("Extension deleted after unregister — delete restriction test PASSED")
+
+    @attr(tags=["advanced", "smoke"], required_hardware="false")
+    def test_06_external_network_device_crud(self):
+        """CRUD operations on external network devices.
+
+        Verifies:
+        - addExternalNetworkDevice: stores host/port/username; sshkey is hidden.
+        - listExternalNetworkDevices: returns device without sshkey.
+        - updateExternalNetworkDevice: updates a field.
+        - deleteExternalNetworkDevice: removes the device.
+        """
+        pn = self._get_physical_network()
+        self.physical_network = pn
+
+        # Need an extension registered before we can add a device
+        ext_name = "extnet-devtest-" + random_gen()
+        self.extension = Extension.create(
+            self.apiclient,
+            name=ext_name,
+            type='NetworkOrchestrator',
+            details=[{"network.capabilities": NETWORK_CAPABILITIES_JSON}]
+        )
+        self.extension.register(self.apiclient, pn.id, 'PhysicalNetwork')
+
+        # Add device
+        device = self._add_external_network_device(
+            physicalnetworkid=pn.id,
+            host='192.0.2.10',
+            port=22,
+            details=[
+                {"key": "username", "value": "root"},
+                {"key": "sshkey",   "value": "---FAKE-KEY---"},
+            ]
+        )
+        self.assertIsNotNone(device)
+        self.assertEqual('192.0.2.10', device.host)
+        self.assertEqual('22', str(device.port))
+        self.logger.info("Device added: host=%s port=%s", device.host, device.port)
+
+        # List — sshkey must not appear; username must appear
+        devices = self._list_external_network_devices(pn.id)
+        self.assertEqual(1, len(devices))
+        dev_details = devices[0].details or {}
+        self.assertIn("username", dev_details)
+        self.assertNotIn("sshkey", dev_details,
+                         "sshkey must be hidden (display=false)")
+
+        # Update port
+        updated = self._update_external_network_device(pn.id, port=2222)
+        self.assertEqual('2222', str(updated.port))
+        self.logger.info("Device updated: port=%s", updated.port)
+
+        # Delete
+        self._delete_external_network_device(pn.id)
+        devices = self._list_external_network_devices(pn.id)
+        self.assertEqual(0, len(devices))
+        self.logger.info("Device deleted OK")
+
+        # Cleanup
+        self.extension.unregister(self.apiclient, pn.id, 'PhysicalNetwork')
+        self.extension.delete(self.apiclient,
+                              unregisterresources=False, removeactions=False)
+        self.extension = None
+        self.physical_network = None
+        self.logger.info("External network device CRUD test PASSED")
+
+

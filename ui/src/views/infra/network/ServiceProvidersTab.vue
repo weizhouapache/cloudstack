@@ -1543,11 +1543,11 @@ export default {
         resourcetype: 'PhysicalNetwork'
       }).then(json => {
         this.registeredExtensions = (json.listextensionsresponse && json.listextensionsresponse.extension) || []
-        // Load NSP state for each extension tab and devices
+        // Load devices for each registered extension tab
         for (const ext of this.registeredExtensions) {
-          this.fetchServiceProvider(ext.name)
           this.loadDevicesForExtension(ext.name)
         }
+        // The ExternalNetwork NSP state is fetched once and shared across all extension tabs
       }).catch(() => {
         this.registeredExtensions = []
       })
