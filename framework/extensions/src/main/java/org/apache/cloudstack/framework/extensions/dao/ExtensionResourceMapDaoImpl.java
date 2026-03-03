@@ -67,4 +67,15 @@ public class ExtensionResourceMapDaoImpl extends GenericDaoBase<ExtensionResourc
         sc.setParameters("resourceType", resourceType);
         return customSearch(sc, null);
     }
+
+    @Override
+    public List<Long> listResourceIdsByType(ExtensionResourceMap.ResourceType resourceType) {
+        GenericSearchBuilder<ExtensionResourceMapVO, Long> sb = createSearchBuilder(Long.class);
+        sb.selectFields(sb.entity().getResourceId());
+        sb.and("resourceType", sb.entity().getResourceType(), SearchCriteria.Op.EQ);
+        sb.done();
+        SearchCriteria<Long> sc = sb.create();
+        sc.setParameters("resourceType", resourceType);
+        return customSearch(sc, null);
+    }
 }

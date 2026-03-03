@@ -27,4 +27,9 @@
     <bean id="ExternalNetwork" class="org.apache.cloudstack.network.element.ExternalNetworkElement">
         <property name="name" value="ExternalNetwork" />
     </bean>
+
+    <bean id="externalNetworkDeviceService"
+          class="org.apache.cloudstack.network.element.ExternalNetworkDeviceServiceImpl">
+        <property name="name" value="ExternalNetworkDeviceService" />
+    </bean>
 </beans>

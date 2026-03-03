@@ -46,6 +46,7 @@ import com.cloud.network.Network.Service;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.PublicIpAddress;
+import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
 import com.cloud.network.element.IpDeployer;
 import com.cloud.network.element.NetworkElement;
@@ -127,6 +128,8 @@ public class ExternalNetworkElement extends AdapterBase implements
     private NetworkServiceMapDao ntwkSrvcDao;
     @Inject
     private ExtensionHelper extensionHelper;
+    @Inject
+    private NetworkDetailsDao networkDetailsDao;
 
     private static Map<Service, Map<Capability, String>> initDefaultCapabilities() {
         Map<Service, Map<Capability, String>> caps = new HashMap<>();
@@ -481,6 +484,9 @@ public class ExternalNetworkElement extends AdapterBase implements
             // Inject device credentials and other resource-map details as env vars
             injectResourceMapEnv(env, network.getPhysicalNetworkId());
 
+            // Inject per-network details (namespace, vrf, etc.) from network_details
+            injectNetworkDetailsEnv(env, network.getId());
+
             Process process = pb.start();
             byte[] output = process.getInputStream().readAllBytes();
             int exitCode = process.waitFor();
@@ -513,7 +519,9 @@ public class ExternalNetworkElement extends AdapterBase implements
         if (physicalNetworkId == null) {
             return;
         }
-        Map<String, String> details = extensionHelper.getResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
+        // Use getAllResourceMapDetails (includes display=false) so that sensitive
+        // fields like password and sshkey are injected into the script env vars
+        Map<String, String> details = extensionHelper.getAllResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
         if (details == null || details.isEmpty()) {
             return;
         }
@@ -543,7 +551,43 @@ public class ExternalNetworkElement extends AdapterBase implements
     }
 
     /**
-     * Resolves the script file from the NetworkOrchestrator extension associated
+     * Injects per-network properties stored in {@code network_details} as
+     * {@code CS_NET_<KEY>} environment variables.
+     *
+     * <p>These are the network-level details set by operators (or by the
+     * entry-point script on first use) that describe how this specific
+     * CloudStack network is represented on the external device — for example:</p>
+     * <ul>
+     *   <li>{@code ext.namespace} → {@code CS_NET_EXT_NAMESPACE} – the Linux
+     *       network namespace assigned to this network on the device</li>
+     *   <li>{@code ext.vrf}       → {@code CS_NET_EXT_VRF} – VRF name</li>
+     *   <li>{@code ext.bridge}    → {@code CS_NET_EXT_BRIDGE} – bridge name</li>
+     * </ul>
+     * Only keys that start with {@code ext.} are injected, upper-cased and
+     * with the dot replaced by an underscore, e.g.
+     * {@code ext.namespace} → {@code CS_NET_EXT_NAMESPACE}.
+     */
+    protected void injectNetworkDetailsEnv(Map<String, String> env, long networkId) {
+        Map<String, String> networkDetails = networkDetailsDao.listDetailsKeyPairs(networkId);
+        if (networkDetails == null || networkDetails.isEmpty()) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : networkDetails.entrySet()) {
+            String key   = entry.getKey();
+            String value = entry.getValue();
+            if (value == null || !key.startsWith("ext.")) {
+                continue;
+            }
+            // ext.namespace -> CS_NET_EXT_NAMESPACE
+            String envKey = "CS_NET_" + key.toUpperCase().replace('.', '_');
+            env.put(envKey, value);
+            logger.debug("  network-detail env {}={}", envKey, value);
+        }
+    }
+
+    /**
+     * Resolves the script file from the NetworkOrchestrator extension
+     * associated
      * with the given network's physical network.
      *
      * The extension's path (resolved by ExtensionHelper from the extensions base

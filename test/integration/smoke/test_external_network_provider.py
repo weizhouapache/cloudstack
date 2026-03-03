@@ -85,7 +85,11 @@ from marvin.cloudstackAPI import (listPhysicalNetworks,
                                   addNetworkServiceProvider,
                                   listNetworkServiceProviders,
                                   updateNetworkServiceProvider,
-                                  deleteNetworkServiceProvider)
+                                  deleteNetworkServiceProvider,
+                                  addExternalNetworkDevice,
+                                  listExternalNetworkDevices,
+                                  updateExternalNetworkDevice,
+                                  deleteExternalNetworkDevice)
 from marvin.lib.base import (Account,
                              Extension,
                              Network,
@@ -549,6 +553,43 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.apiclient.deleteNetworkServiceProvider(cmd)
 
     # ------------------------------------------------------------------
+    # External network device API helpers
+    # ------------------------------------------------------------------
+
+    def _add_external_network_device(self, physicalnetworkid, host, port=22,
+                                     details=None):
+        """Call addExternalNetworkDevice and return the response object."""
+        cmd = addExternalNetworkDevice.addExternalNetworkDeviceCmd()
+        cmd.physicalnetworkid = physicalnetworkid
+        cmd.host = host
+        cmd.port = port
+        if details:
+            cmd.details = details
+        return self.apiclient.addExternalNetworkDevice(cmd)
+
+    def _list_external_network_devices(self, physicalnetworkid=None):
+        """Call listExternalNetworkDevices and return the list."""
+        cmd = listExternalNetworkDevices.listExternalNetworkDevicesCmd()
+        if physicalnetworkid:
+            cmd.physicalnetworkid = physicalnetworkid
+        result = self.apiclient.listExternalNetworkDevices(cmd)
+        return result if isinstance(result, list) else []
+
+    def _update_external_network_device(self, physicalnetworkid, **kwargs):
+        """Call updateExternalNetworkDevice."""
+        cmd = updateExternalNetworkDevice.updateExternalNetworkDeviceCmd()
+        cmd.physicalnetworkid = physicalnetworkid
+        for k, v in kwargs.items():
+            setattr(cmd, k, v)
+        return self.apiclient.updateExternalNetworkDevice(cmd)
+
+    def _delete_external_network_device(self, physicalnetworkid):
+        """Call deleteExternalNetworkDevice."""
+        cmd = deleteExternalNetworkDevice.deleteExternalNetworkDeviceCmd()
+        cmd.physicalnetworkid = physicalnetworkid
+        self.apiclient.deleteExternalNetworkDevice(cmd)
+
+    # ------------------------------------------------------------------
     # Namespace / mgmt-server helpers
     # ------------------------------------------------------------------
 
@@ -603,6 +644,12 @@ class TestExternalNetworkProvider(cloudstackTestCase):
                 self.mgmt_deployer.remove_file(self._mgmt_key_path)
 
     def _safe_teardown(self):
+        # Delete external network device details before unregistering extension
+        if self.physical_network:
+            try:
+                self._delete_external_network_device(self.physical_network.id)
+            except Exception:
+                pass
         if self.extension and self.physical_network:
             try:
                 self.extension.unregister(self.apiclient,
@@ -652,13 +699,12 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
         CloudStack:
           6.  Create NetworkOrchestrator extension with network.capabilities JSON.
-          7.  Register extension with physical network, passing device credentials
-              as extension_resource_map_details:
-                  host=<marvin_ip>  port=22  username=root  sshkey=<PEM>
-              ExternalNetworkElement reads these via
-              ExtensionHelper.getResourceMapDetailsForPhysicalNetwork() and injects
-              them as CS_NET_DEV_* env vars into the entry-point script.
-          8.  Add + enable ExternalNetwork provider.
+          7.  Register extension with physical network (no credentials here).
+          8a. addExternalNetworkDevice: store host/port/username/sshkey as
+              extension_resource_map_details (sshkey stored with display=false).
+          8b. listExternalNetworkDevices: verify device returned without sshkey.
+          8c. updateExternalNetworkDevice: update a detail (e.g. port).
+          9.  Add + enable ExternalNetwork provider.
           9.  Create network offering.
          10.  Create account.
          11.  Create isolated network  → entry-point receives CS_NET_DEV_HOST etc.
@@ -723,31 +769,60 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.logger.info("Extension %s created, path=%s", ext_name, self.extension_path)
 
         # ---- Steps 6-7: Deploy key + wrapper to management server ----
-        # Returns the private key PEM for storing in extension_resource_map_details
+        # Returns the private key PEM to pass to addExternalNetworkDevice
         ssh_key_pem = self._deploy_to_mgmt_server(self.extension_path, MGMT_KEY_PATH)
 
-        # ---- Step 8: Register extension with physical network +
-        #              store device credentials as extension_resource_map_details ----
-        # ExternalNetworkElement reads these details via
-        # ExtensionHelper.getResourceMapDetailsForPhysicalNetwork() and injects
-        # them as CS_NET_DEV_HOST / CS_NET_DEV_PORT / CS_NET_DEV_USERNAME /
-        # CS_NET_DEV_SSHKEY environment variables when calling the entry-point.
-        reg_details = {
-            "host":     marvin_ip,
-            "port":     str(MARVIN_SSH_PORT),
-            "username": MARVIN_SSH_USER,
-            "sshkey":   ssh_key_pem,
-        }
+        # ---- Step 8a: Register extension with physical network (no credentials here) ----
         self.extension.register(
             self.apiclient,
             self.physical_network.id,
-            'PhysicalNetwork',
-            details=reg_details
+            'PhysicalNetwork'
         )
+        self.logger.info("Extension registered to physical network %s",
+                         self.physical_network.id)
+
+        # ---- Step 8b: Add external network device via addExternalNetworkDevice ----
+        # Device details (host, port, username, sshkey) are stored as
+        # extension_resource_map_details. Sensitive fields (sshkey) are stored
+        # with display=false and never returned by listExternalNetworkDevices.
+        # ExternalNetworkElement reads all details (including hidden) and injects
+        # them as CS_NET_DEV_HOST / CS_NET_DEV_PORT / CS_NET_DEV_USERNAME /
+        # CS_NET_DEV_SSHKEY environment variables when calling the entry-point.
+        device = self._add_external_network_device(
+            physicalnetworkid=self.physical_network.id,
+            host=marvin_ip,
+            port=MARVIN_SSH_PORT,
+            details=[
+                {"key": "username", "value": MARVIN_SSH_USER},
+                {"key": "sshkey",   "value": ssh_key_pem},
+            ]
+        )
+        self.assertIsNotNone(device)
+        self.assertEqual(marvin_ip, device.host)
         self.logger.info(
-            "Extension registered to physical network %s "
-            "with device details host=%s port=%d username=%s sshkey=<redacted>",
-            self.physical_network.id, marvin_ip, MARVIN_SSH_PORT, MARVIN_SSH_USER)
+            "External network device added: host=%s port=%s username via details, sshkey=<redacted>",
+            device.host, device.port)
+
+        # Verify listExternalNetworkDevices returns the device
+        # username should appear in details (display=true)
+        # sshkey must NOT appear (display=false)
+        devices = self._list_external_network_devices(self.physical_network.id)
+        self.assertEqual(1, len(devices))
+        self.assertEqual(marvin_ip, devices[0].host)
+        dev_details = devices[0].details or {}
+        self.assertIn("username", dev_details,
+                      "username should be visible in details")
+        self.assertNotIn("sshkey", dev_details,
+                         "sshkey must NOT be returned in list response")
+
+        # ---- Step 8c: Update device — change port back to 22 (round-trip test) ----
+        updated = self._update_external_network_device(
+            self.physical_network.id,
+            port=22
+        )
+        self.assertIsNotNone(updated)
+        self.assertEqual('22', str(updated.port))
+        self.logger.info("External network device updated: port=%s", updated.port)
 
         # ---- Step 9: Add + enable ExternalNetwork provider ----
         provider = self._find_provider(self.physical_network.id,

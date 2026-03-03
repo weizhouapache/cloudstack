@@ -1724,8 +1724,56 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         if (map == null) {
             return new java.util.HashMap<>();
         }
+        Map<String, String> details = extensionResourceMapDetailsDao.listDetailsKeyPairs(map.getId(), true);
+        return details != null ? details : new java.util.HashMap<>();
+    }
+
+    @Override
+    public Map<String, String> getAllResourceMapDetailsForPhysicalNetwork(long physicalNetworkId) {
+        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (map == null) {
+            return new java.util.HashMap<>();
+        }
         Map<String, String> details = extensionResourceMapDetailsDao.listDetailsKeyPairs(map.getId());
         return details != null ? details : new java.util.HashMap<>();
+    }
+
+    @Override
+    public Long getResourceMapIdForPhysicalNetwork(long physicalNetworkId) {
+        ExtensionResourceMapVO map = extensionResourceMapDao.findByResourceIdAndType(physicalNetworkId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        return map != null ? map.getId() : null;
+    }
+
+    @Override
+    public void updateResourceMapDetails(long resourceMapId, Map<String, String> details,
+            java.util.Set<String> displayKeys) {
+        if (MapUtils.isEmpty(details)) {
+            return;
+        }
+        List<ExtensionResourceMapDetailsVO> detailsList = new ArrayList<>();
+        for (Map.Entry<String, String> entry : details.entrySet()) {
+            boolean display = displayKeys == null || displayKeys.contains(entry.getKey());
+            detailsList.add(new ExtensionResourceMapDetailsVO(resourceMapId, entry.getKey(),
+                    entry.getValue(), display));
+        }
+        extensionResourceMapDetailsDao.saveDetails(detailsList);
+    }
+
+    @Override
+    public void removeResourceMapDetails(long resourceMapId, List<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return;
+        }
+        for (String key : keys) {
+            extensionResourceMapDetailsDao.removeDetail(resourceMapId, key);
+        }
+    }
+
+    @Override
+    public List<Long> listPhysicalNetworkIdsWithExtension() {
+        return extensionResourceMapDao.listResourceIdsByType(ExtensionResourceMap.ResourceType.PhysicalNetwork);
     }
 
     @Override
