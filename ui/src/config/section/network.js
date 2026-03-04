@@ -207,7 +207,7 @@ export default {
             return 'runCustomAction' in store.getters.apis &&
               'listCustomActions' in store.getters.apis &&
               record.service && record.service.some(s =>
-                s.provider && s.provider.some(p => p.name === 'ExternalNetwork'))
+              s.provider && s.provider.some(p => p.name === 'ExternalNetwork'))
           },
           popup: true,
           component: shallowRef(defineAsyncComponent(() => import('@/views/extension/RunCustomAction.vue')))

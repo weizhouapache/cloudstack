@@ -1048,7 +1048,7 @@ export default {
               listView: true,
               label: 'label.enable.provider',
               confirm: 'message.confirm.enable.provider',
-              show: (record) => { return (record && record.id && record.state === 'Disabled') },
+              show: (record) => { return record && record.id && record.state === 'Disabled' },
               mapping: {
                 state: {
                   value: (record) => { return 'Enabled' }
@@ -1293,7 +1293,7 @@ export default {
               listView: true,
               label: 'label.enable.provider',
               confirm: 'message.confirm.enable.provider',
-              show: (record) => { return (record && record.id && record.state === 'Disabled' },
+              show: (record) => { return (record && record.id && record.state === 'Disabled') },
               mapping: {
                 state: {
                   value: (record) => { return 'Enabled' }
@@ -1456,7 +1456,7 @@ export default {
         // Step 2: addNetworkServiceProvider — always use 'ExternalNetwork' as the provider name
         // The UI displays the extension name as the tab label, but the underlying
         // provider must be 'ExternalNetwork' so the NetworkElement.canHandle() works.
-        const existingNsp = this.nsps['ExternalNetwork']
+        const existingNsp = this.nsps.ExternalNetwork
         if (!existingNsp) {
           const nspJson = await postAPI('addNetworkServiceProvider', {
             name: 'ExternalNetwork',
@@ -1565,7 +1565,7 @@ export default {
       })
     },
     handleEnableExtensionProvider () {
-      const nsp = this.nsps['ExternalNetwork']
+      const nsp = this.nsps.ExternalNetwork
       if (!nsp || !nsp.id) return
       postAPI('updateNetworkServiceProvider', { id: nsp.id, state: 'Enabled' }).then(() => {
         this.$message.success(this.$t('label.enable.provider'))
@@ -1573,7 +1573,7 @@ export default {
       }).catch(error => this.$notifyError(error))
     },
     handleDisableExtensionProvider () {
-      const nsp = this.nsps['ExternalNetwork']
+      const nsp = this.nsps.ExternalNetwork
       if (!nsp || !nsp.id) return
       postAPI('updateNetworkServiceProvider', { id: nsp.id, state: 'Disabled' }).then(() => {
         this.$message.success(this.$t('label.disable.provider'))

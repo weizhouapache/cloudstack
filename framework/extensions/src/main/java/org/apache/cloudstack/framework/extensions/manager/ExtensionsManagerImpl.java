@@ -129,8 +129,10 @@ import com.cloud.hypervisor.Hypervisor;
 import com.cloud.network.Network;
 import com.cloud.network.Network.Capability;
 import com.cloud.network.Network.Service;
+import com.cloud.network.NetworkModel;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
+import com.cloud.network.element.NetworkElement;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.org.Cluster;
@@ -232,13 +234,14 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     NetworkServiceMapDao networkServiceMapDao;
 
     @Inject
+    NetworkModel networkModel;
+
+    @Inject
     RoleService roleService;
 
     @Inject
     AccountService accountService;
 
-    @Inject
-    List<NetworkCustomActionProvider> networkCustomActionProviders;
 
     private ScheduledExecutorService extensionPathStateCheckExecutor;
 
@@ -1758,26 +1761,44 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             parameters = ExtensionCustomAction.Parameter.validateParameterValues(actionParameters, cmdParameters);
         }
 
-        // Find a provider that can handle this network
-        NetworkCustomActionProvider provider = null;
-        if (CollectionUtils.isNotEmpty(networkCustomActionProviders)) {
-            for (NetworkCustomActionProvider p : networkCustomActionProviders) {
-                if (p.canHandleCustomAction(network)) {
-                    provider = p;
-                    break;
-                }
+        // Find the provider name for this network (try each service until we find one)
+        String providerName = null;
+        for (Service service : new Service[]{Service.SourceNat, Service.StaticNat,
+                Service.PortForwarding, Service.Firewall, Service.Gateway}) {
+            providerName = networkServiceMapDao.getProviderForServiceInNetwork(network.getId(), service);
+            if (StringUtils.isNotBlank(providerName)) {
+                break;
             }
         }
-        if (provider == null) {
-            logger.error("No NetworkCustomActionProvider found for network {}", network.getId());
-            result.put(ApiConstants.DETAILS, "No external network provider registered for this network");
+        if (StringUtils.isBlank(providerName)) {
+            logger.error("No network service provider found for network {}", network.getId());
+            result.put(ApiConstants.DETAILS, "No network service provider found for this network");
             response.setResult(result);
             return response;
         }
 
+        // Get the network element implementing that provider
+        NetworkElement element = networkModel.getElementImplementingProvider(providerName);
+        if (element == null) {
+            logger.error("No NetworkElement found implementing provider '{}' for network {}", providerName, network.getId());
+            result.put(ApiConstants.DETAILS, "No network element found for provider: " + providerName);
+            response.setResult(result);
+            return response;
+        }
+
+        // The element must implement NetworkCustomActionProvider
+        if (!(element instanceof NetworkCustomActionProvider)) {
+            logger.error("Network element '{}' for provider '{}' does not support custom actions",
+                    element.getClass().getSimpleName(), providerName);
+            result.put(ApiConstants.DETAILS, "Provider '" + providerName + "' does not support custom actions");
+            response.setResult(result);
+            return response;
+        }
+
+        NetworkCustomActionProvider provider = (NetworkCustomActionProvider) element;
         try {
-            logger.info("Running network custom action '{}' on network {} via {}", actionName,
-                    network.getId(), provider.getClass().getSimpleName());
+            logger.info("Running network custom action '{}' on network {} via {} (provider: {})",
+                    actionName, network.getId(), element.getClass().getSimpleName(), providerName);
             String output = provider.runCustomAction(network, actionName, parameters);
             boolean success = output != null;
             response.setSuccess(success);
