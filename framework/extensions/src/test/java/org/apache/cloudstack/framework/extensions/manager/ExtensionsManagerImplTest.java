@@ -141,7 +141,7 @@ import com.cloud.vm.VirtualMachineManager;
 import com.cloud.vm.VmDetailConstants;
 import com.cloud.vm.dao.VMInstanceDao;
 
-@RunWith(MockitoJUnitRunner.class)
+@RunWith(MockitoJUnitRunner.Silent.class)
 public class ExtensionsManagerImplTest {
 
     @Spy
@@ -2192,8 +2192,8 @@ public class ExtensionsManagerImplTest {
     @Test
     public void getAllResourceMapDetailsForPhysicalNetworkReturnsEmptyMapWhenNotRegistered() {
         long physNetId = 10L;
-        when(extensionResourceMapDao.findByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(null);
+        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
+                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(Collections.emptyList());
 
         Map<String, String> result = extensionsManager.getAllResourceMapDetailsForPhysicalNetwork(physNetId);
 
