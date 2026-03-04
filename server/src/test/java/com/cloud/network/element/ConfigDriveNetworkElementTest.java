@@ -206,7 +206,7 @@ public class ConfigDriveNetworkElementTest {
 
         _networkModel.setNetworkElements(Arrays.asList(_configDrivesNetworkElement));
         ReflectionTestUtils.setField(_networkModel, "extensionHelper", extensionHelper);
-        Mockito.lenient().when(extensionHelper.isExternalNetworkProvider(Mockito.anyString())).thenReturn(false);
+        Mockito.lenient().when(extensionHelper.isNetworkExtensionProvider(Mockito.anyString())).thenReturn(false);
         _networkModel.start();
 
     }

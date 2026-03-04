@@ -64,10 +64,12 @@ import com.cloud.vm.ReservationContext;
 import com.cloud.vm.VirtualMachineProfile;
 
 /**
- * ExternalNetworkElement is a network plugin that delegates all network
- * configuration to an external script. The script manages VLAN/bridge setup,
+ * NetworkExtensionElement is a network plugin that delegates all network
+ * configuration to an external script via a registered {@link Extension} of
+ * type {@code NetworkOrchestrator}.  The script manages VLAN/bridge setup,
  * iptables-based source NAT, static NAT, and port forwarding on a Linux
- * server acting as the network gateway.
+ * server (or any other device reachable by the entry-point script) acting
+ * as the network gateway.
  *
  * <h3>Extension-based configuration</h3>
  * The script path and network capabilities are resolved dynamically from a
@@ -115,7 +117,7 @@ import com.cloud.vm.VirtualMachineProfile;
  * </pre>
  * If no {@code network.capabilities} detail is set, defaults to all services.
  */
-public class ExternalNetworkElement extends AdapterBase implements
+public class NetworkExtensionElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
         PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider {
 
@@ -317,7 +319,7 @@ public class ExternalNetworkElement extends AdapterBase implements
 
     @Override
     public Provider getProvider() {
-        return Provider.ExternalNetwork;
+        return Provider.NetworkExtension;
     }
 
     /**
@@ -371,7 +373,7 @@ public class ExternalNetworkElement extends AdapterBase implements
     }
 
     protected boolean canHandle(Network network, Service service) {
-        // Check whether any of this network's providers is handled by an ExternalNetwork extension
+        // Check whether any of this network's providers is handled by a NetworkExtension extension
         Long physicalNetworkId = network.getPhysicalNetworkId();
         if (physicalNetworkId == null) {
             return false;
@@ -415,7 +417,7 @@ public class ExternalNetworkElement extends AdapterBase implements
         if (!canHandle(network, Service.SourceNat)) {
             return false;
         }
-        logger.info("Implementing external network for network {} (VLAN {})", network.getId(), network.getBroadcastUri());
+        logger.info("Implementing network extension for network {} (VLAN {})", network.getId(), network.getBroadcastUri());
         String vlanId = getVlanId(network);
 
         return executeScript(network,
@@ -442,7 +444,7 @@ public class ExternalNetworkElement extends AdapterBase implements
     @Override
     public boolean shutdown(Network network, ReservationContext context, boolean cleanup)
             throws ConcurrentOperationException, ResourceUnavailableException {
-        logger.info("Shutting down external network for network {}", network.getId());
+        logger.info("Shutting down network extension for network {}", network.getId());
         return executeScript(network,
                 "shutdown",
                 "--network-id", String.valueOf(network.getId()),
@@ -451,7 +453,7 @@ public class ExternalNetworkElement extends AdapterBase implements
 
     @Override
     public boolean destroy(Network network, ReservationContext context) throws ConcurrentOperationException, ResourceUnavailableException {
-        logger.info("Destroying external network for network {}", network.getId());
+        logger.info("Destroying network extension for network {}", network.getId());
         return executeScript(network,
                 "destroy",
                 "--network-id", String.valueOf(network.getId()),
@@ -631,7 +633,7 @@ public class ExternalNetworkElement extends AdapterBase implements
             cmdLine.add(arg);
         }
 
-        logger.debug("Executing external network script: {}", String.join(" ", cmdLine));
+        logger.debug("Executing network extension script: {}", String.join(" ", cmdLine));
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
@@ -655,13 +657,13 @@ public class ExternalNetworkElement extends AdapterBase implements
             }
 
             if (exitCode != 0) {
-                logger.error("External network script failed with exit code {}: {}", exitCode, outputStr);
+                logger.error("Network extension script failed with exit code {}: {}", exitCode, outputStr);
                 return false;
             }
             return true;
         } catch (Exception e) {
-            logger.error("Failed to execute external network script: {}", e.getMessage(), e);
-            throw new CloudRuntimeException("Failed to execute external network script", e);
+            logger.error("Failed to execute network extension script: {}", e.getMessage(), e);
+            throw new CloudRuntimeException("Failed to execute network extension script", e);
         }
     }
 
@@ -765,7 +767,7 @@ public class ExternalNetworkElement extends AdapterBase implements
     }
 
     /**
-     * Returns {@code true} if the network is served by an ExternalNetwork
+     * Returns {@code true} if the network is served by a NetworkExtension
      * service provider (i.e. this element handles it).
      */
     @Override

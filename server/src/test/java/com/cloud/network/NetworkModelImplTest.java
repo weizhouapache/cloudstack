@@ -100,7 +100,7 @@ public class NetworkModelImplTest {
         networkModel._ntwkSrvcDao = networkServiceMapDao;
         networkModel._ntwkOfferingSrvcDao = networkOfferingServiceMapDao;
         ReflectionTestUtils.setField(networkModel, "extensionHelper", extensionHelper);
-        Mockito.lenient().when(extensionHelper.isExternalNetworkProvider(Mockito.anyString())).thenReturn(false);
+        Mockito.lenient().when(extensionHelper.isNetworkExtensionProvider(Mockito.anyString())).thenReturn(false);
     }
 
     private void prepareMocks(boolean isIp6, Network network, DataCenter zone, VpcVO vpc,

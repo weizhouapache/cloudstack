@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Smoke tests for External Network Provider plugin.
+"""Smoke tests for NetworkExtension plugin (formerly External Network Provider).
 
 Architecture
 ------------
@@ -28,13 +28,13 @@ is already present on any modern Linux host.
   │  Management Server               │ ───────────→ │  Marvin node                     │
   │                                  │  marvin_ip   │                                  │
   │  [extension path]/entry-point    │              │  ip netns exec cs-extnet-<id>    │
-  │   (SSH wrapper written by test)  │              │    external-network.sh "$@"       │
+  │   (SSH wrapper written by test)  │              │    network-extension-wrapper.sh   │
   └──────────────────────────────────┘              └──────────────────────────────────┘
          ↑ executes wrapper                                  ↑ namespace created by test
-  CloudStack ExternalNetworkElement             iptables/bridge ops run here (isolated)
+  CloudStack NetworkExtensionElement             iptables/bridge ops run here (isolated)
 
 The entry-point wrapper on the management server SSHes to the Marvin node and
-runs external-network.sh inside the network namespace.
+runs network-extension-wrapper.sh inside the network namespace.
 
 Two-step setup:
   Step 1 — Register extension with physical network (no credentials):
@@ -50,20 +50,23 @@ Two-step setup:
     Sensitive fields (password, sshkey) are stored with display=false and are
     never returned by listExternalNetworkDevices.
 
-``ExternalNetworkElement`` reads all details (including hidden) via
+``NetworkExtensionElement`` reads all details (including hidden) via
 ``ExtensionHelper.getAllResourceMapDetailsForPhysicalNetwork()`` and injects them
 as environment variables into the entry-point script:
   CS_NET_DEV_HOST, CS_NET_DEV_PORT, CS_NET_DEV_USERNAME,
   CS_NET_DEV_PASSWORD, CS_NET_DEV_SSHKEY
 
-Network service provider (NSP) name is always ``ExternalNetwork``, regardless
-of how many extensions are registered. The UI shows each extension as its own
-tab named after the extension, all sharing the single ExternalNetwork NSP.
+Network service provider (NSP) name is the **extension name** (e.g. ``extnet-smoke-<id>``),
+not a generic ``NetworkExtension`` string.  This allows multiple different extensions to be
+registered to the same physical network, each with its own NSP entry.  When creating a
+network offering the ``serviceProviderList`` must use the actual extension name as the
+provider for each service.  The UI lists each registered extension as its own entry in
+the physical network's network service provider tab.
 
 Setup on Marvin node (done by the test):
   1. Create network namespace:   ip netns add cs-extnet-<id>
   2. Generate RSA key pair; inject public key into authorized_keys.
-  3. Copy external-network.sh into a temp dir.
+  3. Copy network-extension-wrapper.sh into a temp dir.
   4. Deploy entry-point wrapper + private key to management server.
   5. Call addExternalNetworkDevice with host/port/username/sshkey details.
 
@@ -112,7 +115,7 @@ from nose.plugins.attrib import attr
 
 _multiprocess_shared_ = True
 
-EXTERNAL_NETWORK_PROVIDER_NAME = 'ExternalNetwork'  # default fallback; replaced with extension name in tests
+EXTERNAL_NETWORK_PROVIDER_NAME = 'NetworkExtension'  # legacy fallback only; actual provider name is the extension name
 
 # SSH port on the Marvin node that the management server connects to
 MARVIN_SSH_PORT = 22
@@ -125,7 +128,7 @@ NS_PREFIX = 'cs-extnet'
 
 # Path on the Marvin node where the script is placed
 SCRIPT_DIR = '/tmp'
-SCRIPT_FILENAME = 'cs-external-network.sh'
+SCRIPT_FILENAME = 'network-extension-wrapper.sh'
 
 ENTRY_POINT_FILENAME = 'entry-point'
 
@@ -143,19 +146,19 @@ NETWORK_CAPABILITIES_JSON = json.dumps({
     }
 })
 
-# Path to the reference external-network.sh in the source tree
+# Path to the reference network-extension-wrapper.sh in the source tree
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..', '..'))
 REFERENCE_SCRIPT_SRC = os.path.join(
     _REPO_ROOT,
-    'plugins', 'network-elements', 'external-network',
-    'src', 'main', 'resources', 'scripts', 'external-network.sh'
+    'plugins', 'network-elements', 'network-extension',
+    'src', 'main', 'resources', 'scripts', 'network-extension-wrapper.sh'
 )
 # Static entry-point wrapper (in extensions/ in the repo) — deployed to the
 # extension path on the management server unchanged. All connection details
-# are passed as environment variables by ExternalNetworkElement.
+# are passed as environment variables by NetworkExtensionElement.
 STATIC_ENTRY_POINT_SRC = os.path.join(
-    _REPO_ROOT, 'extensions', 'external-network', 'entry-point'
+    _REPO_ROOT, 'extensions', 'network-extension', 'entry-point'
 )
 
 
@@ -198,7 +201,7 @@ class NetnsNetworkServer:
     """Creates an isolated Linux network namespace on the Marvin node.
 
     The namespace provides iptables/bridge isolation so that the
-    external-network.sh script can run without polluting the host.
+    network-extension-wrapper.sh script can run without polluting the host.
 
     The management server SSHes to the Marvin node at the normal SSH port
     and runs:
@@ -290,7 +293,7 @@ class NetnsNetworkServer:
     # ---- helpers ----
 
     def _install_script(self):
-        """Copy external-network.sh to a temp path on the Marvin node."""
+        """Copy network-extension-wrapper.sh to a temp path on the Marvin node."""
         dest = os.path.join(self._tmpdir, SCRIPT_FILENAME)
         if os.path.exists(REFERENCE_SCRIPT_SRC):
             shutil.copy2(REFERENCE_SCRIPT_SRC, dest)
@@ -446,7 +449,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
     A Linux network namespace is created on the Marvin node for iptables
     isolation.  The management server SSHes to the Marvin node and runs
-    external-network.sh inside the namespace.
+    network-extension-wrapper.sh inside the namespace.
     """
 
     @classmethod
@@ -583,9 +586,9 @@ class TestExternalNetworkProvider(cloudstackTestCase):
     def _deploy_to_mgmt_server(self, ext_path):
         """Deploy the static entry-point script to the extension path on the mgmt server.
 
-        The static entry-point (extensions/external-network/entry-point) reads all
+        The static entry-point (extensions/network-extension/entry-point) reads all
         connection details (host, port, username, sshkey, namespace, script_path) from
-        environment variables injected by ExternalNetworkElement — so no dynamic
+        environment variables injected by NetworkExtensionElement — so no dynamic
         wrapper generation is needed.
 
         Returns the private-key PEM content so the caller can store it in
@@ -596,7 +599,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         if not os.path.exists(entry_point_src):
             raise RuntimeError(
                 "Static entry-point not found at %s. "
-                "Please ensure extensions/external-network/entry-point exists." % entry_point_src)
+                "Please ensure extensions/network-extension/entry-point exists." % entry_point_src)
 
         # 2. Deploy it to the extension path on the management server
         self._mgmt_wrapper_path = os.path.join(ext_path, ENTRY_POINT_FILENAME)
@@ -666,23 +669,25 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         Marvin node:
           1.  Create Linux network namespace  (ip netns add cs-extnet-<id>).
           2.  Generate RSA key pair; inject public key into authorized_keys.
-          3.  Copy external-network.sh to a temp path.
+          3.  Copy network-extension-wrapper.sh to a temp path.
 
         Management server:
-          4.  Deploy static entry-point (extensions/external-network/entry-point)
+          4.  Deploy static entry-point (extensions/network-extension/entry-point)
               to <extension_path>/entry-point — no dynamic wrapper generation.
               The entry-point reads all connection details from env vars at runtime.
 
         CloudStack:
-          5.  Create NetworkOrchestrator extension (path=external-network/entry-point).
+          5.  Create NetworkOrchestrator extension (path=network-extension/entry-point).
           6.  Register extension with physical network.
           7.  addExternalNetworkDevice: store host, port, username, sshkey,
               namespace, script_path as extension_resource_map_details.
               - sshkey stored with display=false (never returned by list API).
               - namespace/script_path stored with display=true.
           8.  listExternalNetworkDevices: verify device, sshkey hidden, namespace visible.
-          9.  Add + enable ExternalNetwork provider (NSP always named 'ExternalNetwork').
-         10.  Create network offering using 'ExternalNetwork' as service provider.
+          9.  Add + enable provider (NSP named after the extension, not 'ExternalNetwork').
+              Each registered extension becomes its own named network service provider
+              so multiple extensions can coexist on the same physical network.
+         10.  Create network offering using the extension name as service provider.
          11.  Create account.
          12.  Create isolated network.
               → entry-point receives: CS_NET_DEV_HOST, CS_NET_DEV_SSHKEY,
@@ -705,8 +710,10 @@ class TestExternalNetworkProvider(cloudstackTestCase):
          25.  Delete network namespace; remove authorized_keys entry.
 
         Notes:
-          - The network service provider is always registered as 'ExternalNetwork'.
-          - The entry-point (extensions/external-network/entry-point) is a static
+          - Each registered extension becomes its own network service provider named
+            after the extension. This avoids ambiguity when multiple external network
+            extensions are registered to the same physical network.
+          - The entry-point (extensions/network-extension/entry-point) is a static
             script that reads ALL details from environment variables — no hardcoding.
           - namespace and script_path are passed as addExternalNetworkDevice details,
             becoming CS_NET_NAMESPACE and CS_NET_SCRIPT_PATH env vars.
@@ -758,7 +765,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.logger.info("Extension %s created, path=%s", ext_name, self.extension_path)
 
         # ---- Steps 6-7: Deploy static entry-point to management server ----
-        # The static entry-point (extensions/external-network/entry-point) reads
+        # The static entry-point (extensions/network-extension/entry-point) reads
         # all connection details from env vars - no dynamic wrapper generation needed.
         # Returns the private key PEM to store in addExternalNetworkDevice.
         ssh_key_pem = self._deploy_to_mgmt_server(self.extension_path)
@@ -781,7 +788,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         # Device details (host, port, username, sshkey) are stored as
         # extension_resource_map_details. Sensitive fields (sshkey) are stored
         # with display=false and never returned by listExternalNetworkDevices.
-        # ExternalNetworkElement reads all details (including hidden) and injects
+        # NetworkExtensionElement reads all details (including hidden) and injects
         # them as env vars: CS_NET_DEV_HOST, CS_NET_DEV_PORT, CS_NET_DEV_USERNAME,
         # CS_NET_DEV_SSHKEY, CS_NET_NAMESPACE, CS_NET_SCRIPT_PATH.
         device = self._add_external_network_device(
@@ -822,11 +829,11 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.assertEqual('22', str(updated.port))
         self.logger.info("External network device updated: port=%s", updated.port)
 
-        # ---- Step 9: Add + enable ExternalNetwork provider ----
-        # NSP must be named 'ExternalNetwork' so that the NetworkElement.canHandle() works.
-        # The extension name is used for UI display only (shown as the tab label).
-        # Services come from the extension's network.capabilities automatically.
-        provider_name = EXTERNAL_NETWORK_PROVIDER_NAME  # always 'ExternalNetwork'
+        # ---- Step 9: Add + enable provider using the extension name ----
+        # Each extension registered to a physical network becomes its own network service
+        # provider named after the extension. This allows multiple extensions/providers
+        # to coexist on the same physical network without ambiguity.
+        provider_name = ext_name  # use actual extension name, not the generic 'ExternalNetwork'
         provider = self._find_provider(self.physical_network.id, provider_name)
         if provider is None:
             provider = self._add_provider(
@@ -842,8 +849,8 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.logger.info("Provider '%s' enabled", provider_name)
 
         # ---- Step 10: Create network offering ----
-        # serviceProviderList must use 'ExternalNetwork' — that's the Provider.getName()
-        # that ExternalNetworkElement.getProvider() returns.
+        # serviceProviderList uses the actual extension name as the provider so that
+        # multiple different external network extensions can coexist on the same zone.
         nw_offering = NetworkOffering.create(self.apiclient, {
             "name":             "ExtNet-Offering-%s" % random_gen(),
             "displaytext":      "ExtNet Offering (netns smoke test)",
@@ -851,11 +858,11 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             "traffictype":      "GUEST",
             "supportedservices": "SourceNat,StaticNat,PortForwarding,Firewall,Gateway",
             "serviceProviderList": {
-                "SourceNat":      "ExternalNetwork",
-                "StaticNat":      "ExternalNetwork",
-                "PortForwarding": "ExternalNetwork",
-                "Firewall":       "ExternalNetwork",
-                "Gateway":        "ExternalNetwork",
+                "SourceNat":      provider_name,
+                "StaticNat":      provider_name,
+                "PortForwarding": provider_name,
+                "Firewall":       provider_name,
+                "Gateway":        provider_name,
             },
             "serviceCapabilityList": {
                 "SourceNat": {"SupportedSourceNatTypes": "peraccount"},
@@ -973,7 +980,12 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
     def test_02_provider_state_transitions(self):
-        """Provider state transitions: Disabled → Enabled → Disabled → Deleted."""
+        """Provider state transitions: Disabled → Enabled → Disabled → Deleted.
+
+        Uses a stand-alone provider named 'NetworkExtension' (not backed by an extension)
+        to exercise the generic NSP state-machine.  Real extension-backed providers are
+        always named after the extension; see test_01 for the full lifecycle.
+        """
         pn = self._get_physical_network()
         self.physical_network = pn
         existing = self._find_provider(pn.id, EXTERNAL_NETWORK_PROVIDER_NAME)
@@ -1025,7 +1037,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
     @attr(tags=["advanced", "smoke"], required_hardware="false")
     def test_04_netns_and_script(self):
         """Verify network namespace is created, iptables works inside it,
-        and external-network.sh is installed."""
+        and network-extension-wrapper.sh is installed."""
         marvin_ip = self._init_ns_and_deployer()
 
         # Namespace exists
@@ -1186,5 +1198,6 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.extension = None
         self.physical_network = None
         self.logger.info("External network device CRUD test PASSED")
+
 
 

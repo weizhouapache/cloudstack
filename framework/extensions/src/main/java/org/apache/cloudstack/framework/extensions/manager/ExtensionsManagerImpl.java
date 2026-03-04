@@ -1078,7 +1078,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
                 return parsed;
             }
         }
-        // Default: the full set of services ExternalNetworkElement supports
+        // Default: the full set of services NetworkExtensionElement supports
         return new HashSet<>();
     }
 
@@ -1810,7 +1810,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     /**
      * Executes a custom action for a Network resource by delegating to an
-     * available {@link NetworkCustomActionProvider} (e.g. ExternalNetworkElement).
+     * available {@link NetworkCustomActionProvider} (e.g. NetworkExtensionElement).
      * This path does NOT go through the agent framework.
      */
     protected CustomActionResultResponse runNetworkCustomAction(Network network,
@@ -2212,7 +2212,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
 
     @Override
-    public boolean isExternalNetworkProvider(String providerName) {
+    public boolean isNetworkExtensionProvider(String providerName) {
         if (StringUtils.isBlank(providerName)) {
             return false;
         }

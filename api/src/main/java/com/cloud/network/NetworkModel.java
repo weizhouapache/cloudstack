@@ -183,6 +183,8 @@ public interface NetworkModel {
 
     boolean canElementEnableIndividualServices(Provider provider);
 
+    boolean canElementEnableIndividualServicesByName(String providerName);
+
     boolean areServicesSupportedInNetwork(long networkId, Service... services);
 
     boolean isNetworkSystem(Network network);

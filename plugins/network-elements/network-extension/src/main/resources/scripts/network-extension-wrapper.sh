@@ -17,14 +17,14 @@
 # under the License.
 
 ##############################################################################
-# external-network.sh
+# network-extension-wrapper.sh
 #
-# External network provider script for Apache CloudStack.
+# Network Extension wrapper script for Apache CloudStack.
 # Manages VLAN/bridge creation, source NAT (MASQUERADE), static NAT (DNAT/SNAT),
 # and port forwarding via iptables on a Linux gateway server.
 #
 # Usage:
-#   external-network.sh <command> [options]
+#   network-extension-wrapper.sh <command> [options]
 #
 # Commands:
 #   implement          - Create VLAN interface and bridge for a network
@@ -41,11 +41,11 @@
 set -e
 
 LOCK_DIR="/var/run/cloudstack"
-LOG_FILE="/var/log/cloudstack/management/external-network.log"
-STATE_DIR="/var/lib/cloudstack/external-network"
+LOG_FILE="/var/log/cloudstack/management/network-extension.log"
+STATE_DIR="/var/lib/cloudstack/network-extension"
 
 # Physical interface that carries VLAN traffic (configurable)
-PHYS_IFACE="${EXTERNAL_NETWORK_PHYS_IFACE:-eth0}"
+PHYS_IFACE="${NETWORK_EXTENSION_PHYS_IFACE:-${EXTERNAL_NETWORK_PHYS_IFACE:-eth0}}"
 
 # iptables chain prefix for CloudStack external network rules
 CHAIN_PREFIX="CS_EXTNET"

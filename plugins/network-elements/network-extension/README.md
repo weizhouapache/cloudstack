@@ -1,4 +1,4 @@
-# External Network Provider Plugin
+# NetworkExtension Plugin
 
 This plugin allows CloudStack to delegate guest network operations (create/delete
 network, source NAT, static NAT, port forwarding, firewall) to an **external network
@@ -17,7 +17,7 @@ follows the command interface described below.
 - **One extension = one network service provider.**  
   When a `NetworkOrchestrator` extension is registered with a physical network via
   `registerExtension`, the **extension name becomes the network service provider
-  name**.  There is no separate "ExternalNetwork" catch-all provider.
+  name**.  There is no separate "NetworkExtension" catch-all provider.
 
 - **Device credentials live in the extension registration.**  
   Connection details (host, port, username, password, SSH key, API tokens, etc.)
@@ -41,7 +41,7 @@ The external device can be anything that accepts remote management commands:
 
 | Device type | Transport | Status |
 |---|---|---|
-| Linux server (namespace/bridge/iptables) | SSH | ✅ Implemented |
+| Linux server (namespace/bridge/iptables) | SSH | ✅ Implemented (see `network-extension-wrapper.sh`) |
 | Network appliance / router / firewall | SSH | 🔧 Custom script required |
 | SDN controller / network OS | REST API | 🔧 Custom script required |
 | Network appliance | NETCONF / gRPC | 🔧 Custom script required |
@@ -86,7 +86,7 @@ CloudStack Management Server
 ┌─────────────────────────────────────────────────────┐
 │               CloudStack Management Server           │
 │                                                      │
-│  ExternalNetworkElement.java                         │
+│  NetworkExtensionElement.java                        │
 │    │                                                 │
 │    │  reads credentials from extension_resource_map_details
 │    │  injects them as CS_NET_DEV_* env vars          │
@@ -132,6 +132,12 @@ executable on the management server:
 - Shell script (`#!/bin/bash`) — simplest, great for SSH-based devices
 - Python script (`#!/usr/bin/env python3`) — ideal for REST API calls
 - Any other compiled or interpreted executable
+
+The reference implementation for a Linux server is
+`plugins/network-elements/network-extension/src/main/resources/scripts/network-extension-wrapper.sh`.
+The `extensions/network-extension/entry-point` script is an SSH-based relay that
+invokes `network-extension-wrapper.sh` inside a Linux network namespace on the
+remote host.
 
 ---
 
@@ -202,7 +208,26 @@ Place the executable entry-point script at:
 /etc/cloudstack/extensions/<extension-name>/entry-point
 ```
 
-**Example: SSH-based Linux server**
+**Example: SSH-based Linux server** (using the bundled `entry-point` relay)
+
+```bash
+# Copy the bundled SSH relay to the extension directory
+mkdir -p /etc/cloudstack/extensions/my-linux-router
+cp extensions/network-extension/entry-point \
+   /etc/cloudstack/extensions/my-linux-router/entry-point
+chmod +x /etc/cloudstack/extensions/my-linux-router/entry-point
+
+# Copy network-extension-wrapper.sh to the remote host
+scp plugins/network-elements/network-extension/src/main/resources/scripts/network-extension-wrapper.sh \
+    root@192.168.100.10:/usr/local/share/cloudstack/network-extension-wrapper.sh
+ssh root@192.168.100.10 "chmod +x /usr/local/share/cloudstack/network-extension-wrapper.sh"
+```
+
+The bundled `entry-point` script SSHes to the remote host and runs
+`network-extension-wrapper.sh` inside the Linux network namespace.  All connection
+details are injected by CloudStack as `CS_NET_DEV_*` environment variables.
+
+**Example: minimal custom entry-point (Bash + SSH)**
 
 ```bash
 #!/bin/bash
@@ -219,14 +244,14 @@ if [ -n "${CS_NET_DEV_SSHKEY}" ]; then
     printf '%s' "${CS_NET_DEV_SSHKEY}" > "${KEYFILE}"
     chmod 600 "${KEYFILE}"
     ssh -i "${KEYFILE}" ${SSH_OPTS} "${USER}@${HOST}" \
-        "/opt/cloudstack/external-network.sh $*"
+        "/usr/local/share/cloudstack/network-extension-wrapper.sh $*"
     RC=$?
     rm -f "${KEYFILE}"
     exit ${RC}
 else
     sshpass -p "${CS_NET_DEV_PASSWORD}" \
         ssh ${SSH_OPTS} "${USER}@${HOST}" \
-        "/opt/cloudstack/external-network.sh $*"
+        "/usr/local/share/cloudstack/network-extension-wrapper.sh $*"
 fi
 ```
 
@@ -319,7 +344,7 @@ cmk createNetworkOffering \
 
 In the **UI**, the *Create Network Offering* provider dropdown lists only registered
 external network service providers (extensions whose name matches an enabled NSP).
-A generic "External Network" entry is **not** shown — only actual registered
+A generic "NetworkExtension" entry is **not** shown — only actual registered
 extension names appear.
 
 ### Step 5 — Create a Network
@@ -430,7 +455,7 @@ exactly (case-sensitive).
 → Check `cmk listExtensions`, `extension_resource_map`, and `ntwk_service_map`.
 
 **Script exits non-zero**  
-→ Check management server logs for `External network script failed` — the script's
+→ Check management server logs for `Network extension script failed` — the script's
 stdout/stderr is included in the log.  
 → Run the entry-point script manually on the management server to debug:
 ```bash

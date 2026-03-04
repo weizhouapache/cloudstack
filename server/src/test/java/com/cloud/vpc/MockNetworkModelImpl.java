@@ -393,6 +393,11 @@ public class MockNetworkModelImpl extends ManagerBase implements NetworkModel {
         return false;
     }
 
+    @Override
+    public boolean canElementEnableIndividualServicesByName(String providerName) {
+        return false;
+    }
+
     /* (non-Javadoc)
      * @see com.cloud.network.NetworkModel#areServicesSupportedInNetwork(long, com.cloud.network.Network.Service[])
      */

@@ -17,19 +17,19 @@
 # under the License.
 
 ##############################################################################
-# entry-point
+# entry-point  (network-extension-wrapper)
 #
-# Wrapper script for the ExternalNetwork CloudStack extension.
+# Wrapper script for the NetworkExtension CloudStack extension.
 # Runs on the management server; SSHes to the external network device (e.g.
-# a Linux host with network namespaces) and executes external-network.sh
+# a Linux host with network namespaces) and executes network-extension-wrapper.sh
 # inside the designated network namespace.
 #
-# Called by ExternalNetworkElement (Java) with all arguments forwarded:
+# Called by NetworkExtensionElement (Java) with all arguments forwarded:
 #   entry-point <command> [--network-id N] [--vlan V] [--gateway G] ...
 #   entry-point custom-action --network-id N --action <name>
 #                              [CS_ACTION_PARAM_<KEY>=<value> ...]
 #
-# Connection details are injected as environment variables by ExternalNetworkElement:
+# Connection details are injected as environment variables by NetworkExtensionElement:
 #
 #   CS_NET_DEV_HOST      IP / hostname of the remote network device (required)
 #   CS_NET_DEV_PORT      SSH port                          (default: 22)
@@ -41,8 +41,8 @@
 # registerExtension details):
 #
 #   CS_NET_NAMESPACE     Linux network namespace on the remote host (required)
-#   CS_NET_SCRIPT_PATH   Full path to external-network.sh on the remote host
-#                        (default: /usr/local/share/cloudstack/external-network.sh)
+#   CS_NET_SCRIPT_PATH   Full path to network-extension-wrapper.sh on the remote host
+#                        (default: /usr/local/share/cloudstack/network-extension-wrapper.sh)
 #
 # Authentication priority:
 #   1. CS_NET_DEV_SSHKEY  – PEM key is written to a temp file and used with -i
@@ -64,7 +64,7 @@ set -euo pipefail
 
 DEFAULT_SSH_PORT=22
 DEFAULT_SSH_USER=root
-DEFAULT_SCRIPT_PATH=/usr/local/share/cloudstack/external-network.sh
+DEFAULT_SCRIPT_PATH=/usr/local/share/cloudstack/network-extension-wrapper.sh
 LOG_FILE=/var/log/cloudstack/management/extnet-entry-point.log
 TMPDIR_BASE=/tmp
 

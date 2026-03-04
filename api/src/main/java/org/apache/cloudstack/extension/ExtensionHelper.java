@@ -50,7 +50,7 @@ public interface ExtensionHelper {
     /**
      * Returns ALL extension_resource_map_details (including hidden) for the
      * extension registered to the given physical network.  Used internally by
-     * ExternalNetworkElement to inject credentials into the script environment.
+     * {@code NetworkExtensionElement} to inject credentials into the script environment.
      *
      * @param physicalNetworkId  the physical network ID
      * @return all key/value details including non-display ones, or an empty map
@@ -116,7 +116,7 @@ public interface ExtensionHelper {
     /**
      * Returns ALL {@code extension_resource_map_details} (including hidden) for
      * the specific extension registered on the given physical network.  Used by
-     * {@code ExternalNetworkElement} to inject device credentials into the script
+     * {@code NetworkExtensionElement} to inject device credentials into the script
      * environment for the correct extension when multiple different extensions are
      * registered on the same physical network.
      *
@@ -133,9 +133,9 @@ public interface ExtensionHelper {
      * that are not in the static {@code s_providerToNetworkElementMap}.
      *
      * @param providerName the provider / extension name
-     * @return true if the provider is an external network extension provider
+     * @return true if the provider is a NetworkExtension provider
      */
-    boolean isExternalNetworkProvider(String providerName);
+    boolean isNetworkExtensionProvider(String providerName);
 
     /**
      * Returns the effective {@link Service} → ({@link Capability} → value) capabilities

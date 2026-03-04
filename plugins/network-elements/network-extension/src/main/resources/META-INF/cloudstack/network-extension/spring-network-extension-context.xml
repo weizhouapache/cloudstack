@@ -24,7 +24,7 @@
                       http://www.springframework.org/schema/context
                       http://www.springframework.org/schema/context/spring-context.xsd"
                       >
-    <bean id="externalNetwork" class="org.apache.cloudstack.network.element.ExternalNetworkElement">
-        <property name="name" value="ExternalNetwork" />
+    <bean id="networkExtension" class="org.apache.cloudstack.network.element.NetworkExtensionElement">
+        <property name="name" value="NetworkExtension" />
     </bean>
 </beans>

@@ -23,7 +23,7 @@ import com.cloud.network.Network;
 
 /**
  * Implemented by network elements that support running custom actions on a
- * managed network (e.g. ExternalNetworkElement).
+ * managed network (e.g. NetworkExtensionElement).
  *
  * <p>This interface is looked up by {@code ExtensionsManagerImpl} to dispatch
  * {@code runCustomAction} requests whose resource type is {@code Network}.</p>

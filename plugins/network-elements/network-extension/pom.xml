@@ -19,8 +19,8 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <artifactId>cloud-plugin-network-external-network</artifactId>
-    <name>Apache CloudStack Plugin - External Network Provider</name>
+    <artifactId>cloud-plugin-network-network-extension</artifactId>
+    <name>Apache CloudStack Plugin - Network Extension Provider</name>
     <parent>
         <groupId>org.apache.cloudstack</groupId>
         <artifactId>cloudstack-plugins</artifactId>
@@ -45,4 +45,5 @@
         </dependency>
     </dependencies>
 </project>
+
 
