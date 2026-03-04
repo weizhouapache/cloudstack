@@ -949,7 +949,7 @@ export default {
       this.supportedServiceLoading = true
       var supportedServices = this.supportedServices
       var self = this
-      if (this.provider !== 'NSX' && this.provider !== 'Netris') {
+      if (this.provider !== 'NSX' && this.provider !== 'Netris' && !this.isExternalNetworkProvider) {
         if (this.networkmode === 'ROUTED' && this.guestType === 'isolated') {
           supportedServices = supportedServices.filter(service => {
             return !['SourceNat', 'StaticNat', 'Lb', 'PortForwarding', 'Vpn'].includes(service.name)

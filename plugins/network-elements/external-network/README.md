@@ -258,9 +258,12 @@ elif command == "destroy":
 
 ### Step 3 — Register the Extension with a Physical Network
 
-Registering the extension **creates a network service provider** named after the
-extension on the physical network, and **stores the device credentials** so they
-are injected into the entry-point script on every call.
+Registering the extension **automatically**:
+- Creates a **network service provider** named after the extension on the physical network
+- Sets the provider's supported-service flags from `network.capabilities`
+- Sets the provider state to **Enabled** (so services are immediately visible when creating a network offering)
+
+No separate `addNetworkServiceProvider` call is needed.
 
 ```bash
 cmk registerExtension \
@@ -281,13 +284,19 @@ cmk registerExtension \
 >   To use the same script for two separate device instances on the same physical
 >   network, create two extensions with different names and the same `path`.
 
-Enable the provider:
+To temporarily disable the provider (services will be hidden from network offering creation):
 ```bash
-cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled
+cmk updateNetworkServiceProvider id=<nsp-uuid> state=Disabled
 ```
 
 Or use the UI: **Infrastructure → Physical Networks → [network] → Network Service
-Providers**, select the extension tab, click **Enable Provider**.
+Providers**, select the extension tab.  Enable/Disable/Shutdown buttons appear on
+the tab, identical to built-in providers like VirtualRouter.
+
+Unregistering the extension also removes the network service provider:
+```bash
+cmk unregisterExtension id=<ext-uuid> resourcetype=PhysicalNetwork resourceid=<phys-net-uuid>
+```
 
 ### Step 4 — Create a Network Offering
 

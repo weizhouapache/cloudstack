@@ -18,7 +18,7 @@
 <template>
   <div>
     <a-spin :spinning="fetchLoading">
-      <!-- Add Extension Provider button: shown on extension tabs when that extension's NSP not yet added -->
+      <!-- Add Extension Provider button: only shown when extension is registered but NSP not yet created -->
       <a-button
         v-if="isExtensionTab && !nsps[tabKey]"
         :disabled="!('addNetworkServiceProvider' in $store.getters.apis)"
@@ -27,23 +27,6 @@
         @click="handleAddExternalNetworkProvider">
         <template #icon><plus-outlined /></template>
         {{ $t('label.add.external.network.provider') }}
-      </a-button>
-      <!-- Enable/Disable buttons for extension provider tab -->
-      <a-button
-        v-if="isExtensionTab && nsps[tabKey] && nsps[tabKey].state === 'Disabled'"
-        type="primary"
-        style="margin-bottom: 12px; margin-right: 8px;"
-        @click="handleEnableExtensionProvider">
-        <template #icon><play-circle-outlined /></template>
-        {{ $t('label.enable.provider') }}
-      </a-button>
-      <a-button
-        v-if="isExtensionTab && nsps[tabKey] && nsps[tabKey].state === 'Enabled'"
-        danger
-        style="margin-bottom: 12px; margin-right: 8px;"
-        @click="handleDisableExtensionProvider">
-        <template #icon><stop-outlined /></template>
-        {{ $t('label.disable.provider') }}
       </a-button>
       <a-tabs
         :tabPosition="device === 'mobile' ? 'top' : 'left'"
@@ -80,17 +63,14 @@
               <status :text="nsps[ext.name] ? nsps[ext.name].state : $t('label.not.added')" style="margin-bottom: 6px; margin-left: 6px" />
             </span>
           </template>
-          <div v-if="tabKey === ext.name">
-            <a-descriptions bordered size="small" :column="1" style="margin-bottom: 16px;">
-              <a-descriptions-item :label="$t('label.name')">{{ ext.name }}</a-descriptions-item>
-              <a-descriptions-item :label="$t('label.state')">
-                <status :text="nsps[ext.name] ? nsps[ext.name].state : $t('label.not.added')" />
-              </a-descriptions-item>
-              <a-descriptions-item v-if="nsps[ext.name]" :label="$t('label.servicelist')">
-                {{ nsps[ext.name] && nsps[ext.name].servicelist ? nsps[ext.name].servicelist.join(', ') : '-' }}
-              </a-descriptions-item>
-            </a-descriptions>
-          </div>
+          <provider-item
+            v-if="tabKey === ext.name"
+            :loading="loading"
+            :itemNsp="extensionNspItem(ext.name)"
+            :nsp="nsps[ext.name]"
+            :resourceId="resource.id"
+            :zoneId="resource.zoneid"
+            :tabKey="tabKey"/>
         </a-tab-pane>
       </a-tabs>
     </a-spin>
@@ -1278,30 +1258,12 @@ export default {
 
       this.extensionProviderLoading = true
       try {
-        // Step 1: registerExtension with physical network
+        // registerExtension auto-creates the NSP (Enabled) with services from network.capabilities
         await postAPI('registerExtension', {
           extensionid: extensionId,
           resourceid: this.resource.id,
           resourcetype: 'PhysicalNetwork'
         })
-
-        // Step 2: addNetworkServiceProvider using the extension name as the provider name.
-        // The NSP name must match the extension name so ExternalNetworkElement.canHandle()
-        // can resolve the correct extension by provider name.
-        if (!this.nsps[extName]) {
-          const nspJson = await postAPI('addNetworkServiceProvider', {
-            name: extName,
-            physicalnetworkid: this.resource.id
-          })
-          const jobId = nspJson.addnetworkserviceproviderresponse.jobid
-          if (jobId) {
-            const result = await this.pollJob(jobId)
-            if (result.jobstatus === 2) {
-              this.$notifyError(result.jobresult.errortext)
-              return
-            }
-          }
-        }
         this.$message.success(this.$t('label.add.external.network.provider') + ': ' + extName)
         this.showAddExtNetProviderModal = false
         this.fetchData()
@@ -1330,22 +1292,45 @@ export default {
         this.registeredExtensions = []
       })
     },
-    handleEnableExtensionProvider () {
-      // tabKey holds the current extension tab name, which equals the NSP name
-      const nsp = this.nsps[this.tabKey]
-      if (!nsp || !nsp.id) return
-      postAPI('updateNetworkServiceProvider', { id: nsp.id, state: 'Enabled' }).then(() => {
-        this.$message.success(this.$t('label.enable.provider'))
-        this.fetchData()
-      }).catch(error => this.$notifyError(error))
-    },
-    handleDisableExtensionProvider () {
-      const nsp = this.nsps[this.tabKey]
-      if (!nsp || !nsp.id) return
-      postAPI('updateNetworkServiceProvider', { id: nsp.id, state: 'Disabled' }).then(() => {
-        this.$message.success(this.$t('label.disable.provider'))
-        this.fetchData()
-      }).catch(error => this.$notifyError(error))
+    extensionNspItem (extName) {
+      // Build a ProviderItem-compatible itemNsp descriptor for extension-backed NSPs.
+      // Mirrors the structure of hardcoded entries in hardcodedNsps.
+      return {
+        title: extName,
+        details: ['name', 'state', 'id', 'physicalnetworkid', 'servicelist'],
+        actions: [
+          {
+            api: 'updateNetworkServiceProvider',
+            icon: 'play-circle-outlined',
+            listView: true,
+            label: 'label.enable.provider',
+            confirm: 'message.confirm.enable.provider',
+            show: (record) => record && record.id && record.state === 'Disabled',
+            mapping: {
+              state: { value: () => 'Enabled' }
+            }
+          },
+          {
+            api: 'updateNetworkServiceProvider',
+            icon: 'stop-outlined',
+            listView: true,
+            label: 'label.disable.provider',
+            confirm: 'message.confirm.disable.provider',
+            show: (record) => record && record.id && record.state === 'Enabled',
+            mapping: {
+              state: { value: () => 'Disabled' }
+            }
+          },
+          {
+            api: 'deleteNetworkServiceProvider',
+            listView: true,
+            icon: 'poweroff-outlined',
+            label: 'label.shutdown.provider',
+            confirm: 'message.confirm.delete.provider',
+            show: (record) => record && record.id
+          }
+        ]
+      }
     },
     fetchServiceProvider (name) {
       this.fetchLoading = true
