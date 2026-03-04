@@ -26,6 +26,8 @@
 #
 # Called by ExternalNetworkElement (Java) with all arguments forwarded:
 #   entry-point <command> [--network-id N] [--vlan V] [--gateway G] ...
+#   entry-point custom-action --network-id N --action <name>
+#                              [CS_ACTION_PARAM_<KEY>=<value> ...]
 #
 # Connection details are injected as environment variables by ExternalNetworkElement:
 #

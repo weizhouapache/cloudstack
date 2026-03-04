@@ -4141,6 +4141,7 @@
 "label.add.detail": "Add Detail",
 "label.not.added": "Not Added",
 "label.refresh": "Refresh",
+"label.run.action": "Run Action",
 "label.enable.provider": "Enable Provider",
 "label.disable.provider": "Disable Provider",
 "label.external.network.service": "External Network Service",

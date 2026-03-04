@@ -572,6 +572,89 @@ cmd_delete_port_forward() {
 }
 
 ##############################################################################
+# Command: custom-action
+# Run an operator-defined action against this network's device/namespace.
+#
+# Built-in actions:
+#   reboot-device  – bring the namespace interfaces down and back up
+#   dump-config    – dump iptables rules and bridge/interface state
+#
+# Caller-supplied parameters are available as CS_ACTION_PARAM_<KEY> env vars.
+# Custom scripts can extend this function to support additional actions.
+##############################################################################
+
+cmd_custom_action() {
+    NETWORK_ID=""
+    ACTION_NAME=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --network-id) NETWORK_ID="$2"; shift 2 ;;
+            --action)     ACTION_NAME="$2"; shift 2 ;;
+            *)            shift ;;
+        esac
+    done
+
+    [ -z "${NETWORK_ID}" ] && die "custom-action: missing --network-id"
+    [ -z "${ACTION_NAME}" ] && die "custom-action: missing --action"
+
+    log "custom-action: network=${NETWORK_ID} action=${ACTION_NAME}"
+
+    case "${ACTION_NAME}" in
+
+        reboot-device)
+            # Bounce all interfaces attached to the bridge for this network
+            local br
+            br=$(bridge_name "${NETWORK_ID}")
+            acquire_lock "${NETWORK_ID}"
+            log "reboot-device: bouncing bridge ${br}"
+            if ip link show "${br}" >/dev/null 2>&1; then
+                ip link set "${br}" down
+                sleep 1
+                ip link set "${br}" up
+                log "reboot-device: bridge ${br} is back up"
+            else
+                log "reboot-device: bridge ${br} not found, nothing to do"
+            fi
+            release_lock
+            echo "reboot-device: OK (bridge=${br})"
+            ;;
+
+        dump-config)
+            # Dump iptables rules and interface/bridge state for this network
+            local br
+            br=$(bridge_name "${NETWORK_ID}")
+            echo "=== Bridge / Interface state for network ${NETWORK_ID} ==="
+            ip link show "${br}" 2>/dev/null || echo "(bridge ${br} not found)"
+            echo ""
+            echo "=== NAT table ==="
+            iptables -t nat -L -n -v --line-numbers 2>/dev/null | grep -E "CLOUDSTACK|${CHAIN_PREFIX}" || \
+                iptables -t nat -L -n -v 2>/dev/null | head -60 || echo "(iptables not available)"
+            echo ""
+            echo "=== FILTER table ==="
+            iptables -t filter -L -n -v --line-numbers 2>/dev/null | grep -E "CLOUDSTACK|${CHAIN_PREFIX}" || \
+                iptables -t filter -L -n -v 2>/dev/null | head -60 || echo "(iptables not available)"
+            echo ""
+            echo "=== State files ==="
+            ls -la "${STATE_DIR}/${NETWORK_ID}/" 2>/dev/null || echo "(no state directory)"
+            ;;
+
+        *)
+            # Unknown action — allow extension via a hook script if present
+            local hook="${STATE_DIR}/hooks/custom-action-${ACTION_NAME}.sh"
+            if [ -x "${hook}" ]; then
+                log "custom-action: delegating to hook ${hook}"
+                exec "${hook}" --network-id "${NETWORK_ID}" --action "${ACTION_NAME}"
+            else
+                die "custom-action: unknown action '${ACTION_NAME}'. " \
+                    "Supported built-in actions: reboot-device, dump-config. " \
+                    "To add custom actions, create ${STATE_DIR}/hooks/custom-action-<name>.sh"
+            fi
+            ;;
+    esac
+}
+
+##############################################################################
 # Main dispatcher
 ##############################################################################
 
@@ -590,8 +673,9 @@ case "${COMMAND}" in
     delete-static-nat)  cmd_delete_static_nat "$@" ;;
     add-port-forward)   cmd_add_port_forward "$@" ;;
     delete-port-forward) cmd_delete_port_forward "$@" ;;
+    custom-action)      cmd_custom_action "$@" ;;
     *)
-        echo "Usage: $0 {implement|shutdown|destroy|assign-ip|release-ip|add-static-nat|delete-static-nat|add-port-forward|delete-port-forward} [options]"
+        echo "Usage: $0 {implement|shutdown|destroy|assign-ip|release-ip|add-static-nat|delete-static-nat|add-port-forward|delete-port-forward|custom-action} [options]"
         exit 1
         ;;
 esac

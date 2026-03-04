@@ -120,8 +120,11 @@ import com.cloud.host.dao.HostDao;
 import com.cloud.host.dao.HostDetailsDao;
 import com.cloud.hypervisor.ExternalProvisioner;
 import com.cloud.hypervisor.Hypervisor;
+import com.cloud.network.Network;
+import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
+import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 import com.cloud.org.Cluster;
 import com.cloud.serializer.GsonHelper;
 import com.cloud.storage.dao.VMTemplateDao;
@@ -186,6 +189,8 @@ public class ExtensionsManagerImplTest {
     private AccountService accountService;
     @Mock
     private PhysicalNetworkDao physicalNetworkDao;
+    @Mock
+    private NetworkDao networkDao;
 
     @Before
     public void setUp() {
@@ -2554,6 +2559,151 @@ public class ExtensionsManagerImplTest {
         extensionsManager.validateNetworkServicesSubset(extension, "");
         extensionsManager.validateNetworkServicesSubset(extension, "   ");
         extensionsManager.validateNetworkServicesSubset(extension, null);
+    }
+
+    // -----------------------------------------------------------------------
+    // Network custom action tests
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void getExtensionFromResourceNetworkReturnsExtension() {
+        Network network = mock(Network.class);
+        when(network.getPhysicalNetworkId()).thenReturn(10L);
+        when(entityManager.findByUuid(eq(Network.class), eq("net-uuid"))).thenReturn(network);
+
+        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
+        when(mapVO.getExtensionId()).thenReturn(200L);
+        when(extensionResourceMapDao.listByResourceIdAndType(10L, ExtensionResourceMap.ResourceType.PhysicalNetwork))
+                .thenReturn(List.of(mapVO));
+
+        ExtensionVO ext = mock(ExtensionVO.class);
+        when(extensionDao.findById(200L)).thenReturn(ext);
+
+        Extension result = extensionsManager.getExtensionFromResource(
+                ExtensionCustomAction.ResourceType.Network, "net-uuid");
+        assertEquals(ext, result);
+    }
+
+    @Test
+    public void getExtensionFromResourceNetworkReturnsNullWhenNoPhysicalNetwork() {
+        Network network = mock(Network.class);
+        when(network.getPhysicalNetworkId()).thenReturn(null);
+        when(entityManager.findByUuid(eq(Network.class), eq("net-uuid"))).thenReturn(network);
+
+        Extension result = extensionsManager.getExtensionFromResource(
+                ExtensionCustomAction.ResourceType.Network, "net-uuid");
+        assertNull(result);
+    }
+
+    @Test
+    public void getExtensionFromResourceNetworkReturnsNullWhenNoMapping() {
+        Network network = mock(Network.class);
+        when(network.getPhysicalNetworkId()).thenReturn(10L);
+        when(entityManager.findByUuid(eq(Network.class), eq("net-uuid"))).thenReturn(network);
+        when(extensionResourceMapDao.listByResourceIdAndType(10L, ExtensionResourceMap.ResourceType.PhysicalNetwork))
+                .thenReturn(Collections.emptyList());
+
+        Extension result = extensionsManager.getExtensionFromResource(
+                ExtensionCustomAction.ResourceType.Network, "net-uuid");
+        assertNull(result);
+    }
+
+    @Test
+    public void runNetworkCustomActionSucceeds() {
+        // Set up network
+        Network network = mock(Network.class);
+        when(network.getId()).thenReturn(5L);
+        when(network.getName()).thenReturn("test-net");
+
+        // Set up custom action
+        ExtensionCustomActionVO actionVO = mock(ExtensionCustomActionVO.class);
+        when(actionVO.getUuid()).thenReturn("action-uuid");
+        when(actionVO.getName()).thenReturn("reboot-device");
+        when(actionVO.getId()).thenReturn(1L);
+        when(actionVO.getSuccessMessage()).thenReturn(null);
+        when(actionVO.getErrorMessage()).thenReturn(null);
+
+        ExtensionVO extensionVO = mock(ExtensionVO.class);
+        when(extensionVO.getName()).thenReturn("my-extnet");
+
+        // No action parameters
+        Pair<Map<String, String>, Map<String, String>> details = new Pair<>(new HashMap<>(), new HashMap<>());
+        when(extensionCustomActionDetailsDao.listDetailsKeyPairsWithVisibility(1L)).thenReturn(details);
+
+        // Provider succeeds
+        NetworkCustomActionProvider provider = mock(NetworkCustomActionProvider.class);
+        when(provider.canHandleCustomAction(network)).thenReturn(true);
+        when(provider.runCustomAction(eq(network), eq("reboot-device"), any())).thenReturn("OK: bridge bounced");
+        ReflectionTestUtils.setField(extensionsManager, "networkCustomActionProviders", List.of(provider));
+
+        CustomActionResultResponse resp = extensionsManager.runNetworkCustomAction(
+                network, actionVO, extensionVO,
+                ExtensionCustomAction.ResourceType.Network, new HashMap<>());
+
+        assertTrue(resp.isSuccess());
+        assertEquals("OK: bridge bounced", resp.getResult().get(ApiConstants.DETAILS));
+    }
+
+    @Test
+    public void runNetworkCustomActionFailsWhenNoProvider() {
+        Network network = mock(Network.class);
+        when(network.getId()).thenReturn(5L);
+        when(network.getName()).thenReturn("test-net");
+
+        ExtensionCustomActionVO actionVO = mock(ExtensionCustomActionVO.class);
+        when(actionVO.getUuid()).thenReturn("action-uuid");
+        when(actionVO.getName()).thenReturn("dump-config");
+        when(actionVO.getId()).thenReturn(2L);
+        when(actionVO.getSuccessMessage()).thenReturn(null);
+        when(actionVO.getErrorMessage()).thenReturn(null);
+
+        ExtensionVO extensionVO = mock(ExtensionVO.class);
+        when(extensionVO.getName()).thenReturn("my-extnet");
+
+        Pair<Map<String, String>, Map<String, String>> details = new Pair<>(new HashMap<>(), new HashMap<>());
+        when(extensionCustomActionDetailsDao.listDetailsKeyPairsWithVisibility(2L)).thenReturn(details);
+
+        // No providers registered
+        ReflectionTestUtils.setField(extensionsManager, "networkCustomActionProviders", Collections.emptyList());
+
+        CustomActionResultResponse resp = extensionsManager.runNetworkCustomAction(
+                network, actionVO, extensionVO,
+                ExtensionCustomAction.ResourceType.Network, new HashMap<>());
+
+        assertFalse(resp.isSuccess());
+        assertTrue(resp.getResult().get(ApiConstants.DETAILS).contains("No external network provider"));
+    }
+
+    @Test
+    public void runNetworkCustomActionFailsWhenProviderReturnsNull() {
+        Network network = mock(Network.class);
+        when(network.getId()).thenReturn(5L);
+        when(network.getName()).thenReturn("test-net");
+
+        ExtensionCustomActionVO actionVO = mock(ExtensionCustomActionVO.class);
+        when(actionVO.getUuid()).thenReturn("action-uuid");
+        when(actionVO.getName()).thenReturn("unknown-action");
+        when(actionVO.getId()).thenReturn(3L);
+        when(actionVO.getSuccessMessage()).thenReturn(null);
+        when(actionVO.getErrorMessage()).thenReturn(null);
+
+        ExtensionVO extensionVO = mock(ExtensionVO.class);
+        when(extensionVO.getName()).thenReturn("my-extnet");
+
+        Pair<Map<String, String>, Map<String, String>> details = new Pair<>(new HashMap<>(), new HashMap<>());
+        when(extensionCustomActionDetailsDao.listDetailsKeyPairsWithVisibility(3L)).thenReturn(details);
+
+        NetworkCustomActionProvider provider = mock(NetworkCustomActionProvider.class);
+        when(provider.canHandleCustomAction(network)).thenReturn(true);
+        when(provider.runCustomAction(eq(network), eq("unknown-action"), any())).thenReturn(null);
+        ReflectionTestUtils.setField(extensionsManager, "networkCustomActionProviders", List.of(provider));
+
+        CustomActionResultResponse resp = extensionsManager.runNetworkCustomAction(
+                network, actionVO, extensionVO,
+                ExtensionCustomAction.ResourceType.Network, new HashMap<>());
+
+        assertFalse(resp.isSuccess());
+        assertTrue(resp.getResult().get(ApiConstants.DETAILS).contains("Action failed"));
     }
 
 }

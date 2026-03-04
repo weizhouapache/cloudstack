@@ -34,6 +34,7 @@ import com.google.gson.JsonParser;
 
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
+import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 
 import com.cloud.deploy.DeployDestination;
 import com.cloud.exception.ConcurrentOperationException;
@@ -116,7 +117,7 @@ import com.cloud.vm.VirtualMachineProfile;
  */
 public class ExternalNetworkElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
-        PortForwardingServiceProvider, IpDeployer {
+        PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider {
 
     public static final String NETWORK_CAPABILITIES_DETAIL_KEY = "network.capabilities";
 
@@ -661,6 +662,84 @@ public class ExternalNetworkElement extends AdapterBase implements
             String envKey = "CS_NET_" + key.toUpperCase().replace('.', '_');
             env.put(envKey, value);
             logger.debug("  network-detail env {}={}", envKey, value);
+        }
+    }
+
+    /**
+     * Returns {@code true} if the network is served by an ExternalNetwork
+     * service provider (i.e. this element handles it).
+     */
+    @Override
+    public boolean canHandleCustomAction(Network network) {
+        return canHandle(network, null);
+    }
+
+    /**
+     * Runs a custom action (e.g. "reboot-device", "dump-config") on the external
+     * network device for the given network.
+     *
+     * <p>The entry-point script is invoked as:</p>
+     * <pre>
+     *   entry-point custom-action --network-id &lt;id&gt; --action &lt;name&gt;
+     * </pre>
+     * All standard device/network env vars are injected as usual
+     * ({@code CS_NET_DEV_HOST}, {@code CS_NET_NAMESPACE}, etc.).
+     * Additionally, each caller-supplied parameter is exposed as
+     * {@code CS_ACTION_PARAM_&lt;KEY&gt;} so the script can use them.
+     *
+     * @param network    the CloudStack network on which to run the action
+     * @param actionName the action name (e.g. "reboot-device", "dump-config")
+     * @param parameters optional key/value parameters from the caller
+     * @return output string from the script (stdout), or an error description on failure
+     */
+    public String runCustomAction(Network network, String actionName, Map<String, Object> parameters) {
+        File scriptFile = resolveScriptFile(network);
+
+        List<String> cmdLine = new ArrayList<>();
+        cmdLine.add(scriptFile.getAbsolutePath());
+        cmdLine.add("custom-action");
+        cmdLine.add("--network-id");
+        cmdLine.add(String.valueOf(network.getId()));
+        cmdLine.add("--action");
+        cmdLine.add(actionName);
+
+        logger.info("Running custom action '{}' on network {} via {}", actionName, network.getId(), scriptFile);
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmdLine);
+            pb.redirectErrorStream(true);
+            Map<String, String> env = pb.environment();
+            env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+
+            // Standard device + network env vars
+            injectResourceMapEnv(env, network.getPhysicalNetworkId());
+            injectNetworkDetailsEnv(env, network.getId());
+
+            // Per-action parameters as CS_ACTION_PARAM_<KEY>
+            if (parameters != null) {
+                for (Map.Entry<String, Object> entry : parameters.entrySet()) {
+                    if (entry.getKey() != null && entry.getValue() != null) {
+                        String envKey = "CS_ACTION_PARAM_" + entry.getKey().toUpperCase()
+                                .replace(' ', '_').replace('-', '_').replace('.', '_');
+                        env.put(envKey, String.valueOf(entry.getValue()));
+                    }
+                }
+            }
+
+            Process process = pb.start();
+            byte[] output = process.getInputStream().readAllBytes();
+            int exitCode = process.waitFor();
+            String outputStr = new String(output).trim();
+
+            if (exitCode != 0) {
+                logger.error("Custom action '{}' failed (exit {}): {}", actionName, exitCode, outputStr);
+                return null;   // caller treats null as failure
+            }
+            logger.info("Custom action '{}' completed successfully", actionName);
+            return outputStr.isEmpty() ? "OK" : outputStr;
+        } catch (Exception e) {
+            logger.error("Failed to execute custom action '{}': {}", actionName, e.getMessage(), e);
+            throw new CloudRuntimeException("Failed to execute custom action: " + actionName, e);
         }
     }
 

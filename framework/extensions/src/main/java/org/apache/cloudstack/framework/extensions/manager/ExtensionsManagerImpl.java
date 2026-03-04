@@ -61,6 +61,7 @@ import org.apache.cloudstack.extension.CustomActionResultResponse;
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionCustomAction;
 import org.apache.cloudstack.extension.ExtensionHelper;
+import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 import org.apache.cloudstack.extension.ExtensionResourceMap;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
@@ -125,6 +126,8 @@ import com.cloud.host.dao.HostDao;
 import com.cloud.host.dao.HostDetailsDao;
 import com.cloud.hypervisor.ExternalProvisioner;
 import com.cloud.hypervisor.Hypervisor;
+import com.cloud.network.Network;
+import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.org.Cluster;
@@ -220,10 +223,16 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     VMTemplateDao templateDao;
 
     @Inject
+    NetworkDao networkDao;
+
+    @Inject
     RoleService roleService;
 
     @Inject
     AccountService accountService;
+
+    @Inject
+    List<NetworkCustomActionProvider> networkCustomActionProviders;
 
     private ScheduledExecutorService extensionPathStateCheckExecutor;
 
@@ -374,16 +383,29 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             VirtualMachine vm = (VirtualMachine) object;
             Pair<Long, Long> clusterHostId = virtualMachineManager.findClusterAndHostIdForVm(vm, false);
             clusterId = clusterHostId.first();
+            if (clusterId == null) {
+                return null;
+            }
+            ExtensionResourceMapVO mapVO =
+                    extensionResourceMapDao.findByResourceIdAndType(clusterId, ExtensionResourceMap.ResourceType.Cluster);
+            if (mapVO == null) {
+                return null;
+            }
+            return extensionDao.findById(mapVO.getExtensionId());
+        } else if (resourceType == ExtensionCustomAction.ResourceType.Network) {
+            Network network = (Network) object;
+            Long physicalNetworkId = network.getPhysicalNetworkId();
+            if (physicalNetworkId == null) {
+                return null;
+            }
+            List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(
+                    physicalNetworkId, ExtensionResourceMap.ResourceType.PhysicalNetwork);
+            if (CollectionUtils.isEmpty(maps)) {
+                return null;
+            }
+            return extensionDao.findById(maps.get(0).getExtensionId());
         }
-        if (clusterId == null) {
-            return null;
-        }
-        ExtensionResourceMapVO mapVO =
-                extensionResourceMapDao.findByResourceIdAndType(clusterId, ExtensionResourceMap.ResourceType.Cluster);
-        if (mapVO == null) {
-            return null;
-        }
-        return extensionDao.findById(mapVO.getExtensionId());
+        return null;
     }
 
     protected String getActionMessage(boolean success, ExtensionCustomAction action, Extension extension,
@@ -1605,6 +1627,10 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             Pair<Long, Long> clusterAndHostId = virtualMachineManager.findClusterAndHostIdForVm(virtualMachine, false);
             clusterId = clusterAndHostId.first();
             hostId = clusterAndHostId.second();
+        } else if (entity instanceof Network) {
+            // Network custom action: dispatched directly to NetworkCustomActionProvider (no agent)
+            Network network = (Network) entity;
+            return runNetworkCustomAction(network, customActionVO, extensionVO, actionResourceType, cmdParameters);
         }
 
         if (clusterId == null || hostId == null) {
@@ -1676,6 +1702,71 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             String msg = "Running custom action timed out, please try again";
             logger.error(msg, e);
             result.put(ApiConstants.DETAILS, msg);
+        }
+        response.setResult(result);
+        return response;
+    }
+
+    /**
+     * Executes a custom action for a Network resource by delegating to an
+     * available {@link NetworkCustomActionProvider} (e.g. ExternalNetworkElement).
+     * This path does NOT go through the agent framework.
+     */
+    protected CustomActionResultResponse runNetworkCustomAction(Network network,
+            ExtensionCustomActionVO customActionVO, ExtensionVO extensionVO,
+            ExtensionCustomAction.ResourceType actionResourceType,
+            Map<String, String> cmdParameters) {
+
+        final String actionName = customActionVO.getName();
+        CustomActionResultResponse response = new CustomActionResultResponse();
+        response.setId(customActionVO.getUuid());
+        response.setName(actionName);
+        response.setObjectName("customactionresult");
+        Map<String, String> result = new HashMap<>();
+        response.setSuccess(false);
+        result.put(ApiConstants.MESSAGE, getActionMessage(false, customActionVO, extensionVO, actionResourceType, network));
+
+        // Resolve action parameters
+        List<ExtensionCustomAction.Parameter> actionParameters = null;
+        Pair<Map<String, String>, Map<String, String>> allDetails =
+                extensionCustomActionDetailsDao.listDetailsKeyPairsWithVisibility(customActionVO.getId());
+        if (allDetails.second().containsKey(ApiConstants.PARAMETERS)) {
+            actionParameters = ExtensionCustomAction.Parameter.toListFromJson(
+                    allDetails.second().get(ApiConstants.PARAMETERS));
+        }
+        Map<String, Object> parameters = null;
+        if (CollectionUtils.isNotEmpty(actionParameters)) {
+            parameters = ExtensionCustomAction.Parameter.validateParameterValues(actionParameters, cmdParameters);
+        }
+
+        // Find a provider that can handle this network
+        NetworkCustomActionProvider provider = null;
+        if (CollectionUtils.isNotEmpty(networkCustomActionProviders)) {
+            for (NetworkCustomActionProvider p : networkCustomActionProviders) {
+                if (p.canHandleCustomAction(network)) {
+                    provider = p;
+                    break;
+                }
+            }
+        }
+        if (provider == null) {
+            logger.error("No NetworkCustomActionProvider found for network {}", network.getId());
+            result.put(ApiConstants.DETAILS, "No external network provider registered for this network");
+            response.setResult(result);
+            return response;
+        }
+
+        try {
+            logger.info("Running network custom action '{}' on network {} via {}", actionName,
+                    network.getId(), provider.getClass().getSimpleName());
+            String output = provider.runCustomAction(network, actionName, parameters);
+            boolean success = output != null;
+            response.setSuccess(success);
+            result.put(ApiConstants.MESSAGE, getActionMessage(success, customActionVO, extensionVO, actionResourceType, network));
+            result.put(ApiConstants.DETAILS, success ? output : "Action failed — check management server logs for details");
+        } catch (Exception e) {
+            logger.error("Network custom action '{}' threw exception: {}", actionName, e.getMessage(), e);
+            result.put(ApiConstants.DETAILS, "Action failed: " + e.getMessage());
         }
         response.setResult(result);
         return response;
