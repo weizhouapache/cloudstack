@@ -119,9 +119,8 @@ public class ExternalNetworkElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
         PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider {
 
-    public static final String NETWORK_CAPABILITIES_DETAIL_KEY = "network.capabilities";
 
-    private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = initDefaultCapabilities();
+    private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
 
     @Inject
     private NetworkModel networkModel;
@@ -131,25 +130,6 @@ public class ExternalNetworkElement extends AdapterBase implements
     private ExtensionHelper extensionHelper;
     @Inject
     private NetworkDetailsDao networkDetailsDao;
-
-    private static Map<Service, Map<Capability, String>> initDefaultCapabilities() {
-        Map<Service, Map<Capability, String>> caps = new HashMap<>();
-
-        Map<Capability, String> sourceNatCaps = new HashMap<>();
-        sourceNatCaps.put(Capability.SupportedSourceNatTypes, "peraccount");
-        sourceNatCaps.put(Capability.RedundantRouter, "false");
-        caps.put(Service.SourceNat, sourceNatCaps);
-
-        caps.put(Service.StaticNat, new HashMap<>());
-        caps.put(Service.PortForwarding, new HashMap<>());
-
-        Map<Capability, String> firewallCaps = new HashMap<>();
-        firewallCaps.put(Capability.TrafficStatistics, "per public ip");
-        caps.put(Service.Firewall, firewallCaps);
-
-        caps.put(Service.Gateway, new HashMap<>());
-        return caps;
-    }
 
     @Override
     public Map<Service, Map<Capability, String>> getCapabilities() {
@@ -165,10 +145,10 @@ public class ExternalNetworkElement extends AdapterBase implements
      */
     public Map<Service, Map<Capability, String>> getCapabilitiesFromExtension(long extensionId) {
         Map<String, String> details = extensionHelper.getExtensionDetails(extensionId);
-        if (details == null || !details.containsKey(NETWORK_CAPABILITIES_DETAIL_KEY)) {
+        if (details == null || !details.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
             return DEFAULT_CAPABILITIES;
         }
-        String json = details.get(NETWORK_CAPABILITIES_DETAIL_KEY);
+        String json = details.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY);
         return parseNetworkCapabilitiesJson(json);
     }
 
@@ -305,6 +285,34 @@ public class ExternalNetworkElement extends AdapterBase implements
         } catch (Exception e) {
             return DEFAULT_CAPABILITIES;
         }
+    }
+
+    /**
+     * Returns the effective capabilities for the extension registered on the given
+     * physical network whose name matches {@code providerName}.
+     *
+     * <p>This is the preferred lookup when a specific provider name is known (e.g.
+     * from {@code ntwk_service_map}).  It correctly handles multiple different
+     * extensions registered on the same physical network.</p>
+     *
+     * @param physicalNetworkId the physical network ID
+     * @param providerName      the provider name (must equal the extension name)
+     * @return capabilities for the matching extension, or {@link #DEFAULT_CAPABILITIES}
+     *         if no matching extension is found
+     */
+    public Map<Service, Map<Capability, String>> getCapabilitiesForProvider(long physicalNetworkId, String providerName) {
+        if (providerName == null || providerName.isBlank()) {
+            return DEFAULT_CAPABILITIES;
+        }
+        Extension extension = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+        if (extension == null) {
+            // Fall back to first extension on physical network
+            extension = extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
+        }
+        if (extension == null) {
+            return DEFAULT_CAPABILITIES;
+        }
+        return getCapabilitiesFromExtension(extension.getId());
     }
 
     @Override
@@ -835,28 +843,6 @@ public class ExternalNetworkElement extends AdapterBase implements
             logger.error("Failed to execute custom action '{}': {}", actionName, e.getMessage(), e);
             throw new CloudRuntimeException("Failed to execute custom action: " + actionName, e);
         }
-    }
-
-    /**
-     * Resolves the script file from the NetworkOrchestrator extension
-     * associated
-     * with the given network's physical network.
-     *
-     * The extension's path (resolved by ExtensionHelper from the extensions base
-     * directory + the extension's relative path) is expected to contain an
-     * executable script. The path itself can point to either:
-     * <ul>
-     *   <li>A directory containing an {@code entry-point} script, or</li>
-     *   <li>A directory whose name is used to find the script as {@code <name>.sh}</li>
-     * </ul>
-     */
-    /**
-     * Convenience overload — resolves the extension first, then the script file.
-     * Prefer calling {@link #resolveExtension(Network)} + {@link #resolveScriptFile(Network, Extension)}
-     * when both are needed to avoid resolving the extension twice.
-     */
-    protected File resolveScriptFile(Network network) {
-        return resolveScriptFile(network, resolveExtension(network));
     }
 
     /**

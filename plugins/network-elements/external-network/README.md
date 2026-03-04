@@ -150,8 +150,11 @@ cmk createExtension \
   details[0].value='{"services":["SourceNat","StaticNat","PortForwarding","Firewall","Gateway"],"capabilities":{"SourceNat":{"SupportedSourceNatTypes":"peraccount","RedundantRouter":"false"}}}'
 ```
 
-The `network.capabilities` detail (JSON) declares which services the extension
-provides and their capabilities.  If omitted, all services are available.
+The `network.capabilities` detail key is defined as
+`ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY` in the Java codebase.
+It holds a JSON object that declares which services the extension provides
+and their capabilities.  If omitted, all default services are available
+(SourceNat, StaticNat, PortForwarding, Firewall, Gateway).
 
 To register a second extension on the same physical network (e.g. for a different
 device type):
@@ -164,6 +167,10 @@ cmk createExtension \
   details[0].key=network.capabilities \
   details[0].value='{"services":["Firewall","PortForwarding"]}'
 ```
+
+> **Note:** `createExtension` only registers the extension definition in the
+> database.  The wrapper script must be installed on the management server
+> separately (see Step 2).
 
 ### Step 2 — Install the Wrapper Script on the Management Server
 
@@ -199,7 +206,6 @@ if [ -n "${CS_NET_DEV_SSHKEY}" ]; then
     KEYFILE=$(mktemp)
     printf '%s' "${CS_NET_DEV_SSHKEY}" > "${KEYFILE}"
     chmod 600 "${KEYFILE}"
-    # Forward all env vars and arguments to the remote script
     ssh -i "${KEYFILE}" ${SSH_OPTS} "${USER}@${HOST}" \
         "/opt/cloudstack/external-network.sh $*"
     RC=$?
@@ -242,37 +248,66 @@ elif command == "destroy":
 ### Step 3 — Register the Extension with a Physical Network
 
 Registering the extension creates a **network service provider** on the physical
-network (named after the extension) and stores the device credentials in the
-database.  CloudStack passes these credentials to the wrapper script on every call.
+network named after the extension.  Use `registerExtension` with
+`resourcetype=PhysicalNetwork` and `resourceid=<phys-net-uuid>`.
 
 ```bash
-# Register my-linux-router — connects to 192.168.100.10 via SSH key
+# Register my-linux-router — stores device credentials for later retrieval
 cmk registerExtension \
   id=<ext-uuid-my-linux-router> \
   resourcetype=PhysicalNetwork \
-  resourceid=<phys-net-uuid> \
-  details[0].key=host       details[0].value=192.168.100.10 \
-  details[1].key=port       details[1].value=22 \
-  details[2].key=username   details[2].value=root \
-  details[3].key=sshkey     details[3].value="$(cat /root/.ssh/id_rsa)"
-
-# Register a second different extension on the same physical network
-# This one connects to a different device with a password
-cmk registerExtension \
-  id=<ext-uuid-my-firewall> \
-  resourcetype=PhysicalNetwork \
-  resourceid=<phys-net-uuid> \
-  details[0].key=host       details[0].value=192.168.100.20 \
-  details[1].key=port       details[1].value=22 \
-  details[2].key=username   details[2].value=admin \
-  details[3].key=password   details[3].value=secret
+  resourceid=<phys-net-uuid>
 ```
 
-Each extension stores its own separate device credentials in
-`extension_resource_map_details`.  When a network operation runs, only the
-credentials of the **matching extension** are passed to the wrapper script.
+> After registering, the extension appears as a network service provider in the
+> physical network.  Enable it via the UI or:
+> ```bash
+> cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled
+> ```
 
-### Step 4 — Create a Network Offering
+### Step 4 — Add the External Network Device
+
+Store the device connection credentials (host, port, username, password or SSH key)
+in the database via `addExternalNetworkDevice`.  These are passed as environment
+variables to the wrapper script on every call.
+
+```bash
+# Add device credentials for my-linux-router (SSH key auth)
+cmk addExternalNetworkDevice \
+  physicalnetworkid=<phys-net-uuid> \
+  host=192.168.100.10 \
+  port=22 \
+  details[0].key=username  details[0].value=root \
+  details[1].key=sshkey    details[1].value="$(cat /root/.ssh/id_rsa)"
+
+# Add device credentials for my-firewall (password auth)
+cmk addExternalNetworkDevice \
+  physicalnetworkid=<phys-net-uuid> \
+  host=192.168.100.20 \
+  port=22 \
+  details[0].key=username  details[0].value=admin \
+  details[1].key=password  details[1].value=secret
+```
+
+> Sensitive fields (`password`, `sshkey`) are stored with `display=false` and are
+> **never** returned by `listExternalNetworkDevices`.
+
+To list, update, or remove device credentials:
+
+```bash
+# List devices
+cmk listExternalNetworkDevices physicalnetworkid=<phys-net-uuid>
+
+# Update a credential (e.g. rotate SSH key)
+cmk updateExternalNetworkDevice \
+  physicalnetworkid=<phys-net-uuid> \
+  details[0].key=sshkey details[0].value="$(cat /root/.ssh/new_key)"
+
+# Remove all device credentials (does NOT unregister the extension)
+cmk deleteExternalNetworkDevice physicalnetworkid=<phys-net-uuid>
+```
+
+### Step 5 — Create a Network Offering
 
 When creating a network offering, select the service providers from the network
 service providers that are now registered on the physical network.  The provider
@@ -285,8 +320,8 @@ cmk createNetworkOffering \
   guestiptype=Isolated \
   traffictype=Guest \
   supportedservices="SourceNat,StaticNat,PortForwarding,Firewall,Dns,Dhcp" \
-  serviceProviderList[0].service=SourceNat      serviceProviderList[0].provider="my-linux-router" \
-  serviceProviderList[1].service=StaticNat      serviceProviderList[1].provider="my-linux-router" \
+  serviceProviderList[0].service=SourceNat       serviceProviderList[0].provider="my-linux-router" \
+  serviceProviderList[1].service=StaticNat       serviceProviderList[1].provider="my-linux-router" \
   serviceProviderList[2].service=PortForwarding  serviceProviderList[2].provider="my-linux-router" \
   serviceProviderList[3].service=Firewall        serviceProviderList[3].provider="my-linux-router" \
   serviceProviderList[4].service=Dns             serviceProviderList[4].provider=VirtualRouter \
@@ -296,7 +331,7 @@ cmk createNetworkOffering \
 In the UI, the **Create Network Offering** dialog lists all service providers
 registered on guest physical networks, including your external network providers.
 
-### Step 5 — Create a Network
+### Step 6 — Create a Network
 
 ```bash
 cmk createNetwork \
@@ -402,8 +437,8 @@ environment variables.
 
 ### Device Credentials (injected from `extension_resource_map_details`)
 
-These are stored when registering the extension (step 3) and are injected into
-the wrapper script on every call.
+These are stored when adding the external network device (step 4) and are injected
+into the wrapper script on every call.
 
 | Variable | Source key | Description |
 |---|---|---|
@@ -413,7 +448,8 @@ the wrapper script on every call.
 | `CS_NET_DEV_PASSWORD` | `password` | SSH password or API key/token (sensitive, not logged) |
 | `CS_NET_DEV_SSHKEY` | `sshkey` | SSH private key PEM (sensitive, not logged) |
 
-Any other key stored at registration time is injected as `CS_NET_<KEY>` (upper-cased).
+Any other key stored via `addExternalNetworkDevice details[n].key=...` is injected
+as `CS_NET_<KEY>` (upper-cased).
 
 ### Per-Network Details (from `network_details`)
 
@@ -470,9 +506,9 @@ extension is used as a fallback (with a warning in the logs).
 | Table | Purpose |
 |---|---|
 | `extension` | Extension definitions: name, type, wrapper script path, enabled/disabled state |
-| `extension_details` | Extension-level settings, e.g. `network.capabilities` JSON |
+| `extension_details` | Extension-level settings, e.g. `network.capabilities` JSON (key constant: `ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY`) |
 | `extension_resource_map` | Links an extension to a physical network (creates the network service provider) |
-| `extension_resource_map_details` | Device credentials and settings per registration (host, port, username, password/sshkey) |
+| `extension_resource_map_details` | Device credentials and settings per registration (host, port, username, password/sshkey) — populated by `addExternalNetworkDevice` |
 | `extension_custom_action` | Custom action definitions (name, description, parameters) per extension |
 | `ntwk_service_map` | Maps network ID → service → provider name (used for extension resolution) |
 | `network_offering_service_map` | Maps network offering → service → provider name |
@@ -500,11 +536,21 @@ CS_NET_DEV_HOST=192.168.100.10 CS_NET_DEV_USERNAME=root \
 
 **Credentials not injected / script cannot connect**  
 → Sensitive keys (`password`, `sshkey`) are stored with `display=false` and will
-not appear in `listRegisteredExtensions` output, but they are injected into the
+not appear in `listExternalNetworkDevices` output, but they are injected into the
 wrapper script environment on every call.  
-Re-register with the correct credentials using `registerExtension` with
-`details[n].key=sshkey details[n].value=<key>`.
+Update credentials using `updateExternalNetworkDevice`:
+```bash
+cmk updateExternalNetworkDevice \
+  physicalnetworkid=<phys-net-uuid> \
+  details[0].key=sshkey details[0].value="$(cat /root/.ssh/id_rsa)"
+```
 
 **Wrong extension called for a network**  
 → Check that the `provider` name in `createNetworkOffering` exactly matches (same
 case) the extension `name` used in `createExtension` and `registerExtension`.
+
+**Network service provider not showing in network offering creation**  
+→ Ensure the extension is registered with the correct physical network
+(`registerExtension resourcetype=PhysicalNetwork`) and the network service provider
+is in `Enabled` state (`cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled`).
+

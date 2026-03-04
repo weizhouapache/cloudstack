@@ -127,6 +127,8 @@ import com.cloud.host.dao.HostDetailsDao;
 import com.cloud.hypervisor.ExternalProvisioner;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.network.Network;
+import com.cloud.network.Network.Capability;
+import com.cloud.network.Network.Service;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
 import com.cloud.network.dao.PhysicalNetworkDao;
@@ -2106,6 +2108,129 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             }
         }
         return new java.util.HashMap<>();
+    }
+
+
+    @Override
+    public boolean isExternalNetworkProvider(String providerName) {
+        if (StringUtils.isBlank(providerName)) {
+            return false;
+        }
+        List<Long> physNetIds = listPhysicalNetworkIdsWithExtension();
+        for (Long physNetId : physNetIds) {
+            if (getExtensionForPhysicalNetworkAndProvider(physNetId, providerName) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public Map<Service, Map<Capability, String>> getNetworkCapabilitiesForProvider(
+            Long physicalNetworkId, String providerName) {
+        Extension extension = null;
+        if (physicalNetworkId != null) {
+            extension = getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+            if (extension == null) {
+                extension = getExtensionForPhysicalNetwork(physicalNetworkId);
+            }
+        } else {
+            // search across all physical networks
+            List<Long> physNetIds = listPhysicalNetworkIdsWithExtension();
+            for (Long physNetId : physNetIds) {
+                extension = getExtensionForPhysicalNetworkAndProvider(physNetId, providerName);
+                if (extension != null) {
+                    break;
+                }
+            }
+        }
+        return parseNetworkCapabilitiesForExtension(extension);
+    }
+
+    /**
+     * Parses the {@code network.capabilities} JSON detail of the given extension into a
+     * {@code Service → (Capability → value)} map. Returns {@link #buildDefaultNetworkCapabilities()}
+     * if the extension is null or has no detail.
+     */
+    private Map<Service, Map<Capability, String>> parseNetworkCapabilitiesForExtension(Extension extension) {
+        if (extension == null) {
+            return buildDefaultNetworkCapabilities();
+        }
+        Map<String, String> details = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
+        if (details == null || !details.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
+            return buildDefaultNetworkCapabilities();
+        }
+        String json = details.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY);
+        return parseNetworkCapabilitiesJson(json);
+    }
+
+    /**
+     * Builds the default network capabilities (SourceNat, StaticNat, PortForwarding, Firewall, Gateway).
+     */
+    private Map<Service, Map<Capability, String>> buildDefaultNetworkCapabilities() {
+        Map<Service, Map<Capability, String>> caps = new HashMap<>();
+        Map<Capability, String> sourceNatCaps = new HashMap<>();
+        sourceNatCaps.put(Capability.SupportedSourceNatTypes, "peraccount");
+        sourceNatCaps.put(Capability.RedundantRouter, "false");
+        caps.put(Service.SourceNat, sourceNatCaps);
+        caps.put(Service.StaticNat, new HashMap<>());
+        caps.put(Service.PortForwarding, new HashMap<>());
+        Map<Capability, String> firewallCaps = new HashMap<>();
+        firewallCaps.put(Capability.TrafficStatistics, "per public ip");
+        caps.put(Service.Firewall, firewallCaps);
+        caps.put(Service.Gateway, new HashMap<>());
+        return caps;
+    }
+
+    /**
+     * Parses the network capabilities JSON string.
+     * <p>Expected format:</p>
+     * <pre>
+     * {
+     *   "services": ["SourceNat", "StaticNat", ...],
+     *   "capabilities": {
+     *     "SourceNat": { "SupportedSourceNatTypes": "peraccount" },
+     *     ...
+     *   }
+     * }
+     * </pre>
+     */
+    Map<Service, Map<Capability, String>> parseNetworkCapabilitiesJson(String json) {
+        if (StringUtils.isBlank(json)) {
+            return null; // caller should use default
+        }
+        Map<Service, Map<Capability, String>> caps = new HashMap<>();
+        try {
+            com.google.gson.JsonObject root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+            com.google.gson.JsonArray servicesArray = root.getAsJsonArray("services");
+            if (servicesArray == null || servicesArray.isEmpty()) {
+                return null;
+            }
+            com.google.gson.JsonObject capabilitiesObj = root.has("capabilities") ?
+                    root.getAsJsonObject("capabilities") : new com.google.gson.JsonObject();
+            for (com.google.gson.JsonElement svcElem : servicesArray) {
+                String svcName = svcElem.getAsString();
+                Service service = Service.getService(svcName);
+                if (service == null) {
+                    continue;
+                }
+                Map<Capability, String> svcCaps = new HashMap<>();
+                if (capabilitiesObj.has(svcName)) {
+                    com.google.gson.JsonObject svcCapsObj = capabilitiesObj.getAsJsonObject(svcName);
+                    for (Map.Entry<String, com.google.gson.JsonElement> entry : svcCapsObj.entrySet()) {
+                        Capability cap = Capability.getCapability(entry.getKey());
+                        if (cap != null) {
+                            svcCaps.put(cap, entry.getValue().getAsString());
+                        }
+                    }
+                }
+                caps.put(service, svcCaps);
+            }
+            return caps;
+        } catch (Exception e) {
+            logger.warn("Failed to parse network.capabilities JSON: {}", e.getMessage());
+            return null;
+        }
     }
 
     @Override

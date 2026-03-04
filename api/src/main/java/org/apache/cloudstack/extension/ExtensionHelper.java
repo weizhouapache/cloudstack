@@ -20,7 +20,14 @@ package org.apache.cloudstack.extension;
 import java.util.List;
 import java.util.Map;
 
+import com.cloud.network.Network.Capability;
+import com.cloud.network.Network.Service;
+
 public interface ExtensionHelper {
+
+    /** Detail key used to store the JSON network capabilities of a NetworkOrchestrator extension. */
+    String NETWORK_CAPABILITIES_DETAIL_KEY = "network.capabilities";
+
     Long getExtensionIdForCluster(long clusterId);
     Extension getExtension(long id);
     Extension getExtensionForCluster(long clusterId);
@@ -118,4 +125,30 @@ public interface ExtensionHelper {
      * @return all key/value details including non-display ones, or an empty map
      */
     Map<String, String> getAllResourceMapDetailsForExtensionOnPhysicalNetwork(long physicalNetworkId, long extensionId);
+
+    /**
+     * Returns {@code true} if the given provider name is backed by a
+     * {@code NetworkOrchestrator} extension registered on any physical network.
+     * This is used by {@code NetworkModelImpl} to detect extension-backed providers
+     * that are not in the static {@code s_providerToNetworkElementMap}.
+     *
+     * @param providerName the provider / extension name
+     * @return true if the provider is an external network extension provider
+     */
+    boolean isExternalNetworkProvider(String providerName);
+
+    /**
+     * Returns the effective {@link Service} → ({@link Capability} → value) capabilities
+     * for the given external network provider, looking it up by name on the given
+     * physical network.
+     *
+     * <p>If {@code physicalNetworkId} is {@code null}, the method searches across all
+     * physical networks that have extensions registered and returns the capabilities for
+     * the first matching extension.</p>
+     *
+     * @param physicalNetworkId physical network ID, or {@code null} for offering-level queries
+     * @param providerName      provider / extension name
+     * @return capabilities map, or the default capabilities if no matching extension is found
+     */
+    Map<Service, Map<Capability, String>> getNetworkCapabilitiesForProvider(Long physicalNetworkId, String providerName);
 }
