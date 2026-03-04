@@ -2,24 +2,49 @@
 
 This plugin allows CloudStack to delegate guest network operations (create/delete
 network, source NAT, static NAT, port forwarding, firewall) to an **external network
-device** via a user-supplied **wrapper script** installed on the management server.
+device** via a user-supplied **entry-point script** installed on the management server.
+
+The entry-point script acts as the bridge between CloudStack and the external device.
+It can use **any protocol** to drive the device: SSH commands on a Linux server,
+REST API calls to a firewall or SDN controller, NETCONF/gRPC to a network appliance,
+or any other mechanism.  CloudStack only cares that the script is executable and
+follows the command interface described below.
+
+---
+
+## Design Principles
+
+- **One extension = one network service provider.**  
+  When a `NetworkOrchestrator` extension is registered with a physical network via
+  `registerExtension`, the **extension name becomes the network service provider
+  name**.  There is no separate "ExternalNetwork" catch-all provider.
+
+- **Device credentials live in the extension registration.**  
+  Connection details (host, port, username, password, SSH key, API tokens, etc.)
+  are stored as `details` on the `registerExtension` call.  There are no separate
+  `addExternalNetworkDevice` / `listExternalNetworkDevices` APIs.
+
+- **Multiple extensions per physical network are supported.**  
+  Each extension appears as its own tab in the physical network's
+  *Service Providers* view, with its own enable/disable state.
+
+- **Same script, different physical networks.**  
+  If you need the same entry-point script to serve two physical networks, create two
+  extensions with different names (and the same `path`), and register each one to
+  its respective physical network.
 
 ---
 
 ## Supported External Devices
 
-The external network device can be any device that supports remote management:
+The external device can be anything that accepts remote management commands:
 
 | Device type | Transport | Status |
 |---|---|---|
 | Linux server (namespace/bridge/iptables) | SSH | ✅ Implemented |
 | Network appliance / router / firewall | SSH | 🔧 Custom script required |
-| Network appliance / SDN controller | HTTP API | 🔧 Custom script required |
-
-Currently the reference implementation (`external-network.sh`) targets a **Linux
-server** using network namespaces, bridges, and iptables.  Support for other device
-types (e.g. a hardware firewall or an SDN controller with a REST API) can be added
-by writing a custom wrapper script — no Java code changes are needed.
+| SDN controller / network OS | REST API | 🔧 Custom script required |
+| Network appliance | NETCONF / gRPC | 🔧 Custom script required |
 
 ---
 
@@ -28,63 +53,30 @@ by writing a custom wrapper script — no Java code changes are needed.
 ```
 CloudStack Management Server
   │
-  │  Calls wrapper script (installed locally on mgmt server)
-  │  Passes device credentials as environment variables
+  │  Executes entry-point script (installed locally on mgmt server)
+  │  Passes device credentials as CS_NET_DEV_* env vars
+  │  (credentials read from extension_resource_map_details)
   │
-  └─► entry-point <command> [options]
+  └─► /etc/cloudstack/extensions/<extension-name>/entry-point <command> [options]
            │
-           │  Connects to the external device (SSH or HTTP API)
+           │  Connects to the external device (SSH, REST API, NETCONF, …)
            │
            └─► External Network Device
                   └─► Performs the network operation
-                       (create namespace, configure iptables, call REST API, …)
 ```
 
-1. **CloudStack Management Server** calls the wrapper script (`entry-point`) for
-   every network lifecycle event: create network, delete network, assign public IP,
-   add static NAT rule, add port forwarding rule, etc.
+1. **CloudStack** calls the entry-point script for every network lifecycle event:
+   create network, delete network, assign public IP, add static NAT rule, etc.
 
-2. **The wrapper script** is installed on the management server under
+2. **The entry-point script** is installed on the management server under
    `/etc/cloudstack/extensions/<extension-name>/entry-point`.  
-   It is responsible for connecting to the external device and performing the
-   requested operation.  It receives all necessary context as environment variables
-   (see [Environment Variables](#environment-variables-reference)).
+   It connects to the external device using whatever protocol is appropriate and
+   performs the requested operation.  All necessary context is supplied via
+   environment variables (see [Environment Variables](#environment-variables-reference)).
 
-3. **The external device** performs the actual network configuration.  For a Linux
-   server this means creating a network namespace, configuring bridges and iptables
-   rules, etc.  For a hardware appliance it might mean calling a REST API.
-
-4. **Device credentials** (`host`, `port`, `username`, `password` or `sshkey`) are
-   stored securely in the CloudStack database and are injected into the wrapper
-   script's environment on every call.  The script uses them to authenticate to the
-   external device — they are never hard-coded in the script.
-
----
-
-## Wrapper Script Operations
-
-CloudStack calls the wrapper script with the following commands.  The script must
-handle all of them:
-
-| Command | Trigger | Description |
-|---|---|---|
-| `implement` | Network created / started | Create the network on the external device (e.g. create namespace, configure bridge, set up default routing) |
-| `shutdown` | Network stopped | Tear down the network, remove NAT rules |
-| `destroy` | Network deleted | Remove all state for the network on the device |
-| `assign-ip` | Public IP acquired | Notify the device of a new public IP |
-| `release-ip` | Public IP released | Remove the public IP from the device |
-| `add-static-nat` | Static NAT enabled | Create a 1-to-1 NAT mapping |
-| `delete-static-nat` | Static NAT disabled | Remove the 1-to-1 NAT mapping |
-| `add-port-forward` | Port forwarding rule added | Create a DNAT rule |
-| `delete-port-forward` | Port forwarding rule removed | Remove the DNAT rule |
-| `custom-action` | `runCustomAction` API | Run an operator-defined ad-hoc action |
-
-The wrapper script can be written in **any language** — it just needs to be
-executable on the management server:
-
-- Shell script (`#!/bin/bash`) — simplest, no extra dependencies
-- Python script (`#!/usr/bin/env python3`) — useful when calling HTTP APIs
-- Any other executable binary or interpreter
+3. **Device credentials** are stored in the CloudStack database when the extension
+   is registered with a physical network, and are injected into the script's
+   environment on every call — they are never hard-coded in the script.
 
 ---
 
@@ -96,14 +88,14 @@ executable on the management server:
 │                                                      │
 │  ExternalNetworkElement.java                         │
 │    │                                                 │
-│    │ reads device credentials from DB                │
-│    │ injects them as CS_NET_DEV_* env vars           │
+│    │  reads credentials from extension_resource_map_details
+│    │  injects them as CS_NET_DEV_* env vars          │
 │    ▼                                                 │
 │  /etc/cloudstack/extensions/                         │
 │    └── <extension-name>/                             │
-│          └── entry-point   ◄── wrapper script        │
+│          └── entry-point   ◄── entry-point script    │
 └──────────────────┬──────────────────────────────────┘
-                   │ SSH / HTTP API
+                   │ SSH / REST API / NETCONF / …
                    ▼
          ┌─────────────────────┐
          │  External Device    │
@@ -114,23 +106,61 @@ executable on the management server:
 
 ---
 
+## Entry-Point Script Operations
+
+CloudStack calls the entry-point script with the following commands.
+The script must handle all commands that correspond to the services declared
+in the extension's `network.capabilities` detail:
+
+| Command | Trigger | Description |
+|---|---|---|
+| `implement` | Network created / restarted | Create the network on the device (namespace, bridge, routing, source NAT) |
+| `shutdown` | Network stopped | Tear down the network, remove NAT rules |
+| `destroy` | Network deleted | Remove all state for the network on the device |
+| `assign-ip` | Public IP acquired | Notify the device of a new public IP |
+| `release-ip` | Public IP released | Remove the public IP from the device |
+| `add-static-nat` | Static NAT enabled | Create a 1-to-1 NAT mapping |
+| `delete-static-nat` | Static NAT disabled | Remove the 1-to-1 NAT mapping |
+| `add-port-forward` | Port forwarding rule added | Create a DNAT rule |
+| `delete-port-forward` | Port forwarding rule removed | Remove the DNAT rule |
+| `apply-firewall` | Firewall rules changed | Apply the full set of firewall rules |
+| `custom-action` | `runCustomAction` API | Run an operator-defined ad-hoc action |
+
+The entry-point script can be written in **any language** — it just needs to be
+executable on the management server:
+
+- Shell script (`#!/bin/bash`) — simplest, great for SSH-based devices
+- Python script (`#!/usr/bin/env python3`) — ideal for REST API calls
+- Any other compiled or interpreted executable
+
+---
+
 ## Multi-Extension Support
 
-A single physical network can have **multiple different** NetworkOrchestrator
-extensions registered, each serving a different set of guest networks.  For example:
+A single physical network can have **multiple different** `NetworkOrchestrator`
+extensions registered (one per extension name).  Each one appears as a separate
+tab in the physical network's Service Providers view.
 
-- `my-linux-router` — handles networks that use a Linux server for NAT/routing
-- `my-firewall` — handles networks that use a hardware firewall appliance
+When CloudStack needs to operate on a network, it resolves the correct extension:
 
-When CloudStack needs to operate on a network it determines the correct extension by:
+```
+Network N → ntwk_service_map.provider = "my-linux-router"
+                      │
+                      ▼
+    getExtensionForPhysicalNetworkAndProvider(physNetId, "my-linux-router")
+                      │
+                      ▼
+    extension WHERE name = "my-linux-router"
+                      │
+          ┌───────────┴────────────┐
+          ▼                        ▼
+    Script path               Device credentials
+    (entry-point for          (host/port/sshkey stored in
+     my-linux-router)          extension_resource_map_details
+                               for this registration only)
+```
 
-1. Reading the network's service-map (`ntwk_service_map`) to find the provider names
-   assigned to that network.
-2. Matching each provider name against the **extension names** registered on the
-   physical network in `extension_resource_map`.
-3. Using the matching extension's wrapper script and device credentials.
-
-> **The extension name must exactly match the network service provider name.**
+> **The extension name must exactly match the NSP / provider name.**
 
 ---
 
@@ -138,8 +168,8 @@ When CloudStack needs to operate on a network it determines the correct extensio
 
 ### Step 1 — Create a NetworkOrchestrator Extension
 
-The extension defines the wrapper script path and declares which network services
-it can provide.
+The `network.capabilities` detail declares which network services the extension
+provides.  If omitted, all default services are available.
 
 ```bash
 cmk createExtension \
@@ -150,14 +180,7 @@ cmk createExtension \
   details[0].value='{"services":["SourceNat","StaticNat","PortForwarding","Firewall","Gateway"],"capabilities":{"SourceNat":{"SupportedSourceNatTypes":"peraccount","RedundantRouter":"false"}}}'
 ```
 
-The `network.capabilities` detail key is defined as
-`ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY` in the Java codebase.
-It holds a JSON object that declares which services the extension provides
-and their capabilities.  If omitted, all default services are available
-(SourceNat, StaticNat, PortForwarding, Firewall, Gateway).
-
-To register a second extension on the same physical network (e.g. for a different
-device type):
+To create a second extension for a different device on the same physical network:
 
 ```bash
 cmk createExtension \
@@ -168,34 +191,23 @@ cmk createExtension \
   details[0].value='{"services":["Firewall","PortForwarding"]}'
 ```
 
-> **Note:** `createExtension` only registers the extension definition in the
-> database.  The wrapper script must be installed on the management server
-> separately (see Step 2).
+> **Important:** Only extensions of type `NetworkOrchestrator` can be registered
+> with a physical network.  Other extension types (e.g. `Orchestrator`) are for
+> external compute only.
 
-### Step 2 — Install the Wrapper Script on the Management Server
+### Step 2 — Install the Entry-Point Script on the Management Server
 
-Place the executable wrapper script at:
+Place the executable entry-point script at:
 ```
 /etc/cloudstack/extensions/<extension-name>/entry-point
 ```
 
-Example for `my-linux-router` (SSH-based Linux server):
+**Example: SSH-based Linux server**
 
 ```bash
 #!/bin/bash
-# Wrapper script: entry-point
-# Installed on the CloudStack management server.
-# Called by CloudStack for every network operation.
-#
-# Device credentials are injected as environment variables by CloudStack:
-#   CS_NET_DEV_HOST      - IP/hostname of the external Linux server
-#   CS_NET_DEV_PORT      - SSH port (default: 22)
-#   CS_NET_DEV_USERNAME  - SSH username
-#   CS_NET_DEV_PASSWORD  - SSH password  (if using password auth)
-#   CS_NET_DEV_SSHKEY    - SSH private key PEM  (if using key auth)
-#   CS_NET_*             - any other details registered with the extension
-#
-# All arguments ($@) are forwarded verbatim to the remote script.
+# Entry-point script: forwards all operations to a remote Linux server via SSH.
+# CloudStack injects device credentials as CS_NET_DEV_* environment variables.
 
 HOST="${CS_NET_DEV_HOST}"
 PORT="${CS_NET_DEV_PORT:-22}"
@@ -218,18 +230,17 @@ else
 fi
 ```
 
-Example for an HTTP API device (Python):
+**Example: REST API device (Python)**
 
 ```python
 #!/usr/bin/env python3
-# Wrapper script for a network appliance with a REST API.
-# Device credentials are in CS_NET_DEV_HOST, CS_NET_DEV_PASSWORD, etc.
+# Entry-point script for a network appliance with a REST API.
 import os, sys, requests
 
-HOST     = os.environ["CS_NET_DEV_HOST"]
-API_KEY  = os.environ.get("CS_NET_DEV_PASSWORD", "")
-command  = sys.argv[1] if len(sys.argv) > 1 else ""
-args     = sys.argv[2:]
+HOST    = os.environ["CS_NET_DEV_HOST"]
+API_KEY = os.environ.get("CS_NET_DEV_PASSWORD", "")
+command = sys.argv[1] if len(sys.argv) > 1 else ""
+args    = sys.argv[2:]
 
 base_url = f"https://{HOST}/api/v1"
 headers  = {"Authorization": f"Bearer {API_KEY}"}
@@ -247,72 +258,41 @@ elif command == "destroy":
 
 ### Step 3 — Register the Extension with a Physical Network
 
-Registering the extension creates a **network service provider** on the physical
-network named after the extension.  Use `registerExtension` with
-`resourcetype=PhysicalNetwork` and `resourceid=<phys-net-uuid>`.
+Registering the extension **creates a network service provider** named after the
+extension on the physical network, and **stores the device credentials** so they
+are injected into the entry-point script on every call.
 
 ```bash
-# Register my-linux-router — stores device credentials for later retrieval
 cmk registerExtension \
   id=<ext-uuid-my-linux-router> \
   resourcetype=PhysicalNetwork \
-  resourceid=<phys-net-uuid>
+  resourceid=<phys-net-uuid> \
+  details[0].key=host      details[0].value=192.168.100.10 \
+  details[1].key=port      details[1].value=22 \
+  details[2].key=username  details[2].value=root \
+  details[3].key=sshkey    details[3].value="$(cat /root/.ssh/id_rsa)"
 ```
 
-> After registering, the extension appears as a network service provider in the
-> physical network.  Enable it via the UI or:
-> ```bash
-> cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled
-> ```
+> - Sensitive keys (`password`, `sshkey`) are stored with `display=false` and are
+>   **never** returned in API list responses, but are injected into the script
+>   environment on every call.
+> - Any other `details` key is injected as `CS_NET_<KEY>` (upper-cased).
+> - **The same extension cannot be registered twice on the same physical network.**
+>   To use the same script for two separate device instances on the same physical
+>   network, create two extensions with different names and the same `path`.
 
-### Step 4 — Add the External Network Device
-
-Store the device connection credentials (host, port, username, password or SSH key)
-in the database via `addExternalNetworkDevice`.  These are passed as environment
-variables to the wrapper script on every call.
-
+Enable the provider:
 ```bash
-# Add device credentials for my-linux-router (SSH key auth)
-cmk addExternalNetworkDevice \
-  physicalnetworkid=<phys-net-uuid> \
-  host=192.168.100.10 \
-  port=22 \
-  details[0].key=username  details[0].value=root \
-  details[1].key=sshkey    details[1].value="$(cat /root/.ssh/id_rsa)"
-
-# Add device credentials for my-firewall (password auth)
-cmk addExternalNetworkDevice \
-  physicalnetworkid=<phys-net-uuid> \
-  host=192.168.100.20 \
-  port=22 \
-  details[0].key=username  details[0].value=admin \
-  details[1].key=password  details[1].value=secret
+cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled
 ```
 
-> Sensitive fields (`password`, `sshkey`) are stored with `display=false` and are
-> **never** returned by `listExternalNetworkDevices`.
+Or use the UI: **Infrastructure → Physical Networks → [network] → Network Service
+Providers**, select the extension tab, click **Enable Provider**.
 
-To list, update, or remove device credentials:
+### Step 4 — Create a Network Offering
 
-```bash
-# List devices
-cmk listExternalNetworkDevices physicalnetworkid=<phys-net-uuid>
-
-# Update a credential (e.g. rotate SSH key)
-cmk updateExternalNetworkDevice \
-  physicalnetworkid=<phys-net-uuid> \
-  details[0].key=sshkey details[0].value="$(cat /root/.ssh/new_key)"
-
-# Remove all device credentials (does NOT unregister the extension)
-cmk deleteExternalNetworkDevice physicalnetworkid=<phys-net-uuid>
-```
-
-### Step 5 — Create a Network Offering
-
-When creating a network offering, select the service providers from the network
-service providers that are now registered on the physical network.  The provider
-name in the offering **must match the extension name** so CloudStack can route
-operations to the correct wrapper script.
+Select the registered extension as a service provider.  The provider name **must
+exactly match the extension name** (case-sensitive).
 
 ```bash
 cmk createNetworkOffering \
@@ -328,10 +308,12 @@ cmk createNetworkOffering \
   serviceProviderList[5].service=Dhcp            serviceProviderList[5].provider=VirtualRouter
 ```
 
-In the UI, the **Create Network Offering** dialog lists all service providers
-registered on guest physical networks, including your external network providers.
+In the **UI**, the *Create Network Offering* provider dropdown lists only registered
+external network service providers (extensions whose name matches an enabled NSP).
+A generic "External Network" entry is **not** shown — only actual registered
+extension names appear.
 
-### Step 6 — Create a Network
+### Step 5 — Create a Network
 
 ```bash
 cmk createNetwork \
@@ -340,10 +322,9 @@ cmk createNetwork \
   zoneid=<zone-uuid>
 ```
 
-When this network is created, CloudStack calls the `entry-point` wrapper script
-with the `implement` command.  The wrapper connects to the external device and
-creates the network there (e.g. creates a Linux namespace, sets up a bridge and
-gateway, configures source NAT).
+CloudStack executes `entry-point implement ...`.  The script connects to the device
+and creates the network (e.g. creates a Linux namespace, configures a bridge and
+gateway, sets up source NAT via iptables, or calls a REST API).
 
 ---
 
@@ -365,139 +346,56 @@ gateway, configures source NAT).
 
 ## Custom Actions on Networks
 
-Custom actions allow operators to run ad-hoc operations on the external device
-managing a network (e.g. reboot the device, dump its current configuration).
-
-### Register a Custom Action
+Custom actions allow operators to trigger ad-hoc operations on the external device
+managing a network (e.g. reload device configuration, dump interface state).
 
 ```bash
+# Define a custom action for an extension
 cmk addCustomAction \
-  extensionid=<ext-uuid-my-linux-router> \
-  name="reboot-device" \
-  description="Bounce bridge interfaces for this network" \
-  resourcetype=Network
-
-cmk addCustomAction \
-  extensionid=<ext-uuid-my-linux-router> \
+  extensionid=<ext-uuid> \
   name="dump-config" \
   description="Dump iptables rules and interface state" \
   resourcetype=Network
-```
 
-### Run a Custom Action
-
-```bash
+# Run the action on a specific network
 cmk runCustomAction \
   customactionid=<action-uuid> \
   resourcetype=Network \
   resourceid=<network-uuid>
 ```
 
-### List Available Actions for a Network
-
-```bash
-cmk listCustomActions resourcetype=Network resourceid=<network-uuid> enabled=true
-```
-
-### UI
-
-On the guest network detail page, a **Run Action** button (⚡) appears when the
-network's provider is an external network extension.  It opens a dialog listing all
-enabled custom actions for that extension.
-
-### Built-in Actions (Linux server script)
-
-| Action | Description |
-|---|---|
-| `reboot-device` | Brings the network's bridge interface down and back up |
-| `dump-config` | Dumps iptables NAT + FILTER rules and bridge/interface state |
-
-To add custom actions, place an executable hook script at:
-```
-<STATE_DIR>/hooks/custom-action-<name>.sh
-```
-
-### Custom Action Parameters
-
-```bash
-cmk runCustomAction \
-  customactionid=<action-uuid> \
-  resourcetype=Network \
-  resourceid=<network-uuid> \
-  parameters[0].key=timeout \
-  parameters[0].value=30
-```
-
-Parameters are injected into the wrapper script as `CS_ACTION_PARAM_<KEY>`
-environment variables.
+In the UI, a **Run Action** button (⚡) appears on the guest network detail page
+when the network's provider is an extension-backed external network provider.
 
 ---
 
 ## Environment Variables Reference
 
-### Device Credentials (injected from `extension_resource_map_details`)
+### Device Credentials (from `extension_resource_map_details`)
 
-These are stored when adding the external network device (step 4) and are injected
-into the wrapper script on every call.
+These are stored via `registerExtension details[n].key=...` and injected into the
+entry-point script on every call:
 
-| Variable | Source key | Description |
+| Variable | `details` key | Description |
 |---|---|---|
 | `CS_NET_DEV_HOST` | `host` | IP or hostname of the external device |
-| `CS_NET_DEV_PORT` | `port` | SSH port or API port (default `22`) |
+| `CS_NET_DEV_PORT` | `port` | SSH / API port (default `22`) |
 | `CS_NET_DEV_USERNAME` | `username` | SSH username or API user |
-| `CS_NET_DEV_PASSWORD` | `password` | SSH password or API key/token (sensitive, not logged) |
-| `CS_NET_DEV_SSHKEY` | `sshkey` | SSH private key PEM (sensitive, not logged) |
+| `CS_NET_DEV_PASSWORD` | `password` | SSH password or API token (sensitive, never logged) |
+| `CS_NET_DEV_SSHKEY` | `sshkey` | SSH private key PEM (sensitive, never logged) |
 
-Any other key stored via `addExternalNetworkDevice details[n].key=...` is injected
-as `CS_NET_<KEY>` (upper-cased).
+Any other key stored via `registerExtension details[n].key=...` is injected as
+`CS_NET_<KEY>` (upper-cased, e.g. `namespace` → `CS_NET_NAMESPACE`).
 
 ### Per-Network Details (from `network_details`)
 
-Keys starting with `ext.` are injected as `CS_NET_EXT_<KEY>`:
-
-| Variable | Source key | Description |
-|---|---|---|
-| `CS_NET_EXT_NAMESPACE` | `ext.namespace` | Linux network namespace name |
-| `CS_NET_EXT_VRF` | `ext.vrf` | VRF name |
-| `CS_NET_EXT_BRIDGE` | `ext.bridge` | Bridge name |
+Keys starting with `ext.` are injected as `CS_NET_EXT_<KEY>` (e.g.
+`ext.vrf` → `CS_NET_EXT_VRF`).
 
 ### Custom Action Parameters
 
-| Variable | Description |
-|---|---|
-| `CS_ACTION_PARAM_<KEY>` | Caller-supplied parameter, key upper-cased |
-
----
-
-## How Extension Resolution Works (Multi-Extension)
-
-When CloudStack needs to operate on a network, it determines which wrapper script
-to call and which credentials to use by matching the network's provider name to a
-registered extension:
-
-```
-Network N → serviceProviderList.provider = "my-linux-router"
-                      │
-                      ▼
-            ntwk_service_map.provider = "my-linux-router"
-                      │
-                      ▼
-    getExtensionForPhysicalNetworkAndProvider(physNetId, "my-linux-router")
-                      │
-                      ▼
-    extension_resource_map WHERE physical_network_id = physNetId
-      → extension WHERE name = "my-linux-router"  ✓
-                      │
-          ┌───────────┴───────────┐
-          ▼                       ▼
-    Script path              Device credentials
-    (entry-point for         (host/port/sshkey for
-     my-linux-router)         my-linux-router only,
-                              NOT for my-firewall)
-```
-
-If no provider name matches any registered extension name, the first registered
-extension is used as a fallback (with a warning in the logs).
+Parameters passed via `runCustomAction parameters[n].key=...` are injected as
+`CS_ACTION_PARAM_<KEY>` (upper-cased).
 
 ---
 
@@ -505,12 +403,12 @@ extension is used as a fallback (with a warning in the logs).
 
 | Table | Purpose |
 |---|---|
-| `extension` | Extension definitions: name, type, wrapper script path, enabled/disabled state |
-| `extension_details` | Extension-level settings, e.g. `network.capabilities` JSON (key constant: `ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY`) |
-| `extension_resource_map` | Links an extension to a physical network (creates the network service provider) |
-| `extension_resource_map_details` | Device credentials and settings per registration (host, port, username, password/sshkey) — populated by `addExternalNetworkDevice` |
-| `extension_custom_action` | Custom action definitions (name, description, parameters) per extension |
-| `ntwk_service_map` | Maps network ID → service → provider name (used for extension resolution) |
+| `extension` | Extension definitions (name, type, path, state) |
+| `extension_details` | Extension-level settings, e.g. `network.capabilities` JSON |
+| `extension_resource_map` | Links extension → physical network; NSP is created with the extension name |
+| `extension_resource_map_details` | Device credentials per registration (populated by `registerExtension details`) |
+| `extension_custom_action` | Custom action definitions per extension |
+| `ntwk_service_map` | Maps network → service → provider name (= extension name) |
 | `network_offering_service_map` | Maps network offering → service → provider name |
 
 ---
@@ -518,16 +416,14 @@ extension is used as a fallback (with a warning in the logs).
 ## Troubleshooting
 
 **"No NetworkOrchestrator extension found for network X"**  
-→ Either no extension is registered on the physical network, or none has a name
-matching the network's provider.  
-Check: `cmk listExtensions`, verify `extension_resource_map` and `ntwk_service_map`
-in the database, and confirm the provider name in the network offering matches the
-extension name exactly.
+→ Confirm the provider name in the network offering matches the extension name
+exactly (case-sensitive).  
+→ Check `cmk listExtensions`, `extension_resource_map`, and `ntwk_service_map`.
 
 **Script exits non-zero**  
-→ Check management server logs for `External network script failed` messages —
-the script's stdout is included.  Run the wrapper script manually on the management
-server to debug, e.g.:
+→ Check management server logs for `External network script failed` — the script's
+stdout/stderr is included in the log.  
+→ Run the entry-point script manually on the management server to debug:
 ```bash
 CS_NET_DEV_HOST=192.168.100.10 CS_NET_DEV_USERNAME=root \
   /etc/cloudstack/extensions/my-linux-router/entry-point \
@@ -536,21 +432,16 @@ CS_NET_DEV_HOST=192.168.100.10 CS_NET_DEV_USERNAME=root \
 
 **Credentials not injected / script cannot connect**  
 → Sensitive keys (`password`, `sshkey`) are stored with `display=false` and will
-not appear in `listExternalNetworkDevices` output, but they are injected into the
-wrapper script environment on every call.  
-Update credentials using `updateExternalNetworkDevice`:
-```bash
-cmk updateExternalNetworkDevice \
-  physicalnetworkid=<phys-net-uuid> \
-  details[0].key=sshkey details[0].value="$(cat /root/.ssh/id_rsa)"
-```
+not appear in list API responses, but they **are** injected into the entry-point
+script environment.  To update credentials, unregister and re-register the
+extension with the corrected `details`.
 
-**Wrong extension called for a network**  
-→ Check that the `provider` name in `createNetworkOffering` exactly matches (same
-case) the extension `name` used in `createExtension` and `registerExtension`.
+**Provider not showing in network offering creation UI**  
+→ The dropdown only shows extensions whose name matches a registered and enabled
+network service provider.  Make sure `registerExtension` was called with
+`resourcetype=PhysicalNetwork` and the NSP is in `Enabled` state.
 
-**Network service provider not showing in network offering creation**  
-→ Ensure the extension is registered with the correct physical network
-(`registerExtension resourcetype=PhysicalNetwork`) and the network service provider
-is in `Enabled` state (`cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled`).
-
+**"Extension already registered" error**  
+→ An extension can only be registered **once** per physical network.  To use the
+same entry-point script a second time on the same physical network, create a new
+extension with a different name but the same `path`.

@@ -18,9 +18,9 @@
 <template>
   <div>
     <a-spin :spinning="fetchLoading">
-      <!-- Add ExternalNetwork provider button: shown on extension tabs when ExternalNetwork NSP not yet added -->
+      <!-- Add Extension Provider button: shown on extension tabs when that extension's NSP not yet added -->
       <a-button
-        v-if="isExtensionTab && !nsps['ExternalNetwork']"
+        v-if="isExtensionTab && !nsps[tabKey]"
         :disabled="!('addNetworkServiceProvider' in $store.getters.apis)"
         type="dashed"
         style="width: 100%; margin-bottom: 12px;"
@@ -30,7 +30,7 @@
       </a-button>
       <!-- Enable/Disable buttons for extension provider tab -->
       <a-button
-        v-if="isExtensionTab && nsps['ExternalNetwork'] && nsps['ExternalNetwork'].state === 'Disabled'"
+        v-if="isExtensionTab && nsps[tabKey] && nsps[tabKey].state === 'Disabled'"
         type="primary"
         style="margin-bottom: 12px; margin-right: 8px;"
         @click="handleEnableExtensionProvider">
@@ -38,22 +38,12 @@
         {{ $t('label.enable.provider') }}
       </a-button>
       <a-button
-        v-if="isExtensionTab && nsps['ExternalNetwork'] && nsps['ExternalNetwork'].state === 'Enabled'"
+        v-if="isExtensionTab && nsps[tabKey] && nsps[tabKey].state === 'Enabled'"
         danger
         style="margin-bottom: 12px; margin-right: 8px;"
         @click="handleDisableExtensionProvider">
         <template #icon><stop-outlined /></template>
         {{ $t('label.disable.provider') }}
-      </a-button>
-      <!-- Add External Network Device button (only when extension tab is active and provider is added) -->
-      <a-button
-        v-if="isExtensionTab && nsps['ExternalNetwork'] && nsps['ExternalNetwork'].id"
-        :disabled="!('addExternalNetworkDevice' in $store.getters.apis)"
-        type="dashed"
-        style="width: 100%; margin-bottom: 12px;"
-        @click="handleOpenAddDeviceModal">
-        <template #icon><plus-outlined /></template>
-        {{ $t('label.add.external.network.device') }}
       </a-button>
       <a-tabs
         :tabPosition="device === 'mobile' ? 'top' : 'left'"
@@ -87,107 +77,23 @@
           <template #tab>
             <span>
               {{ ext.name }}
-              <status :text="nsps['ExternalNetwork'] ? nsps['ExternalNetwork'].state : $t('label.not.added')" style="margin-bottom: 6px; margin-left: 6px" />
+              <status :text="nsps[ext.name] ? nsps[ext.name].state : $t('label.not.added')" style="margin-bottom: 6px; margin-left: 6px" />
             </span>
           </template>
           <div v-if="tabKey === ext.name">
             <a-descriptions bordered size="small" :column="1" style="margin-bottom: 16px;">
               <a-descriptions-item :label="$t('label.name')">{{ ext.name }}</a-descriptions-item>
               <a-descriptions-item :label="$t('label.state')">
-                <status :text="nsps['ExternalNetwork'] ? nsps['ExternalNetwork'].state : $t('label.not.added')" />
+                <status :text="nsps[ext.name] ? nsps[ext.name].state : $t('label.not.added')" />
               </a-descriptions-item>
-              <a-descriptions-item v-if="nsps['ExternalNetwork']" :label="$t('label.servicelist')">
-                {{ nsps['ExternalNetwork'] && nsps['ExternalNetwork'].servicelist ? nsps['ExternalNetwork'].servicelist.join(', ') : '-' }}
+              <a-descriptions-item v-if="nsps[ext.name]" :label="$t('label.servicelist')">
+                {{ nsps[ext.name] && nsps[ext.name].servicelist ? nsps[ext.name].servicelist.join(', ') : '-' }}
               </a-descriptions-item>
             </a-descriptions>
-            <!-- External network devices for this extension -->
-            <div v-if="nsps['ExternalNetwork'] && nsps['ExternalNetwork'].id">
-              <a-divider>{{ $t('label.external.network.devices') }}</a-divider>
-              <a-list
-                :loading="deviceListLoading"
-                :dataSource="extensionDevices[ext.name] || []"
-                size="small"
-                bordered>
-                <template #renderItem="{ item }">
-                  <a-list-item>
-                    <a-list-item-meta>
-                      <template #title>{{ item.host }}:{{ item.port }}</template>
-                      <template #description v-if="item.details && Object.keys(item.details).length">
-                        <span v-for="(v, k) in item.details" :key="k">{{ k }}={{ v }} &nbsp;</span>
-                      </template>
-                    </a-list-item-meta>
-                    <template #actions>
-                      <a-popconfirm
-                        :title="$t('message.confirm.delete.external.network.device')"
-                        @confirm="handleDeleteDevice(item)">
-                        <a-button type="link" danger size="small">
-                          <delete-outlined />
-                        </a-button>
-                      </a-popconfirm>
-                    </template>
-                  </a-list-item>
-                </template>
-                <template #footer>
-                  <a-button type="dashed" size="small" @click="loadDevicesForExtension(ext.name)">
-                    <template #icon><reload-outlined /></template>
-                    {{ $t('label.refresh') }}
-                  </a-button>
-                </template>
-              </a-list>
-            </div>
           </div>
         </a-tab-pane>
       </a-tabs>
     </a-spin>
-
-    <!-- Add External Network Device modal -->
-    <a-modal
-      :visible="showAddDeviceModal"
-      :title="$t('label.add.external.network.device')"
-      :maskClosable="false"
-      :footer="null"
-      @cancel="showAddDeviceModal = false">
-      <a-spin :spinning="deviceFormLoading" v-ctrl-enter="handleAddDevice">
-        <a-form
-          :ref="deviceFormRef"
-          :model="deviceForm"
-          :rules="deviceRules"
-          @finish="handleAddDevice"
-          layout="vertical">
-          <a-form-item name="host" ref="host" :label="$t('label.host')">
-            <a-input v-model:value="deviceForm.host" v-focus="true" :placeholder="$t('label.host')" />
-          </a-form-item>
-          <a-form-item name="port" ref="port" :label="$t('label.port')">
-            <a-input-number v-model:value="deviceForm.port" :placeholder="22" style="width: 100%" />
-          </a-form-item>
-          <a-divider>{{ $t('label.details') }}</a-divider>
-          <div v-for="(detail, index) in deviceDetails" :key="index" style="display: flex; gap: 8px; margin-bottom: 8px;">
-            <a-input v-model:value="detail.key" :placeholder="$t('label.name')" style="flex: 1" />
-            <a-input-password
-              v-if="detail.key === 'password' || detail.key === 'sshkey'"
-              v-model:value="detail.value"
-              :placeholder="$t('label.value')"
-              style="flex: 2" />
-            <a-input
-              v-else
-              v-model:value="detail.value"
-              :placeholder="$t('label.value')"
-              style="flex: 2" />
-            <a-button type="link" danger @click="removeDeviceDetail(index)">
-              <delete-outlined />
-            </a-button>
-          </div>
-          <a-button type="dashed" style="width: 100%; margin-bottom: 12px;" @click="addDeviceDetail">
-            <template #icon><plus-outlined /></template>
-            {{ $t('label.add.detail') }}
-          </a-button>
-          <div :span="24" class="action-button">
-            <a-button @click="showAddDeviceModal = false">{{ $t('label.cancel') }}</a-button>
-            <a-button type="primary" ref="submitDevice" @click="handleAddDevice">{{ $t('label.ok') }}</a-button>
-          </div>
-        </a-form>
-      </a-spin>
-    </a-modal>
 
     <!-- Add External Network Provider modal: selects extension (services come from extension capabilities) -->
     <a-modal
@@ -355,19 +261,13 @@ export default {
       showFormAction: false,
       currentAction: {},
       tabKey: 'BaremetalDhcpProvider',
-      showAddDeviceModal: false,
-      deviceFormLoading: false,
-      deviceDetails: [],
       showAddExtNetProviderModal: false,
       extensionProviderLoading: false,
       availableExtensions: [],
       extNetProviderForm: {
-        extensionId: null,
-        services: ''
+        extensionId: null
       },
-      registeredExtensions: [],
-      extensionDevices: {},
-      deviceListLoading: false
+      registeredExtensions: []
     }
   },
   computed: {
@@ -1313,58 +1213,6 @@ export default {
               columns: ['name', 'netrisurl', 'site', 'tenantname', 'netristag']
             }
           ]
-        },
-        {
-          title: 'ExternalNetwork',
-          details: ['name', 'state', 'id', 'physicalnetworkid', 'servicelist'],
-          actions: [
-            {
-              api: 'updateNetworkServiceProvider',
-              icon: 'play-circle-outlined',
-              listView: true,
-              label: 'label.enable.provider',
-              confirm: 'message.confirm.enable.provider',
-              show: (record) => { return record && record.id && record.state === 'Disabled' },
-              mapping: {
-                state: {
-                  value: (record) => { return 'Enabled' }
-                }
-              }
-            },
-            {
-              api: 'updateNetworkServiceProvider',
-              icon: 'stop-outlined',
-              listView: true,
-              label: 'label.disable.provider',
-              confirm: 'message.confirm.disable.provider',
-              show: (record) => { return record && record.id && record.state === 'Enabled' },
-              mapping: {
-                state: {
-                  value: (record) => { return 'Disabled' }
-                }
-              }
-            },
-            {
-              api: 'deleteNetworkServiceProvider',
-              listView: true,
-              icon: 'poweroff-outlined',
-              label: 'label.shutdown.provider',
-              confirm: 'message.confirm.delete.provider',
-              show: (record) => { return record && record.id }
-            }
-          ],
-          lists: [
-            {
-              title: 'label.external.network.devices',
-              api: 'listExternalNetworkDevices',
-              mapping: {
-                physicalnetworkid: {
-                  value: (record) => { return record.physicalnetworkid }
-                }
-              },
-              columns: ['host', 'port', 'details', 'actions']
-            }
-          ]
         }
       ]
     }
@@ -1394,15 +1242,10 @@ export default {
       this.formRef = ref()
       this.form = reactive({})
       this.rules = reactive({})
-      this.deviceFormRef = ref()
-      this.deviceForm = reactive({ host: '', port: 22 })
-      this.deviceRules = reactive({
-        host: [{ required: true, message: this.$t('label.required') }]
-      })
     },
     handleAddExternalNetworkProvider () {
       // Open the extension picker modal — services come from extension capabilities
-      this.extNetProviderForm = { extensionId: null, services: '' }
+      this.extNetProviderForm = { extensionId: null }
       this.extensionProviderLoading = true
       this.showAddExtNetProviderModal = true
       getAPI('listExtensions', { type: 'NetworkOrchestrator' }).then(json => {
@@ -1417,21 +1260,7 @@ export default {
       })
     },
     _updateServicesFromExtension (extensionId) {
-      if (!extensionId) {
-        this.extNetProviderForm.services = ''
-        return
-      }
-      const ext = this.availableExtensions.find(e => e.id === extensionId)
-      if (ext && ext.details && ext.details['network.capabilities']) {
-        try {
-          const caps = JSON.parse(ext.details['network.capabilities'])
-          if (caps && caps.services) {
-            this.extNetProviderForm.services = caps.services.join(',')
-          }
-        } catch (e) {
-          this.extNetProviderForm.services = ''
-        }
-      }
+      // No longer needed — services are derived from extension capabilities server-side
     },
     async handleAddExtNetProvider () {
       if (this.extensionProviderLoading) return
@@ -1440,9 +1269,12 @@ export default {
         this.$message.error(this.$t('message.select.extension'))
         return
       }
-      // Get extension name for display, but NSP is always registered as 'ExternalNetwork'
       const ext = this.availableExtensions.find(e => e.id === extensionId)
-      const extName = ext ? ext.name : 'ExternalNetwork'
+      const extName = ext ? ext.name : ''
+      if (!extName) {
+        this.$message.error(this.$t('message.select.extension'))
+        return
+      }
 
       this.extensionProviderLoading = true
       try {
@@ -1453,13 +1285,12 @@ export default {
           resourcetype: 'PhysicalNetwork'
         })
 
-        // Step 2: addNetworkServiceProvider — always use 'ExternalNetwork' as the provider name
-        // The UI displays the extension name as the tab label, but the underlying
-        // provider must be 'ExternalNetwork' so the NetworkElement.canHandle() works.
-        const existingNsp = this.nsps.ExternalNetwork
-        if (!existingNsp) {
+        // Step 2: addNetworkServiceProvider using the extension name as the provider name.
+        // The NSP name must match the extension name so ExternalNetworkElement.canHandle()
+        // can resolve the correct extension by provider name.
+        if (!this.nsps[extName]) {
           const nspJson = await postAPI('addNetworkServiceProvider', {
-            name: 'ExternalNetwork',
+            name: extName,
             physicalnetworkid: this.resource.id
           })
           const jobId = nspJson.addnetworkserviceproviderresponse.jobid
@@ -1480,54 +1311,6 @@ export default {
         this.extensionProviderLoading = false
       }
     },
-    handleOpenAddDeviceModal () {
-      this.deviceDetails = [{ key: 'username', value: '' }]
-      this.deviceForm = reactive({ host: '', port: 22 })
-      this.showAddDeviceModal = true
-    },
-    addDeviceDetail () {
-      this.deviceDetails.push({ key: '', value: '' })
-    },
-    removeDeviceDetail (index) {
-      this.deviceDetails.splice(index, 1)
-    },
-    handleAddDevice () {
-      if (this.deviceFormLoading) return
-      this.deviceFormRef.value.validate().then(() => {
-        this.deviceFormLoading = true
-        const values = toRaw(this.deviceForm)
-        const params = {
-          physicalnetworkid: this.resource.id,
-          host: values.host
-        }
-        if (values.port) {
-          params.port = values.port
-        }
-        // Build details map from deviceDetails rows
-        const details = {}
-        this.deviceDetails.forEach((d, i) => {
-          if (d.key && d.value !== undefined && d.value !== null) {
-            details['details[' + i + '].key'] = d.key
-            details['details[' + i + '].value'] = d.value
-          }
-        })
-        Object.assign(params, details)
-        postAPI('addExternalNetworkDevice', params).then(() => {
-          this.$message.success(this.$t('label.add.external.network.device'))
-          this.showAddDeviceModal = false
-          // Reload the ExternalNetwork provider tab list
-          this.fetchData()
-        }).catch(error => {
-          this.$notifyError(error)
-        }).finally(() => {
-          this.deviceFormLoading = false
-        })
-      }).catch(error => {
-        if (error.errorFields && error.errorFields.length > 0) {
-          this.deviceFormRef.value.scrollToField(error.errorFields[0].name)
-        }
-      })
-    },
     fetchData () {
       if (!this.resource || !('id' in this.resource)) {
         return
@@ -1543,29 +1326,13 @@ export default {
         resourcetype: 'PhysicalNetwork'
       }).then(json => {
         this.registeredExtensions = (json.listextensionsresponse && json.listextensionsresponse.extension) || []
-        // Load devices for each registered extension tab
-        for (const ext of this.registeredExtensions) {
-          this.loadDevicesForExtension(ext.name)
-        }
-        // The ExternalNetwork NSP state is fetched once and shared across all extension tabs
       }).catch(() => {
         this.registeredExtensions = []
       })
     },
-    loadDevicesForExtension (extName) {
-      if (!this.resource || !this.resource.id) return
-      this.deviceListLoading = true
-      getAPI('listExternalNetworkDevices', { physicalnetworkid: this.resource.id }).then(json => {
-        const devices = (json.listexternalnetworkdevicesresponse && json.listexternalnetworkdevicesresponse.externalnetworkdevice) || []
-        this.extensionDevices = { ...this.extensionDevices, [extName]: devices }
-      }).catch(() => {
-        this.extensionDevices = { ...this.extensionDevices, [extName]: [] }
-      }).finally(() => {
-        this.deviceListLoading = false
-      })
-    },
     handleEnableExtensionProvider () {
-      const nsp = this.nsps.ExternalNetwork
+      // tabKey holds the current extension tab name, which equals the NSP name
+      const nsp = this.nsps[this.tabKey]
       if (!nsp || !nsp.id) return
       postAPI('updateNetworkServiceProvider', { id: nsp.id, state: 'Enabled' }).then(() => {
         this.$message.success(this.$t('label.enable.provider'))
@@ -1573,17 +1340,11 @@ export default {
       }).catch(error => this.$notifyError(error))
     },
     handleDisableExtensionProvider () {
-      const nsp = this.nsps.ExternalNetwork
+      const nsp = this.nsps[this.tabKey]
       if (!nsp || !nsp.id) return
       postAPI('updateNetworkServiceProvider', { id: nsp.id, state: 'Disabled' }).then(() => {
         this.$message.success(this.$t('label.disable.provider'))
         this.fetchData()
-      }).catch(error => this.$notifyError(error))
-    },
-    handleDeleteDevice (device) {
-      postAPI('deleteExternalNetworkDevice', { physicalnetworkid: this.resource.id }).then(() => {
-        this.$message.success(this.$t('label.delete.external.network.device'))
-        this.loadDevicesForExtension(this.tabKey)
       }).catch(error => this.$notifyError(error))
     },
     fetchServiceProvider (name) {

@@ -85,12 +85,12 @@
                 :placeholder="apiParams.provider.description" >
                 <a-select-option :value="'NSX'" :label="$t('label.nsx')"> {{ $t('label.nsx') }} </a-select-option>
                 <a-select-option :value="'Netris'" :label="$t('label.netris')"> {{ $t('label.netris') }} </a-select-option>
-                <!-- Dynamic extension-based providers registered to guest physical networks -->
-                <!-- Note: value must be 'ExternalNetwork' for NetworkElement routing; name is for display only -->
+                <!-- Dynamic extension-based providers registered to guest physical networks.
+                     The value is the extension/NSP name for correct provider resolution. -->
                 <a-select-option
                   v-for="ext in availableExtensionProviders"
-                  :key="'ExternalNetwork_' + ext.name"
-                  :value="'ExternalNetwork'"
+                  :key="ext.name"
+                  :value="ext.name"
                   :label="ext.name">
                   {{ ext.name }} <span style="color: #aaa">({{ $t('label.external.network.provider') }})</span>
                 </a-select-option>
@@ -340,6 +340,11 @@ export default {
       availableExtensionProviders: []
     }
   },
+  computed: {
+    isExternalNetworkProvider () {
+      return this.availableExtensionProviders.some(e => e.name === this.provider)
+    }
+  },
   beforeCreate () {
     this.apiParams = this.$getApiParams('createVPCOffering')
   },
@@ -387,9 +392,19 @@ export default {
       this.fetchExtensionProviders()
     },
     fetchExtensionProviders () {
-      getAPI('listExtensions', { type: 'NetworkOrchestrator' }).then(json => {
+      getAPI('listExtensions', { type: 'NetworkOrchestrator', state: 'Enabled' }).then(json => {
         const allExts = (json.listextensionsresponse && json.listextensionsresponse.extension) || []
-        this.availableExtensionProviders = allExts.filter(e => e.state === 'Enabled')
+        if (allExts.length === 0) {
+          this.availableExtensionProviders = []
+          return
+        }
+        getAPI('listNetworkServiceProviders', {}).then(nspJson => {
+          const nsps = (nspJson.listnetworkserviceprovidersresponse && nspJson.listnetworkserviceprovidersresponse.networkserviceprovider) || []
+          const nspNames = new Set(nsps.map(n => n.name))
+          this.availableExtensionProviders = allExts.filter(e => nspNames.has(e.name))
+        }).catch(() => {
+          this.availableExtensionProviders = allExts
+        })
       }).catch(() => {
         this.availableExtensionProviders = []
       })
