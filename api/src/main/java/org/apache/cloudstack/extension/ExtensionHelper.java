@@ -89,4 +89,33 @@ public interface ExtensionHelper {
      * each appearing as its own service provider tab named after the extension.
      */
     List<Extension> listExtensionsForPhysicalNetwork(long physicalNetworkId);
+
+    /**
+     * Finds the extension registered with the given physical network whose name
+     * matches the given provider name (case-insensitive).  Returns {@code null}
+     * if no matching extension is found.
+     *
+     * <p>This is the preferred lookup when multiple extensions are registered on
+     * the same physical network: the provider name stored in
+     * {@code ntwk_service_map} is used to pinpoint the exact extension that
+     * handles a given network.</p>
+     *
+     * @param physicalNetworkId the physical network ID
+     * @param providerName      the provider name (must equal the extension name)
+     * @return the matching {@link Extension}, or {@code null}
+     */
+    Extension getExtensionForPhysicalNetworkAndProvider(long physicalNetworkId, String providerName);
+
+    /**
+     * Returns ALL {@code extension_resource_map_details} (including hidden) for
+     * the specific extension registered on the given physical network.  Used by
+     * {@code ExternalNetworkElement} to inject device credentials into the script
+     * environment for the correct extension when multiple different extensions are
+     * registered on the same physical network.
+     *
+     * @param physicalNetworkId the physical network ID
+     * @param extensionId       the extension ID
+     * @return all key/value details including non-display ones, or an empty map
+     */
+    Map<String, String> getAllResourceMapDetailsForExtensionOnPhysicalNetwork(long physicalNetworkId, long extensionId);
 }

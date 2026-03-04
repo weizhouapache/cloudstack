@@ -312,16 +312,84 @@ public class ExternalNetworkElement extends AdapterBase implements
         return Provider.ExternalNetwork;
     }
 
+    /**
+     * Resolves the correct extension for the given network by:
+     * <ol>
+     *   <li>Getting the distinct external providers from the network's service map
+     *       ({@code ntwk_service_map}).</li>
+     *   <li>For each provider name, looking up the extension registered on the
+     *       network's physical network whose name matches that provider name.</li>
+     * </ol>
+     *
+     * <p>This correctly handles the case where multiple
+     * {@link org.apache.cloudstack.extension.Extension} objects of type
+     * {@code NetworkOrchestrator} are registered with the same physical network —
+     * each under a different provider name — and returns the one that is actually
+     * serving {@code network}.</p>
+     *
+     * @param network the guest network to look up
+     * @return the matching {@link Extension}, or {@code null} if none found
+     */
+    protected Extension resolveExtension(Network network) {
+        Long physicalNetworkId = network.getPhysicalNetworkId();
+        if (physicalNetworkId == null) {
+            logger.warn("Network {} has no physical network — cannot resolve extension", network.getId());
+            return null;
+        }
+
+        // 1. Get the distinct provider names stored in ntwk_service_map for this network
+        List<String> providers = ntwkSrvcDao.getDistinctProviders(network.getId());
+        if (providers == null || providers.isEmpty()) {
+            logger.warn("No providers in ntwk_service_map for network {} — falling back to first extension on physical network",
+                    network.getId());
+            // Fallback: return the first extension registered on the physical network
+            return extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
+        }
+
+        // 2. For each provider, try to find a matching extension by name on the physical network
+        for (String providerName : providers) {
+            Extension ext = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+            if (ext != null) {
+                logger.debug("Resolved extension '{}' for network {} via provider '{}'",
+                        ext.getName(), network.getId(), providerName);
+                return ext;
+            }
+        }
+
+        // Fallback: no named match — return the first extension on the physical network
+        logger.warn("No extension name matches any provider {} for network {} on physical network {} — falling back to first extension",
+                providers, network.getId(), physicalNetworkId);
+        return extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
+    }
+
     protected boolean canHandle(Network network, Service service) {
-        if (!networkModel.isProviderForNetwork(getProvider(), network.getId())) {
-            logger.debug("ExternalNetwork is not a provider for network {}", network.getDisplayText());
+        // Check whether any of this network's providers is handled by an ExternalNetwork extension
+        Long physicalNetworkId = network.getPhysicalNetworkId();
+        if (physicalNetworkId == null) {
             return false;
         }
-        if (!ntwkSrvcDao.canProviderSupportServiceInNetwork(network.getId(), service, Provider.ExternalNetwork)) {
-            logger.debug("ExternalNetwork can't provide {} on network {}", service.getName(), network.getDisplayText());
+        List<String> providers = ntwkSrvcDao.getDistinctProviders(network.getId());
+        if (providers == null || providers.isEmpty()) {
             return false;
         }
-        return true;
+        // At least one provider must map to an extension on the physical network
+        boolean hasExtensionProvider = providers.stream().anyMatch(p ->
+                extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, p) != null);
+        if (!hasExtensionProvider) {
+            logger.debug("No extension-backed provider found for network {} on physical network {}", network.getId(), physicalNetworkId);
+            return false;
+        }
+        if (service == null) {
+            return true;
+        }
+        // Check that the given service is actually provided by an extension-backed provider
+        List<String> serviceProviders = ntwkSrvcDao.getProvidersForServiceInNetwork(network.getId(), service);
+        if (serviceProviders == null || serviceProviders.isEmpty()) {
+            logger.debug("Service {} has no providers in network {}", service.getName(), network.getId());
+            return false;
+        }
+        return serviceProviders.stream().anyMatch(p ->
+                extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, p) != null);
     }
 
     @Override
@@ -544,7 +612,9 @@ public class ExternalNetworkElement extends AdapterBase implements
      * </ul>
      */
     protected boolean executeScript(Network network, String command, String... args) {
-        File scriptFile = resolveScriptFile(network);
+        // Resolve the correct extension for this specific network (multi-extension aware)
+        Extension extension = resolveExtension(network);
+        File scriptFile = resolveScriptFile(network, extension);
 
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
@@ -561,8 +631,8 @@ public class ExternalNetworkElement extends AdapterBase implements
             Map<String, String> env = pb.environment();
             env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
-            // Inject device credentials and other resource-map details as env vars
-            injectResourceMapEnv(env, network.getPhysicalNetworkId());
+            // Inject device credentials for the specific extension serving this network
+            injectResourceMapEnv(env, network.getPhysicalNetworkId(), extension);
 
             // Inject per-network details (namespace, vrf, etc.) from network_details
             injectNetworkDetailsEnv(env, network.getId());
@@ -588,24 +658,45 @@ public class ExternalNetworkElement extends AdapterBase implements
     }
 
     /**
-     * Loads the {@code extension_resource_map_details} for the given physical
-     * network and injects them into the process environment.
+     * Loads the {@code extension_resource_map_details} for the given extension
+     * on the given physical network and injects them into the process environment.
+     *
+     * <p>When multiple extensions are registered on the same physical network,
+     * this method correctly returns details for the specific extension that
+     * serves the network, rather than the first one found.
      *
      * <p>Well-known device-access keys (host, port, username, password, sshkey)
      * are mapped to {@code CS_NET_DEV_<KEY>}; all other keys become
      * {@code CS_NET_<KEY>} (upper-cased).
      */
+    protected void injectResourceMapEnv(Map<String, String> env, Long physicalNetworkId, Extension extension) {
+        if (physicalNetworkId == null || extension == null) {
+            return;
+        }
+        Map<String, String> details = extensionHelper.getAllResourceMapDetailsForExtensionOnPhysicalNetwork(
+                physicalNetworkId, extension.getId());
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+        injectDetailsToEnv(env, details);
+    }
+
+    /**
+     * Fallback overload that uses the first extension registered on the physical
+     * network. Use only when the specific extension is not known.
+     */
     protected void injectResourceMapEnv(Map<String, String> env, Long physicalNetworkId) {
         if (physicalNetworkId == null) {
             return;
         }
-        // Use getAllResourceMapDetails (includes display=false) so that sensitive
-        // fields like password and sshkey are injected into the script env vars
         Map<String, String> details = extensionHelper.getAllResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
         if (details == null || details.isEmpty()) {
             return;
         }
+        injectDetailsToEnv(env, details);
+    }
 
+    private void injectDetailsToEnv(Map<String, String> env, Map<String, String> details) {
         java.util.Set<String> deviceKeys = java.util.Set.of(
                 DETAIL_HOST, DETAIL_PORT, DETAIL_USERNAME, DETAIL_PASSWORD, DETAIL_SSHKEY);
 
@@ -693,7 +784,9 @@ public class ExternalNetworkElement extends AdapterBase implements
      * @return output string from the script (stdout), or an error description on failure
      */
     public String runCustomAction(Network network, String actionName, Map<String, Object> parameters) {
-        File scriptFile = resolveScriptFile(network);
+        // Resolve the correct extension for this specific network (multi-extension aware)
+        Extension extension = resolveExtension(network);
+        File scriptFile = resolveScriptFile(network, extension);
 
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
@@ -703,7 +796,8 @@ public class ExternalNetworkElement extends AdapterBase implements
         cmdLine.add("--action");
         cmdLine.add(actionName);
 
-        logger.info("Running custom action '{}' on network {} via {}", actionName, network.getId(), scriptFile);
+        logger.info("Running custom action '{}' on network {} via {} (extension: {})",
+                actionName, network.getId(), scriptFile, extension != null ? extension.getName() : "unknown");
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
@@ -711,8 +805,8 @@ public class ExternalNetworkElement extends AdapterBase implements
             Map<String, String> env = pb.environment();
             env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
-            // Standard device + network env vars
-            injectResourceMapEnv(env, network.getPhysicalNetworkId());
+            // Inject device credentials for the specific extension serving this network
+            injectResourceMapEnv(env, network.getPhysicalNetworkId(), extension);
             injectNetworkDetailsEnv(env, network.getId());
 
             // Per-action parameters as CS_ACTION_PARAM_<KEY>
@@ -756,17 +850,31 @@ public class ExternalNetworkElement extends AdapterBase implements
      *   <li>A directory whose name is used to find the script as {@code <name>.sh}</li>
      * </ul>
      */
+    /**
+     * Convenience overload — resolves the extension first, then the script file.
+     * Prefer calling {@link #resolveExtension(Network)} + {@link #resolveScriptFile(Network, Extension)}
+     * when both are needed to avoid resolving the extension twice.
+     */
     protected File resolveScriptFile(Network network) {
+        return resolveScriptFile(network, resolveExtension(network));
+    }
+
+    /**
+     * Resolves the executable script file from the given extension.
+     * The extension must already be the correct one for the network
+     * (i.e. resolved via {@link #resolveExtension(Network)}).
+     */
+    protected File resolveScriptFile(Network network, Extension extension) {
         Long physicalNetworkId = network.getPhysicalNetworkId();
         if (physicalNetworkId == null) {
             throw new CloudRuntimeException("Network " + network.getId() + " has no physical network");
         }
 
-        Extension extension = extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
         if (extension == null) {
             throw new CloudRuntimeException(
-                    "No NetworkOrchestrator extension found for physical network " + physicalNetworkId +
-                    ". Please create a NetworkOrchestrator extension and associate it with the physical network.");
+                    "No NetworkOrchestrator extension found for network " + network.getId() +
+                    " on physical network " + physicalNetworkId +
+                    ". Please create a NetworkOrchestrator extension and register it with the physical network.");
         }
         if (!Extension.Type.NetworkOrchestrator.equals(extension.getType())) {
             throw new CloudRuntimeException(

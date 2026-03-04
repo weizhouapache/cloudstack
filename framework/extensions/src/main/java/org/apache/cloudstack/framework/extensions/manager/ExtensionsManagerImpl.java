@@ -128,6 +128,7 @@ import com.cloud.hypervisor.ExternalProvisioner;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.network.Network;
 import com.cloud.network.dao.NetworkDao;
+import com.cloud.network.dao.NetworkServiceMapDao;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.org.Cluster;
@@ -224,6 +225,9 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     @Inject
     NetworkDao networkDao;
+
+    @Inject
+    NetworkServiceMapDao networkServiceMapDao;
 
     @Inject
     RoleService roleService;
@@ -398,6 +402,19 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             if (physicalNetworkId == null) {
                 return null;
             }
+            // Use provider-based lookup: match the network's service-map providers
+            // against extension names registered on the physical network.
+            // This correctly handles multiple different extensions on the same physical network.
+            List<String> providers = networkServiceMapDao.getDistinctProviders(network.getId());
+            if (CollectionUtils.isNotEmpty(providers)) {
+                for (String providerName : providers) {
+                    Extension ext = getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+                    if (ext != null) {
+                        return ext;
+                    }
+                }
+            }
+            // Fallback: return the first extension registered on the physical network
             List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(
                     physicalNetworkId, ExtensionResourceMap.ResourceType.PhysicalNetwork);
             if (CollectionUtils.isEmpty(maps)) {
@@ -2054,6 +2071,41 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             }
         }
         return result;
+    }
+
+    @Override
+    public Extension getExtensionForPhysicalNetworkAndProvider(long physicalNetworkId, String providerName) {
+        if (StringUtils.isBlank(providerName)) {
+            return null;
+        }
+        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(
+                physicalNetworkId, ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (maps == null || maps.isEmpty()) {
+            return null;
+        }
+        for (ExtensionResourceMapVO map : maps) {
+            ExtensionVO ext = extensionDao.findById(map.getExtensionId());
+            if (ext != null && providerName.equalsIgnoreCase(ext.getName())) {
+                return ext;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public Map<String, String> getAllResourceMapDetailsForExtensionOnPhysicalNetwork(long physicalNetworkId, long extensionId) {
+        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(
+                physicalNetworkId, ExtensionResourceMap.ResourceType.PhysicalNetwork);
+        if (maps == null || maps.isEmpty()) {
+            return new java.util.HashMap<>();
+        }
+        for (ExtensionResourceMapVO map : maps) {
+            if (map.getExtensionId() == extensionId) {
+                Map<String, String> details = extensionResourceMapDetailsDao.listDetailsKeyPairs(map.getId());
+                return details != null ? details : new java.util.HashMap<>();
+            }
+        }
+        return new java.util.HashMap<>();
     }
 
     @Override
