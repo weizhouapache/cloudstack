@@ -1320,14 +1320,6 @@ export default {
             mapping: {
               state: { value: () => 'Disabled' }
             }
-          },
-          {
-            api: 'deleteNetworkServiceProvider',
-            listView: true,
-            icon: 'poweroff-outlined',
-            label: 'label.shutdown.provider',
-            confirm: 'message.confirm.delete.provider',
-            show: (record) => record && record.id
           }
         ]
       }

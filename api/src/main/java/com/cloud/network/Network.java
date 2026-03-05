@@ -251,6 +251,29 @@ public interface Network extends ControlledEntity, StateObject<Network.State>, I
             return null;
         }
 
+        /** Private constructor for transient (non-registered) providers. */
+        private Provider(String name) {
+            this.name = name;
+            this.isExternal = false;
+            this.needCleanupOnShutdown = true;
+            // intentionally NOT added to supportedProviders
+        }
+
+        /**
+         * Creates a transient (non-registered) {@link Provider} with the given name.
+         *
+         * <p>The new instance is <em>not</em> added to {@code supportedProviders}, so it
+         * will never be returned by {@link #getProvider(String)} and will not pollute the
+         * global provider registry.  Use this for dynamic / extension-backed providers
+         * whose names are only known at runtime (e.g. NetworkOrchestrator extensions).</p>
+         *
+         * @param name the provider name (typically the extension name)
+         * @return a transient {@link Provider} instance with the given name
+         */
+        public static Provider createTransientProvider(String name) {
+            return new Provider(name);
+        }
+
         @Override public String toString() {
             return new ToStringBuilder(this, ToStringStyle.SHORT_PREFIX_STYLE)
                     .append("name", name)

@@ -489,8 +489,11 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
             if (providers == null) {
                 providers = new HashSet<Provider>();
             }
-            providers.add(Provider.getProvider(nsm.getProvider()));
-            map.put(Service.getService(nsm.getService()), providers);
+            Provider provider = resolveProvider(nsm.getProvider());
+            if (provider != null) {
+                providers.add(provider);
+                map.put(Service.getService(nsm.getService()), providers);
+            }
         }
         return map;
     }
@@ -535,14 +538,42 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         Map<Provider, Set<Service>> map = new HashMap<Provider, Set<Service>>();
         List<NetworkServiceMapVO> nsms = _ntwkSrvcDao.getServicesInNetwork(networkId);
         for (NetworkServiceMapVO nsm : nsms) {
-            Set<Service> services = map.get(Provider.getProvider(nsm.getProvider()));
+            Provider provider = resolveProvider(nsm.getProvider());
+            if (provider == null) {
+                continue;
+            }
+            Set<Service> services = map.get(provider);
             if (services == null) {
                 services = new HashSet<Service>();
             }
             services.add(Service.getService(nsm.getService()));
-            map.put(Provider.getProvider(nsm.getProvider()), services);
+            map.put(provider, services);
         }
         return map;
+    }
+
+    /**
+     * Resolves a provider name to a {@link Provider} instance.
+     *
+     * <p>For well-known providers, returns the static constant from
+     * {@link Provider#getProvider(String)}.  For dynamic NetworkOrchestrator
+     * extension providers (whose names are not in the static registry), returns
+     * a transient {@link Provider} with the given name so that the caller can
+     * still dispatch to the correct {@link NetworkExtensionElement} via
+     * {@link #getElementImplementingProvider(String)}.</p>
+     *
+     * @param providerName the provider name from {@code ntwk_service_map}
+     * @return a {@link Provider} instance, or {@code null} if not resolvable
+     */
+    protected Provider resolveProvider(String providerName) {
+        Provider provider = Provider.getProvider(providerName);
+        if (provider == null && extensionHelper.isNetworkExtensionProvider(providerName)) {
+            // Dynamic extension-backed provider: create a transient Provider that preserves
+            // the actual extension name.  getElementImplementingProvider() handles this name
+            // by detecting it as an extension provider and returning NetworkExtensionElement.
+            provider = Provider.createTransientProvider(providerName);
+        }
+        return provider;
     }
 
     @Override
