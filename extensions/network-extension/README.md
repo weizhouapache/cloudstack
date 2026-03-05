@@ -100,7 +100,6 @@ required**.
 > **Source tree paths:**
 > * `network-extension.sh` → `extensions/network-extension/network-extension.sh`
 > * `network-extension-wrapper.sh` → `extensions/network-extension/network-extension-wrapper.sh`
->   *(also packaged at `framework/extensions/src/main/resources/scripts/network-extension-wrapper.sh`)*
 
 ---
 

@@ -61,7 +61,7 @@ LOG_FILE="/var/log/cloudstack/network-extension.log"
 STATE_DIR="/var/lib/cloudstack/network-extension"
 
 # ---------------------------------------------------------------------------
-# Both JSON blobs forwarded by entry-point:
+# Both JSON blobs forwarded by network-extension.sh:
 #   CS_PHYSICAL_NETWORK_EXTENSION_DETAILS – all extension_resource_map_details
 #       (hosts, port, username, password, sshkey, phys_iface, public_bridge, …)
 #   CS_NETWORK_EXTENSION_DETAILS – per-network details

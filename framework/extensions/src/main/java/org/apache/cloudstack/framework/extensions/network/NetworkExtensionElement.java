@@ -190,7 +190,7 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     /**
      * Key used to persist the per-network JSON blob in {@code network_details}.
-     * The blob is produced by the entry-point's {@code ensure-network-device}
+     * The blob is produced by the network-extension.sh's {@code ensure-network-device}
      * command and may contain any fields the script needs (e.g. selected host,
      * namespace name, VRF ID, …).
      */
@@ -526,7 +526,7 @@ public class NetworkExtensionElement extends AdapterBase implements
     // ---- ensure-network-device ----
 
     /**
-     * Calls the entry-point script with {@code ensure-network-device} before
+     * Calls the network-extension.sh script with {@code ensure-network-device} before
      * every network operation.  The script verifies the previously selected
      * device is reachable (using the {@code hosts} list in the physical-network
      * extension details) and performs failover if needed.  The returned JSON is
@@ -708,7 +708,7 @@ public class NetworkExtensionElement extends AdapterBase implements
     // ---- Script execution ----
 
     /**
-     * Executes the entry-point script with the given command and arguments.
+     * Executes the network-extension.sh script with the given command and arguments.
      *
      * <p>Two environment variables are always injected:</p>
      * <ul>

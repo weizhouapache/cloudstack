@@ -17,7 +17,7 @@
 # under the License.
 
 ##############################################################################
-# entry-point  (network-extension)
+# network-extension.sh  (network-extension)
 #
 # Proxy script for the NetworkExtension CloudStack extension.
 # Runs on the CloudStack management server.
@@ -213,7 +213,7 @@ ssh_exec() {
 # ---------------------------------------------------------------------------
 
 if [ $# -lt 1 ]; then
-    die "Usage: entry-point <command> [arguments...]" 1
+    die "Usage: network-extension.sh <command> [arguments...]" 1
 fi
 
 COMMAND="$1"
