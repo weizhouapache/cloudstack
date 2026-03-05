@@ -218,6 +218,13 @@ public class LibvirtStoragePoolDef {
                 storagePoolBuilder.append("'/>\n");
                 storagePoolBuilder.append("</source>\n");
                 break;
+
+            case LOGICAL:
+                storagePoolBuilder.append("<source>\n");
+                storagePoolBuilder.append("<name>").append(_poolName).append("</name>\n");
+                storagePoolBuilder.append("<shared>yes</shared>\n");
+                storagePoolBuilder.append("</source>\n");
+                break;
         }
 
         if (_poolType != PoolType.RBD && _poolType != PoolType.POWERFLEX) {
