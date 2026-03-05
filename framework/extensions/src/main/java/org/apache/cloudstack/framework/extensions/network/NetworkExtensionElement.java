@@ -14,7 +14,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-package org.apache.cloudstack.network.element;
+package org.apache.cloudstack.framework.extensions.network;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -76,6 +76,22 @@ import com.cloud.vm.VirtualMachineProfile;
  * {@link Extension} of type {@code NetworkOrchestrator} that is associated
  * with the network's physical network via the Extension Resource Map.
  *
+ * <h3>Per-provider initialisation</h3>
+ * Because multiple {@code NetworkOrchestrator} extensions can be registered
+ * on the same physical network (each as its own service provider), the element
+ * can be initialised with a specific provider/extension name via
+ * {@link #initWithProviderName(String)}.  When a provider name is set, all
+ * operations (capability lookup, script execution, credential injection) are
+ * scoped to the extension whose name matches that provider name.
+ *
+ * <p>Call {@link #withProviderName(String)} to obtain a lightweight
+ * provider-scoped copy of the element without mutating the shared singleton:</p>
+ * <pre>
+ *   NetworkExtensionElement scoped =
+ *       ((NetworkExtensionElement) element).withProviderName("my-extnet");
+ *   scoped.implement(network, offering, dest, context);
+ * </pre>
+ *
  * <h3>Device credentials via extension_resource_map_details</h3>
  * When registering the extension to a physical network, pass the network
  * device properties as details:
@@ -92,11 +108,6 @@ import com.cloud.vm.VirtualMachineProfile;
  * {@code CS_NET_DEV_PORT}, {@code CS_NET_DEV_USERNAME},
  * {@code CS_NET_DEV_PASSWORD}, {@code CS_NET_DEV_SSHKEY}.
  * Sensitive fields (password, sshkey) are omitted from debug logs.
- *
- * <h3>Network details via extension_resource_map_details (per network)</h3>
- * Additional per-network properties (VLAN mappings, gateway overrides, etc.)
- * are also stored as {@code extension_resource_map_details} and exposed to
- * the script as {@code CS_NET_*} environment variables.
  *
  * <h3>Network capabilities via JSON</h3>
  * When creating the extension, pass the network capabilities as a detail
@@ -121,8 +132,14 @@ public class NetworkExtensionElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
         PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider {
 
-
     private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
+
+    /**
+     * When non-null, restricts all operations to the extension whose name
+     * matches this provider name.  Set via {@link #initWithProviderName(String)}
+     * or {@link #withProviderName(String)}.
+     */
+    private String providerName;
 
     @Inject
     private NetworkModel networkModel;
@@ -132,6 +149,62 @@ public class NetworkExtensionElement extends AdapterBase implements
     private ExtensionHelper extensionHelper;
     @Inject
     private NetworkDetailsDao networkDetailsDao;
+
+    // ---- Provider-name initialisation ----
+
+    /**
+     * Initialises this element with a specific extension provider name.
+     *
+     * <p>After calling this method every operation (capability lookup, script
+     * execution, credential injection) is scoped to the extension whose name
+     * matches {@code providerName} on the relevant physical network.  This is
+     * required when multiple {@code NetworkOrchestrator} extensions are
+     * registered on the same physical network.</p>
+     *
+     * <p>This method mutates the receiver.  Prefer {@link #withProviderName(String)}
+     * if you need a scoped copy without mutating the singleton bean.</p>
+     *
+     * @param providerName the provider / extension name to scope this element to
+     */
+    public void initWithProviderName(String providerName) {
+        this.providerName = providerName;
+        logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
+    }
+
+    /**
+     * Returns the provider name this element is scoped to, or {@code null} if
+     * the element operates in multi-provider (auto-resolve) mode.
+     */
+    public String getProviderName() {
+        return providerName;
+    }
+
+    /**
+     * Returns a new {@link NetworkExtensionElement} that shares the same
+     * injected dependencies as this instance but is scoped to the given
+     * {@code providerName}.
+     *
+     * <p>This is the preferred way to obtain a scoped element without mutating
+     * the shared singleton bean:</p>
+     * <pre>
+     *   NetworkExtensionElement scoped =
+     *       ((NetworkExtensionElement) element).withProviderName("my-extnet");
+     * </pre>
+     *
+     * @param providerName the provider / extension name to scope the new element to
+     * @return a new, provider-scoped {@link NetworkExtensionElement}
+     */
+    public NetworkExtensionElement withProviderName(String providerName) {
+        NetworkExtensionElement copy = new NetworkExtensionElement();
+        copy.networkModel = this.networkModel;
+        copy.ntwkSrvcDao = this.ntwkSrvcDao;
+        copy.extensionHelper = this.extensionHelper;
+        copy.networkDetailsDao = this.networkDetailsDao;
+        copy.providerName = providerName;
+        return copy;
+    }
+
+    // ---- Capabilities ----
 
     @Override
     public Map<Service, Map<Capability, String>> getCapabilities() {
@@ -173,7 +246,9 @@ public class NetworkExtensionElement extends AdapterBase implements
      * @return effective capabilities map for this physical network
      */
     public Map<Service, Map<Capability, String>> getCapabilitiesForPhysicalNetwork(long physicalNetworkId) {
-        Extension extension = extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
+        Extension extension = providerName != null
+                ? extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName)
+                : extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
         if (extension == null) {
             return DEFAULT_CAPABILITIES;
         }
@@ -186,7 +261,6 @@ public class NetworkExtensionElement extends AdapterBase implements
                 extensionHelper.getResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
         String servicesValue = resourceMapDetails != null ? resourceMapDetails.get("services") : null;
         if (servicesValue == null || servicesValue.isBlank()) {
-            // No restriction — return full extension capabilities
             return extCaps;
         }
 
@@ -291,22 +365,26 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     /**
      * Returns the effective capabilities for the extension registered on the given
-     * physical network whose name matches {@code providerName}.
+     * physical network whose name matches {@code providerName} (or the instance's
+     * own {@link #providerName} if no argument is given).
      *
      * <p>This is the preferred lookup when a specific provider name is known (e.g.
      * from {@code ntwk_service_map}).  It correctly handles multiple different
      * extensions registered on the same physical network.</p>
      *
      * @param physicalNetworkId the physical network ID
-     * @param providerName      the provider name (must equal the extension name)
+     * @param provider          the provider name (must equal the extension name)
      * @return capabilities for the matching extension, or {@link #DEFAULT_CAPABILITIES}
      *         if no matching extension is found
      */
-    public Map<Service, Map<Capability, String>> getCapabilitiesForProvider(long physicalNetworkId, String providerName) {
-        if (providerName == null || providerName.isBlank()) {
+    public Map<Service, Map<Capability, String>> getCapabilitiesForProvider(long physicalNetworkId, String provider) {
+        if (provider == null || provider.isBlank()) {
+            provider = this.providerName;
+        }
+        if (provider == null || provider.isBlank()) {
             return DEFAULT_CAPABILITIES;
         }
-        Extension extension = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+        Extension extension = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, provider);
         if (extension == null) {
             // Fall back to first extension on physical network
             extension = extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
@@ -323,19 +401,15 @@ public class NetworkExtensionElement extends AdapterBase implements
     }
 
     /**
-     * Resolves the correct extension for the given network by:
-     * <ol>
-     *   <li>Getting the distinct external providers from the network's service map
-     *       ({@code ntwk_service_map}).</li>
-     *   <li>For each provider name, looking up the extension registered on the
-     *       network's physical network whose name matches that provider name.</li>
-     * </ol>
+     * Resolves the correct extension for the given network.
      *
-     * <p>This correctly handles the case where multiple
-     * {@link org.apache.cloudstack.extension.Extension} objects of type
-     * {@code NetworkOrchestrator} are registered with the same physical network —
-     * each under a different provider name — and returns the one that is actually
-     * serving {@code network}.</p>
+     * <p>If this element was initialised with a {@link #providerName}, that name
+     * is used directly to look up the extension on the physical network —
+     * no iteration over {@code ntwk_service_map} is required.</p>
+     *
+     * <p>Otherwise the method queries {@code ntwk_service_map} for all distinct
+     * providers of the network and returns the first one that matches an
+     * extension registered on the physical network.</p>
      *
      * @param network the guest network to look up
      * @return the matching {@link Extension}, or {@code null} if none found
@@ -347,42 +421,67 @@ public class NetworkExtensionElement extends AdapterBase implements
             return null;
         }
 
-        // 1. Get the distinct provider names stored in ntwk_service_map for this network
+        // Fast path: element is scoped to a specific provider name
+        if (providerName != null && !providerName.isBlank()) {
+            Extension ext = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+            if (ext != null) {
+                logger.debug("Resolved extension '{}' for network {} via scoped provider name '{}'",
+                        ext.getName(), network.getId(), providerName);
+                return ext;
+            }
+            logger.warn("No extension found for scoped provider '{}' on physical network {} (network {})",
+                    providerName, physicalNetworkId, network.getId());
+            // Fall through to auto-resolve
+        }
+
+        // Auto-resolve: query ntwk_service_map for distinct providers
         List<String> providers = ntwkSrvcDao.getDistinctProviders(network.getId());
         if (providers == null || providers.isEmpty()) {
             logger.warn("No providers in ntwk_service_map for network {} — falling back to first extension on physical network",
                     network.getId());
-            // Fallback: return the first extension registered on the physical network
             return extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
         }
 
-        // 2. For each provider, try to find a matching extension by name on the physical network
-        for (String providerName : providers) {
-            Extension ext = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+        for (String p : providers) {
+            Extension ext = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, p);
             if (ext != null) {
                 logger.debug("Resolved extension '{}' for network {} via provider '{}'",
-                        ext.getName(), network.getId(), providerName);
+                        ext.getName(), network.getId(), p);
                 return ext;
             }
         }
 
-        // Fallback: no named match — return the first extension on the physical network
+        // Fallback: no named match
         logger.warn("No extension name matches any provider {} for network {} on physical network {} — falling back to first extension",
                 providers, network.getId(), physicalNetworkId);
         return extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
     }
 
     protected boolean canHandle(Network network, Service service) {
-        // Check whether any of this network's providers is handled by a NetworkExtension extension
         Long physicalNetworkId = network.getPhysicalNetworkId();
         if (physicalNetworkId == null) {
             return false;
         }
+
+        // If scoped to a provider name, check that specific extension
+        if (providerName != null && !providerName.isBlank()) {
+            boolean hasExt = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName) != null;
+            if (!hasExt) {
+                return false;
+            }
+            if (service == null) {
+                return true;
+            }
+            List<String> serviceProviders = ntwkSrvcDao.getProvidersForServiceInNetwork(network.getId(), service);
+            return serviceProviders != null && serviceProviders.stream()
+                    .anyMatch(p -> extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, p) != null);
+        }
+
+        // Multi-provider mode: at least one provider must map to an extension
         List<String> providers = ntwkSrvcDao.getDistinctProviders(network.getId());
         if (providers == null || providers.isEmpty()) {
             return false;
         }
-        // At least one provider must map to an extension on the physical network
         boolean hasExtensionProvider = providers.stream().anyMatch(p ->
                 extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, p) != null);
         if (!hasExtensionProvider) {
@@ -392,7 +491,6 @@ public class NetworkExtensionElement extends AdapterBase implements
         if (service == null) {
             return true;
         }
-        // Check that the given service is actually provided by an extension-backed provider
         List<String> serviceProviders = ntwkSrvcDao.getProvidersForServiceInNetwork(network.getId(), service);
         if (serviceProviders == null || serviceProviders.isEmpty()) {
             logger.debug("Service {} has no providers in network {}", service.getName(), network.getId());
@@ -673,11 +771,11 @@ public class NetworkExtensionElement extends AdapterBase implements
      *
      * <p>When multiple extensions are registered on the same physical network,
      * this method correctly returns details for the specific extension that
-     * serves the network, rather than the first one found.
+     * serves the network, rather than the first one found.</p>
      *
      * <p>Well-known device-access keys (host, port, username, password, sshkey)
      * are mapped to {@code CS_NET_DEV_<KEY>}; all other keys become
-     * {@code CS_NET_<KEY>} (upper-cased).
+     * {@code CS_NET_<KEY>} (upper-cased).</p>
      */
     protected void injectResourceMapEnv(Map<String, String> env, Long physicalNetworkId, Extension extension) {
         if (physicalNetworkId == null || extension == null) {
@@ -735,18 +833,9 @@ public class NetworkExtensionElement extends AdapterBase implements
      * Injects per-network properties stored in {@code network_details} as
      * {@code CS_NET_<KEY>} environment variables.
      *
-     * <p>These are the network-level details set by operators (or by the
-     * entry-point script on first use) that describe how this specific
-     * CloudStack network is represented on the external device — for example:</p>
-     * <ul>
-     *   <li>{@code ext.namespace} → {@code CS_NET_EXT_NAMESPACE} – the Linux
-     *       network namespace assigned to this network on the device</li>
-     *   <li>{@code ext.vrf}       → {@code CS_NET_EXT_VRF} – VRF name</li>
-     *   <li>{@code ext.bridge}    → {@code CS_NET_EXT_BRIDGE} – bridge name</li>
-     * </ul>
-     * Only keys that start with {@code ext.} are injected, upper-cased and
+     * <p>Only keys that start with {@code ext.} are injected, upper-cased and
      * with the dot replaced by an underscore, e.g.
-     * {@code ext.namespace} → {@code CS_NET_EXT_NAMESPACE}.
+     * {@code ext.namespace} → {@code CS_NET_EXT_NAMESPACE}.</p>
      */
     protected void injectNetworkDetailsEnv(Map<String, String> env, long networkId) {
         Map<String, String> networkDetails = networkDetailsDao.listDetailsKeyPairs(networkId);
@@ -783,18 +872,16 @@ public class NetworkExtensionElement extends AdapterBase implements
      * <pre>
      *   entry-point custom-action --network-id &lt;id&gt; --action &lt;name&gt;
      * </pre>
-     * All standard device/network env vars are injected as usual
-     * ({@code CS_NET_DEV_HOST}, {@code CS_NET_NAMESPACE}, etc.).
+     * All standard device/network env vars are injected as usual.
      * Additionally, each caller-supplied parameter is exposed as
      * {@code CS_ACTION_PARAM_&lt;KEY&gt;} so the script can use them.
      *
      * @param network    the CloudStack network on which to run the action
      * @param actionName the action name (e.g. "reboot-device", "dump-config")
      * @param parameters optional key/value parameters from the caller
-     * @return output string from the script (stdout), or an error description on failure
+     * @return output string from the script (stdout), or {@code null} on failure
      */
     public String runCustomAction(Network network, String actionName, Map<String, Object> parameters) {
-        // Resolve the correct extension for this specific network (multi-extension aware)
         Extension extension = resolveExtension(network);
         File scriptFile = resolveScriptFile(network, extension);
 
@@ -815,7 +902,6 @@ public class NetworkExtensionElement extends AdapterBase implements
             Map<String, String> env = pb.environment();
             env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
-            // Inject device credentials for the specific extension serving this network
             injectResourceMapEnv(env, network.getPhysicalNetworkId(), extension);
             injectNetworkDetailsEnv(env, network.getId());
 
@@ -837,7 +923,7 @@ public class NetworkExtensionElement extends AdapterBase implements
 
             if (exitCode != 0) {
                 logger.error("Custom action '{}' failed (exit {}): {}", actionName, exitCode, outputStr);
-                return null;   // caller treats null as failure
+                return null;
             }
             logger.info("Custom action '{}' completed successfully", actionName);
             return outputStr.isEmpty() ? "OK" : outputStr;

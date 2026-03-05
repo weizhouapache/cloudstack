@@ -22,6 +22,7 @@ import java.util.Map;
 
 import com.cloud.network.Network.Capability;
 import com.cloud.network.Network.Service;
+import com.cloud.network.element.NetworkElement;
 
 public interface ExtensionHelper {
 
@@ -136,6 +137,8 @@ public interface ExtensionHelper {
      * @return true if the provider is a NetworkExtension provider
      */
     boolean isNetworkExtensionProvider(String providerName);
+
+    NetworkElement getNetworkElementForProvider(String providerName);
 
     /**
      * Returns the effective {@link Service} → ({@link Capability} → value) capabilities

@@ -151,7 +151,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..', '..'))
 REFERENCE_SCRIPT_SRC = os.path.join(
     _REPO_ROOT,
-    'plugins', 'network-elements', 'network-extension',
+    'framework', 'extensions',
     'src', 'main', 'resources', 'scripts', 'network-extension-wrapper.sh'
 )
 # Static entry-point wrapper (in extensions/ in the repo) — deployed to the

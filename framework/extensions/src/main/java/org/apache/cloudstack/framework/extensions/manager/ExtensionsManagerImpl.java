@@ -2226,6 +2226,11 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public NetworkElement getNetworkElementForProvider(String providerName) {
+        return null;
+    }
+
+    @Override
     public Map<Service, Map<Capability, String>> getNetworkCapabilitiesForProvider(
             Long physicalNetworkId, String providerName) {
         Extension extension = null;

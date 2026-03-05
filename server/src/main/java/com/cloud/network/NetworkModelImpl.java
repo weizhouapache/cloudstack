@@ -100,6 +100,7 @@ import com.cloud.network.element.NetworkElement;
 import com.cloud.network.element.UserDataServiceProvider;
 import com.cloud.network.router.VirtualRouter;
 import org.apache.cloudstack.extension.ExtensionHelper;
+import org.apache.cloudstack.framework.extensions.network.NetworkExtensionElement;
 import com.cloud.network.rules.FirewallRule.Purpose;
 import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.rules.dao.PortForwardingRulesDao;
@@ -269,8 +270,12 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         if (element == null && extensionHelper.isNetworkExtensionProvider(providerName)) {
             // Provider is an extension-backed external network provider;
             // the NetworkExtension element handles all such providers dynamically.
+            // Return a provider-scoped copy so operations are bound to the correct extension.
             elementName = s_providerToNetworkElementMap.get(Network.Provider.NetworkExtension.getName());
             element = AdapterBase.getAdapterByName(networkElements, elementName);
+            if (element instanceof NetworkExtensionElement) {
+                element = ((NetworkExtensionElement) element).withProviderName(providerName);
+            }
         }
         return element;
     }
@@ -1801,15 +1806,26 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         for (Provider provider : providers) {
             NetworkElement element = getElementImplementingProvider(provider.getName());
             if (element != null) {
-                Map<Service, Map<Capability, String>> elementCapabilities = extensionHelper.isNetworkExtensionProvider(provider.getName())
+                boolean isExtProvider = extensionHelper.isNetworkExtensionProvider(provider.getName());
+                Map<Service, Map<Capability, String>> elementCapabilities = isExtProvider
                         ? getExternalProviderCapabilities(null, provider.getName())
                         : element.getCapabilities();
                 if (elementCapabilities == null || !elementCapabilities.containsKey(service)) {
+                    if (isExtProvider) {
+                        // Extension provider with no declared capabilities for this service —
+                        // treat as "service supported but capability not constrained"
+                        return false;
+                    }
                     throw new UnsupportedServiceException("Service " + service.getName() + " is not supported by the element=" + element.getName() +
                             " implementing Provider=" + provider.getName());
                 }
                 Map<Capability, String> serviceCapabilities = elementCapabilities.get(service);
                 if (serviceCapabilities == null || serviceCapabilities.isEmpty()) {
+                    if (isExtProvider) {
+                        // Extension provider declared the service but without specific capability
+                        // constraints — treat as "capability not constrained, not explicitly supported"
+                        return false;
+                    }
                     throw new UnsupportedServiceException("Service " + service.getName() + " doesn't have capabilites for element=" + element.getName() +
                             " implementing Provider=" + provider.getName());
                 }
@@ -1829,21 +1845,36 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         for (Provider provider : providers) {
             NetworkElement element = getElementImplementingProvider(provider.getName());
             if (element != null) {
-                Map<Service, Map<Capability, String>> elementCapabilities = extensionHelper.isNetworkExtensionProvider(provider.getName())
+                boolean isExtProvider = extensionHelper.isNetworkExtensionProvider(provider.getName());
+                Map<Service, Map<Capability, String>> elementCapabilities = isExtProvider
                         ? getExternalProviderCapabilities(null, provider.getName())
                         : element.getCapabilities();
                 if (elementCapabilities == null || !elementCapabilities.containsKey(service)) {
+                    if (isExtProvider) {
+                        // Extension provider with no declared capabilities for this service —
+                        // treat as supported without constraints; skip the capability check.
+                        continue;
+                    }
                     throw new UnsupportedServiceException("Service " + service.getName() + " is not supported by the element=" + element.getName() +
                         " implementing Provider=" + provider.getName());
                 }
                 Map<Capability, String> serviceCapabilities = elementCapabilities.get(service);
                 if (serviceCapabilities == null || serviceCapabilities.isEmpty()) {
+                    if (isExtProvider) {
+                        // Extension provider declared the service without capability constraints —
+                        // accept any capability value (the extension handles it at runtime).
+                        continue;
+                    }
                     throw new UnsupportedServiceException("Service " + service.getName() + " doesn't have capabilities for element=" + element.getName() +
                         " implementing Provider=" + provider.getName());
                 }
 
                 String value = serviceCapabilities.get(cap);
                 if (value == null || value.isEmpty()) {
+                    if (isExtProvider) {
+                        // Capability not explicitly declared for this extension — accept it.
+                        continue;
+                    }
                     throw new UnsupportedServiceException("Service " + service.getName() + " doesn't have capability " + cap.getName() + " for element=" +
                         element.getName() + " implementing Provider=" + provider.getName());
                 }
