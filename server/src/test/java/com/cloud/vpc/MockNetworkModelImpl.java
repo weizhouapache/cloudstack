@@ -394,6 +394,10 @@ public class MockNetworkModelImpl extends ManagerBase implements NetworkModel {
     }
 
     @Override
+    public Provider resolveProvider(String providerName) {
+        return Provider.getProvider(providerName);
+    }
+    @Override
     public boolean canElementEnableIndividualServicesByName(String providerName) {
         return false;
     }

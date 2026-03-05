@@ -217,7 +217,6 @@ import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreCapabilities;
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreManager;
 import org.apache.cloudstack.engine.subsystem.api.storage.SnapshotDataFactory;
 import org.apache.cloudstack.engine.subsystem.api.storage.SnapshotInfo;
-import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.jobs.AsyncJob;
 import org.apache.cloudstack.framework.jobs.AsyncJobManager;
 import org.apache.cloudstack.gui.theme.GuiThemeJoin;
@@ -531,7 +530,7 @@ public class ApiResponseHelper implements ResponseGenerator {
     @Inject
     ResourceIconManager resourceIconManager;
     @Inject
-    ExtensionHelper extensionHelper;
+    NetworkModel networkModel;
 
     public static String getPrettyDomainPath(String path) {
         if (path == null) {
@@ -3244,14 +3243,8 @@ public class ApiResponseHelper implements ResponseGenerator {
         }
         response.setServices(services);
 
-        Provider serviceProvider = Provider.getProvider(result.getProviderName());
-        boolean canEnableIndividualServices;
-        if (serviceProvider != null) {
-            canEnableIndividualServices = ApiDBUtils.canElementEnableIndividualServices(serviceProvider);
-        } else {
-            // Unknown provider enum — may be an extension-backed external provider whose name isn't in the Provider enum
-            canEnableIndividualServices = ApiDBUtils.canElementEnableIndividualServicesByName(result.getProviderName());
-        }
+        Provider serviceProvider = networkModel.resolveProvider(result.getProviderName());
+        boolean canEnableIndividualServices = ApiDBUtils.canElementEnableIndividualServices(serviceProvider);
         response.setCanEnableIndividualServices(canEnableIndividualServices);
 
         response.setObjectName("networkserviceprovider");

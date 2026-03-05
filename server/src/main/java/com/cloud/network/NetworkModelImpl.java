@@ -321,17 +321,13 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
             return false;
         }
         // Try resolve to enum Provider first
-        Provider provider = Provider.getProvider(providerName);
+        Provider provider = resolveProvider(providerName);
         if (provider != null) {
             try {
                 return canElementEnableIndividualServices(provider);
             } catch (Exception e) {
                 logger.debug("canElementEnableIndividualServices failed for provider {}: {}", providerName, e.getMessage());
             }
-        }
-        // Extension-backed external network providers always support individual service selection.
-        if (extensionHelper.isNetworkExtensionProvider(providerName)) {
-            return true;
         }
         // Unknown provider: be conservative and return false
         return false;
@@ -565,7 +561,8 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
      * @param providerName the provider name from {@code ntwk_service_map}
      * @return a {@link Provider} instance, or {@code null} if not resolvable
      */
-    protected Provider resolveProvider(String providerName) {
+    @Override
+    public Provider resolveProvider(String providerName) {
         Provider provider = Provider.getProvider(providerName);
         if (provider == null && extensionHelper.isNetworkExtensionProvider(providerName)) {
             // Dynamic extension-backed provider: create a transient Provider that preserves
@@ -1258,7 +1255,7 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
             if (providers == null) {
                 providers = new HashSet<Provider>();
             }
-            providers.add(Provider.getProvider(instance.getProvider()));
+            providers.add(resolveProvider(instance.getProvider()));
             serviceProviderMap.put(Service.getService(service), providers);
         }
 
@@ -1305,12 +1302,8 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         // We use _pNSPDao.listBy(physNetId) to enumerate all NSP entries, then check
         // each provider name against the extension registry.  This avoids a separate
         // pass over all physical-network/extension combinations.
-        //
-        // Since Network.Provider is a plain class (not an enum) with a public constructor
-        // that auto-registers in its static supportedProviders list, we can safely call
-        //   new Provider(name, false, true)
-        // for an unknown extension name — the constructor adds it to the list so that
-        // subsequent calls to Provider.getProvider(name) will find it.
+        // resolveProvider() creates a transient Provider (not added to the static list)
+        // for extension names that are not in the built-in registry.
         try {
             List<com.cloud.network.dao.PhysicalNetworkVO> physNets = _physicalNetworkDao.listAll();
             if (physNets != null) {
@@ -1328,15 +1321,9 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
                         // Filter by service if requested: check the NSP's service flags
                         if (service != null && !isServiceProvidedByNsp(nsp, service)) continue;
 
-                        // Resolve or create a Provider instance with the extension name.
-                        Provider extProvider = Provider.getProvider(provName);
-                        if (extProvider == null) {
-                            // needCleanupOnShutdown=true: on shutdown the entry-point script
-                            // must clean up iptables / namespaces on the remote device.
-                            extProvider = new Provider(provName, false, true);
-                            logger.debug("Dynamically registered network Provider '{}' for NetworkExtension",
-                                    provName);
-                        }
+                        // Resolve or create a transient Provider for the extension name.
+                        Provider extProvider = resolveProvider(provName);
+                        if (extProvider == null) continue;
                         supportedProviders.add(extProvider);
                         addedExtProviders.add(provName);
                     }
@@ -2160,7 +2147,7 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         List<String> providerNames = _ntwkOfferingSrvcDao.getDistinctProviders(ntkwOffId);
         List<Provider> providers = new ArrayList<Provider>();
         for (String providerName : providerNames) {
-            providers.add(Network.Provider.getProvider(providerName));
+            providers.add(resolveProvider(providerName));
         }
 
         return providers;
@@ -2462,7 +2449,7 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         Map<String, Provider> providers = new HashMap<String, Provider>();
         for (String providerName : providerNames) {
             if (!providers.containsKey(providerName)) {
-                providers.put(providerName, Network.Provider.getProvider(providerName));
+                providers.put(providerName, resolveProvider(providerName));
             }
         }
 

@@ -4416,6 +4416,8 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
 
             if (provider == null) {
                 provider = _networkModel.getDefaultUniqueProviderForService(service).getName();
+            } else {
+                provider = _networkModel.resolveProvider(provider).getName();
             }
 
             // check that provider is supported
@@ -4441,7 +4443,7 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
         final List<String> providerNames = _ntwkSrvcDao.getDistinctProviders(networkId);
         final List<Provider> providers = new ArrayList<>();
         for (final String providerName : providerNames) {
-            providers.add(Network.Provider.getProvider(providerName));
+            providers.add(_networkModel.resolveProvider(providerName));
         }
 
         return providers;
@@ -4607,7 +4609,7 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
             if (providers == null) {
                 providers = new HashSet<>();
             }
-            providers.add(Provider.getProvider(nsm.getProvider()));
+            providers.add(_networkModel.resolveProvider(nsm.getProvider()));
             map.put(Service.getService(nsm.getService()), providers);
         }
         return map;

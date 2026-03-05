@@ -247,8 +247,8 @@ public class NetworkModelImplTest {
         networkOfferingVO.setForVpc(true);
         Network network = new NetworkVO();
         List<NetworkServiceMapVO> networkServiceMapVOs = new ArrayList<>();
-        networkServiceMapVOs.add(new NetworkServiceMapVO(15L, Network.Service.Firewall, Network.Provider.VPCVirtualRouter));
-        networkServiceMapVOs.add(new NetworkServiceMapVO(15L, Network.Service.SourceNat, Network.Provider.VPCVirtualRouter));
+        networkServiceMapVOs.add(new NetworkServiceMapVO(15L, Network.Service.Firewall.getName(), Network.Provider.VPCVirtualRouter.getName()));
+        networkServiceMapVOs.add(new NetworkServiceMapVO(15L, Network.Service.SourceNat.getName(), Network.Provider.VPCVirtualRouter.getName()));
         NetworkElement element = new VpcVirtualRouterElement();
 
         ReflectionTestUtils.setField(networkModel, "networkElements", List.of(element));

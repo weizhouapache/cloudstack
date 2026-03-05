@@ -323,6 +323,8 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     Site2SiteVpnConnectionDao site2SiteVpnConnectionDao;
     @Inject
     Site2SiteCustomerGatewayDao site2SiteCustomerGatewayDao;
+    @Inject
+    NetworkModel networkModel;
 
     private final ScheduledExecutorService _executor = Executors.newScheduledThreadPool(1, new NamedThreadFactory("VpcChecker"));
     private List<VpcProvider> vpcElements = null;
@@ -688,7 +690,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
                     final Set<Provider> providers = new HashSet<Provider>();
                     for (final String prvNameStr : serviceEntry.getValue()) {
                         // check if provider is supported
-                        final Network.Provider provider = Network.Provider.getProvider(prvNameStr);
+                        final Network.Provider provider = networkModel.resolveProvider(prvNameStr);
                         if (provider == null) {
                             throw new InvalidParameterValueException("Invalid service provider: " + prvNameStr);
                         }
@@ -896,7 +898,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             if (providers == null) {
                 providers = new HashSet<Provider>();
             }
-            providers.add(Provider.getProvider(instance.getProvider()));
+            providers.add(networkModel.resolveProvider(instance.getProvider()));
             serviceProviderMap.put(service, providers);
         }
 
@@ -1490,6 +1492,8 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             if (provider == null) {
                 // Default to VPCVirtualRouter
                 provider = Provider.VPCVirtualRouter.getName();
+            } else {
+                provider = networkModel.resolveProvider(provider).getName();
             }
 
             if (!_ntwkModel.isProviderEnabledInZone(zoneId, provider)) {
@@ -3559,7 +3563,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
         final Map<String, Provider> providers = new HashMap<String, Provider>();
         for (final String providerName : providerNames) {
             if (!providers.containsKey(providerName)) {
-                providers.put(providerName, Network.Provider.getProvider(providerName));
+                providers.put(providerName, networkModel.resolveProvider(providerName));
             }
         }
 

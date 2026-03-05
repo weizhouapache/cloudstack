@@ -389,7 +389,7 @@ public class NetworkDaoImpl extends GenericDaoBase<NetworkVO, Long>implements Ne
         final TransactionLegacy txn = TransactionLegacy.currentTxn();
         txn.start();
         for (final String service : serviceProviderMap.keySet()) {
-            final NetworkServiceMapVO serviceMap = new NetworkServiceMapVO(networkId, Service.getService(service), Provider.getProvider(serviceProviderMap.get(service)));
+            final NetworkServiceMapVO serviceMap = new NetworkServiceMapVO(networkId, Service.getService(service).getName(), Provider.getProvider(serviceProviderMap.get(service)).getName());
             _ntwkSvcMap.persist(serviceMap);
         }
         txn.commit();
