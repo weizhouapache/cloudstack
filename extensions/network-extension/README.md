@@ -50,16 +50,17 @@ required**.
 │  NetworkExtensionElement.java                            │
 │      │ executes (path resolved from Extension record)    │
 │      ▼                                                   │
-│  /etc/cloudstack/extensions/<ext-name>/entry-point       │
+│  /etc/cloudstack/extensions/<ext-name>/                  │
+│      network-extension.sh                                │
 │  (this directory, deployed during installation)          │
 └──────────────────────┬───────────────────────────────────┘
-                       │ SSH (CS_NET_DEV_HOST : CS_NET_DEV_PORT)
+                       │ SSH (host : port from extension details)
                        │ credentials from extension_resource_map_details
                        ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Remote Network Device  (Linux server / appliance)       │
 │                                                          │
-│  ip netns exec <CS_NET_NAMESPACE>                        │
+│  ip netns exec <namespace>                               │
 │      network-extension-wrapper.sh <command> [args...]    │
 │                                                          │
 │  Operations performed inside the namespace:              │
@@ -72,9 +73,9 @@ required**.
 
 **Key design principles:**
 
-* The `entry-point` script runs on the **management server**.  All connection
-  details (`host`, `port`, `username`, `sshkey`, `namespace`, `script_path`)
-  are passed as environment variables injected by `NetworkExtensionElement` — the
+* The `network-extension.sh` script runs on the **management server**.  All
+  connection details (`host`, `port`, `username`, `sshkey`, etc.) are passed as
+  two JSON environment variables injected by `NetworkExtensionElement` — the
   script itself is completely generic and requires no local configuration.
 * The `network-extension-wrapper.sh` script runs on the **remote device** inside
   a network namespace.  It performs the actual iptables and bridge operations.
@@ -92,12 +93,12 @@ required**.
 
 | File | Installed location | Purpose |
 |------|--------------------|---------|
-| `entry-point` | management server | SSH proxy — executed by `NetworkExtensionElement` |
+| `network-extension.sh` | management server | SSH proxy — executed by `NetworkExtensionElement` |
 | `network-extension-wrapper.sh` | remote network device | Performs iptables / bridge operations |
 | `README.md` | — | This documentation |
 
 > **Source tree paths:**
-> * `entry-point` → `extensions/network-extension/entry-point`
+> * `network-extension.sh` → `extensions/network-extension/network-extension.sh`
 > * `network-extension-wrapper.sh` → `extensions/network-extension/network-extension-wrapper.sh`
 >   *(also packaged at `framework/extensions/src/main/resources/scripts/network-extension-wrapper.sh`)*
 
@@ -111,31 +112,33 @@ required**.
    `implement`, `addStaticNat`, `applyPortForwardingRules`).
 2. **`NetworkExtensionElement`** (Java) resolves the extension that is registered
    on the physical network whose name matches the network's service provider.  It
-   reads the device details (`host`, `port`, `username`, `sshkey`, `namespace`,
-   `script_path`) stored in `extension_resource_map_details`.
+   reads all device details stored in `extension_resource_map_details`.
 3. `NetworkExtensionElement` builds a command line:
    ```
-   <extension_path>/entry-point <command> --network-id <id> [--vlan V] [--gateway G] ...
+   <extension_path>/network-extension.sh <command> --network-id <id> [--vlan V] [--gateway G] ...
    ```
-   and injects all device details as `CS_NET_DEV_*` and `CS_NET_*` environment
-   variables into the process.
-4. **`entry-point`** reads those environment variables, writes the SSH private key
-   to a temporary file (if `CS_NET_DEV_SSHKEY` is set), then SSHes to the remote
-   host and runs:
+   and injects all details as two JSON environment variables:
+   * `CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` — JSON object with all physical-network
+     registration details (hosts, port, username, sshkey, …)
+   * `CS_NETWORK_EXTENSION_DETAILS` — per-network JSON blob (selected host, namespace, …)
+4. **`network-extension.sh`** reads those environment variables, writes the SSH
+   private key to a temporary file (if `sshkey` is set in the physical-network
+   details), then SSHes to the remote host and runs:
    ```bash
-   ip netns exec <CS_NET_NAMESPACE>  \
-       <CS_NET_SCRIPT_PATH> <command> [arguments...]
+   ip netns exec <namespace>  \
+       <script_path> <command> [arguments...]
    ```
 5. **`network-extension-wrapper.sh`** executes the requested operation using
    `ip link`, `iptables`, `ip addr`, etc. inside the network namespace.
 6. Exit code `0` = success; any non-zero exit causes CloudStack to treat the
    operation as failed.
 
-### Authentication priority (entry-point)
+### Authentication priority (network-extension.sh)
 
-1. `CS_NET_DEV_SSHKEY` — PEM key written to a temp file, used with `ssh -i`.
-   **Preferred** — the temp file is deleted on exit.
-2. `CS_NET_DEV_PASSWORD` — passed to `sshpass(1)` if available.
+1. `sshkey` field in `CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` — PEM key written
+   to a temp file, used with `ssh -i`.  **Preferred** — the temp file is deleted
+   on exit.
+2. `password` field — passed to `sshpass(1)` if available.
 3. Neither set — relies on the SSH agent or host key on the management server.
 
 ---
@@ -144,16 +147,16 @@ required**.
 
 ### Management server
 
-During package installation the `entry-point` script is deployed to:
+During package installation the `network-extension.sh` script is deployed to:
 
 ```
-/etc/cloudstack/extensions/<extension-name>/entry-point
+/etc/cloudstack/extensions/<extension-name>/network-extension.sh
 ```
 
 In **developer mode** the extensions directory defaults to `extensions/` relative
-to the repo root working directory, so `extensions/network-extension/entry-point`
-is found automatically when `path=network-extension/entry-point` is set at
-extension creation time.
+to the repo root working directory, so `extensions/network-extension/network-extension.sh`
+is found automatically when `path=network-extension` is set at extension creation
+time (CloudStack looks for `<extensionName>.sh` inside the directory).
 
 ### Remote network device
 
@@ -163,12 +166,12 @@ network gateway:
 ```bash
 # From the CloudStack source tree:
 scp extensions/network-extension/network-extension-wrapper.sh \
-    root@<device>:/usr/local/share/cloudstack/network-extension-wrapper.sh
-chmod +x /usr/local/share/cloudstack/network-extension-wrapper.sh
+    root@<device>:/etc/cloudstack/extensions/network-extension-wrapper.sh
+chmod +x /etc/cloudstack/extensions/network-extension-wrapper.sh
 ```
 
-The default path expected by `entry-point` is
-`/usr/local/share/cloudstack/network-extension-wrapper.sh`.
+The default path expected by `network-extension.sh` is
+`/etc/cloudstack/extensions/network-extension-wrapper.sh`.
 You can override this per-physical-network by passing a `script_path` detail
 when calling `addExternalNetworkDevice` (see below).
 
@@ -191,7 +194,7 @@ All examples below use `cmk` (the CloudStack CLI).  Replace `<zone-uuid>`,
 cmk createExtension \
     name=my-extnet \
     type=NetworkOrchestrator \
-    path=network-extension/entry-point \
+    path=network-extension \
     "details[0].key=network.capabilities" \
     "details[0].value={\"services\":[\"SourceNat\",\"StaticNat\",\"PortForwarding\",\"Firewall\",\"Gateway\"],\"capabilities\":{\"SourceNat\":{\"SupportedSourceNatTypes\":\"peraccount\",\"RedundantRouter\":\"false\"},\"Firewall\":{\"TrafficStatistics\":\"per public ip\"}}}"
 ```
@@ -269,8 +272,9 @@ cmk unregisterExtension \
 
 ### 3. Add external network device credentials
 
-Store the connection details for the remote device.  These become environment
-variables passed to `entry-point` at runtime:
+Store the connection details for the remote device.  These are packed into the
+`CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` JSON object passed to `network-extension.sh`
+at runtime:
 
 ```bash
 cmk addExternalNetworkDevice \
@@ -280,7 +284,7 @@ cmk addExternalNetworkDevice \
     "details[0].key=username"    "details[0].value=root" \
     "details[1].key=sshkey"      "details[1].value=$(cat /root/.ssh/id_rsa)" \
     "details[2].key=namespace"   "details[2].value=cs-net-prod" \
-    "details[3].key=script_path" "details[3].value=/usr/local/share/cloudstack/network-extension-wrapper.sh"
+    "details[3].key=script_path" "details[3].value=/etc/cloudstack/extensions/network-extension-wrapper.sh"
 ```
 
 > **Security note:** `sshkey` (and `password`) are stored with `display=false`
@@ -288,15 +292,11 @@ cmk addExternalNetworkDevice \
 > (`host`, `port`, `username`, `namespace`, `script_path`) are visible in list
 > responses.
 
-| Detail key | Environment variable | Notes |
-|---|---|---|
-| `host` (top-level param) | `CS_NET_DEV_HOST` | Required |
-| `port` (top-level param) | `CS_NET_DEV_PORT` | Default: 22 |
-| `username` | `CS_NET_DEV_USERNAME` | Default: root |
-| `password` | `CS_NET_DEV_PASSWORD` | Via `sshpass`; not logged |
-| `sshkey` | `CS_NET_DEV_SSHKEY` | PEM; not logged; preferred over password |
-| `namespace` | `CS_NET_NAMESPACE` | Linux netns name on remote host |
-| `script_path` | `CS_NET_SCRIPT_PATH` | Full path on remote host |
+All details become key/value pairs inside the JSON object
+`CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` that `network-extension.sh` reads.
+There are no pre-defined keys — the user and the script agree on the schema.
+Sensitive keys (`password`, `sshkey`) are redacted in log output but are still
+present in the JSON passed to the script.
 
 List devices (sensitive fields are hidden):
 ```bash
@@ -362,15 +362,15 @@ When a VM is first deployed into this network, CloudStack calls
 
 ```bash
 # Management server executes:
-entry-point implement \
+network-extension.sh implement \
     --network-id 42 \
     --vlan 100 \
     --gateway 10.0.1.1 \
     --cidr 10.0.1.0/24
 
-# entry-point SSHes to device and runs inside the namespace:
+# network-extension.sh SSHes to device and runs inside the namespace:
 ip netns exec cs-net-prod \
-    /usr/local/share/cloudstack/network-extension-wrapper.sh implement \
+    /etc/cloudstack/extensions/network-extension-wrapper.sh implement \
     --network-id 42 \
     --vlan 100 \
     --gateway 10.0.1.1 \
@@ -391,7 +391,7 @@ CloudStack calls `applyIps()` which issues `assign-ip` with `--source-nat true`
 for the source-NAT IP:
 
 ```bash
-entry-point assign-ip \
+network-extension.sh assign-ip \
     --network-id 42 \
     --vlan 100 \
     --public-ip 203.0.113.10 \
@@ -422,7 +422,7 @@ cmk enableStaticNat \
 CloudStack calls `applyStaticNats()` → `add-static-nat`:
 
 ```bash
-entry-point add-static-nat \
+network-extension.sh add-static-nat \
     --network-id 42 \
     --vlan 100 \
     --public-ip 203.0.113.20 \
@@ -463,7 +463,7 @@ cmk createPortForwardingRule \
 CloudStack calls `applyPFRules()` → `add-port-forward`:
 
 ```bash
-entry-point add-port-forward \
+network-extension.sh add-port-forward \
     --network-id 42 \
     --vlan 100 \
     --public-ip 203.0.113.20 \
@@ -502,8 +502,8 @@ CloudStack calls `shutdown()` (to clean up active state) then `destroy()` (full
 removal).  Both commands perform identical cleanup:
 
 ```bash
-entry-point shutdown --network-id 42 --vlan 100
-entry-point destroy  --network-id 42 --vlan 100
+network-extension.sh shutdown --network-id 42 --vlan 100
+network-extension.sh destroy  --network-id 42 --vlan 100
 ```
 
 The wrapper:
@@ -833,13 +833,13 @@ cmk runNetworkCustomAction \
 
 CloudStack calls `NetworkExtensionElement.runCustomAction()`, which issues:
 ```bash
-entry-point custom-action --network-id <id> --action dump-config
+network-extension.sh custom-action --network-id <id> --action dump-config
 ```
 
-The `entry-point` SSHes to the device and runs:
+The `network-extension.sh` SSHes to the device and runs:
 ```bash
 ip netns exec cs-net-prod \
-    /usr/local/share/cloudstack/network-extension-wrapper.sh \
+    /etc/cloudstack/extensions/network-extension-wrapper.sh \
     custom-action --network-id <id> --action dump-config
 ```
 
@@ -853,17 +853,23 @@ exercises the full lifecycle using a **Linux network namespace** on the Marvin
 node as the simulated remote device:
 
 ```
-Marvin node (this machine)
+Marvin node (this machine — also acts as the remote network device)
   ├── ip netns add cs-extnet-<id>            ← isolated namespace
   ├── ~/.ssh/authorized_keys ← test RSA key  ← management server connects here
-  └── /tmp/cs-extnet-test-<id>/
-        └── network-extension-wrapper.sh     ← copied from repo
+  └── /etc/cloudstack/extensions/
+        └── network-extension-wrapper.sh     ← copied from repo by test
+
+KVM hosts in the zone (best-effort, skipped if none found)
+  └── /etc/cloudstack/extensions/
+        └── network-extension-wrapper.sh     ← copied by KvmHostDeployer
 
 Management server (may be the same machine)
-  └── <extension_path>/entry-point           ← deployed by test (static copy)
-        reads CS_NET_DEV_* env vars
-        SSHes back to Marvin node :22
-        runs ip netns exec cs-extnet-<id> <script> <args>
+  └── /etc/cloudstack/extensions/<ext-name>/
+        └── network-extension.sh             ← deployed by test (static copy)
+              reads CS_PHYSICAL_NETWORK_EXTENSION_DETAILS (JSON)
+                    CS_NETWORK_EXTENSION_DETAILS          (JSON)
+              SSHes back to Marvin node :22
+              runs ip netns exec cs-extnet-<id> <script> <args>
 ```
 
 The test covers:

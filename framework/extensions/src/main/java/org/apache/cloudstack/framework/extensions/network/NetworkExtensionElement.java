@@ -75,12 +75,12 @@ import com.cloud.vm.VirtualMachineProfile;
 
 /**
  * NetworkExtensionElement is a network plugin that delegates all network
- * configuration to an external entry-point script via a registered
- * {@link Extension} of type {@code NetworkOrchestrator}.
+ * configuration to an external script via a registered {@link Extension} of
+ * type {@code NetworkOrchestrator}.
  *
  * <h3>Script invocation model</h3>
- * The entry-point script is called with a command name and optional CLI
- * arguments.  Two JSON blobs are always forwarded as environment variables:
+ * The script is called with a command name and optional CLI arguments.
+ * Two JSON blobs are always forwarded as environment variables:
  * <ul>
  *   <li>{@value #ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS} – all details stored
  *       in {@code extension_resource_map_details} when the extension was
@@ -91,6 +91,16 @@ import com.cloud.vm.VirtualMachineProfile;
  *       Populated by the script's {@code ensure-network-device} response and
  *       updated on failover (e.g. selected host, namespace, segment ID).</li>
  * </ul>
+ *
+ * <h3>Script resolution</h3>
+ * The script is resolved from the extension path set when the extension was
+ * created.  Lookup order (first match wins):
+ * <ol>
+ *   <li>{@code <extensionPath>/<extensionName>.sh} — preferred convention,
+ *       e.g. for an extension named {@code network-extension} the script is
+ *       {@code network-extension.sh}.</li>
+ *   <li>{@code <extensionPath>} itself, if it is a file and is executable.</li>
+ * </ol>
  *
  * <h3>Physical-network extension details</h3>
  * Any key/value pairs stored in {@code extension_resource_map_details} at
@@ -110,13 +120,12 @@ import com.cloud.vm.VirtualMachineProfile;
  * </pre>
  *
  * <h3>Per-network extension details</h3>
- * On first {@code implement}, the entry-point is called with
+ * On first {@code implement}, the script is called with
  * {@code ensure-network-device}.  The script selects a host (e.g. from the
  * {@code hosts} list in the physical-network details), checks it is reachable,
  * and prints a JSON object to stdout.  CloudStack stores this verbatim in
  * {@code network_details} under key {@value #NETWORK_DETAIL_EXTENSION_DETAILS}
- * and forwards it on every subsequent call as
- * {@value #ENV_EXTENSION_DETAILS}.
+ * and forwards it on every subsequent call as {@value #ENV_EXTENSION_DETAILS}.
  *
  * <p>Example per-network details (KVM-namespace backend):</p>
  * <pre>{"host":"192.168.1.10","namespace":"cs-net-42"}</pre>
@@ -879,6 +888,17 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     // ---- Script file resolution ----
 
+    /**
+     * Resolves the executable script file from the given extension.
+     *
+     * <p>Lookup order (first match wins):</p>
+     * <ol>
+     *   <li>{@code <extensionPath>/<extensionName>.sh} — preferred convention,
+     *       e.g. for an extension named {@code network-extension} the script is
+     *       {@code network-extension.sh}.</li>
+     *   <li>{@code <extensionPath>} itself, if it is a file and is executable.</li>
+     * </ol>
+     */
     protected File resolveScriptFile(Network network, Extension extension) {
         Long physicalNetworkId = network.getPhysicalNetworkId();
         if (physicalNetworkId == null) {
@@ -906,21 +926,19 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         File extensionDir = new File(extensionPath);
 
-        File entryPoint = new File(extensionDir, "entry-point");
-        if (entryPoint.exists() && entryPoint.canExecute()) {
-            return entryPoint;
-        }
+        // <extensionPath>/<extensionName>.sh  (preferred convention)
         File namedScript = new File(extensionDir, extension.getName() + ".sh");
         if (namedScript.exists() && namedScript.canExecute()) {
             return namedScript;
         }
+        // <extensionPath> itself is the script file
         if (extensionDir.isFile() && extensionDir.canExecute()) {
             return extensionDir;
         }
 
         throw new CloudRuntimeException(
                 "No executable script found in extension path " + extensionPath
-                + ". Expected 'entry-point' or '" + extension.getName() + ".sh'.");
+                + ". Expected '" + extension.getName() + ".sh' inside the extension directory.");
     }
 
     // ---- Helpers ----

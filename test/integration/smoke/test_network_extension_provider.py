@@ -27,14 +27,15 @@ is already present on any modern Linux host.
   ┌──────────────────────────────────┐   SSH :22    ┌──────────────────────────────────┐
   │  Management Server               │ ───────────→ │  Marvin node                     │
   │                                  │  marvin_ip   │                                  │
-  │  [extension path]/entry-point    │              │  ip netns exec cs-extnet-<id>    │
-  │   (SSH wrapper written by test)  │              │    network-extension-wrapper.sh   │
+  │  [extension path]/               │              │  ip netns exec cs-extnet-<id>    │
+  │    network-extension.sh          │              │    network-extension-wrapper.sh   │
+  │   (SSH proxy script)             │              │                                  │
   └──────────────────────────────────┘              └──────────────────────────────────┘
          ↑ executes wrapper                                  ↑ namespace created by test
   CloudStack NetworkExtensionElement             iptables/bridge ops run here (isolated)
 
-The entry-point wrapper on the management server SSHes to the Marvin node and
-runs network-extension-wrapper.sh inside the network namespace.
+The network-extension.sh script on the management server SSHes to the Marvin
+node and runs network-extension-wrapper.sh inside the network namespace.
 
 Two-step setup:
   Step 1 — Register extension with physical network (no credentials):
@@ -52,9 +53,9 @@ Two-step setup:
 
 ``NetworkExtensionElement`` reads all details (including hidden) via
 ``ExtensionHelper.getAllResourceMapDetailsForPhysicalNetwork()`` and injects them
-as environment variables into the entry-point script:
-  CS_NET_DEV_HOST, CS_NET_DEV_PORT, CS_NET_DEV_USERNAME,
-  CS_NET_DEV_PASSWORD, CS_NET_DEV_SSHKEY
+as environment variables into the network-extension.sh script:
+  CS_PHYSICAL_NETWORK_EXTENSION_DETAILS (JSON object with all details)
+  CS_NETWORK_EXTENSION_DETAILS          (per-network JSON blob)
 
 Network service provider (NSP) name is the **extension name** (e.g. ``extnet-smoke-<id>``),
 not a generic ``NetworkExtension`` string.  This allows multiple different extensions to be
@@ -66,9 +67,12 @@ the physical network's network service provider tab.
 Setup on Marvin node (done by the test):
   1. Create network namespace:   ip netns add cs-extnet-<id>
   2. Generate RSA key pair; inject public key into authorized_keys.
-  3. Copy network-extension-wrapper.sh into a temp dir.
-  4. Deploy entry-point wrapper + private key to management server.
+  3. Copy network-extension-wrapper.sh to /etc/cloudstack/extensions/
+  4. Deploy network-extension.sh to /etc/cloudstack/extensions/<ext-name>/ on mgmt server.
   5. Call addExternalNetworkDevice with host/port/username/sshkey details.
+
+  Also deploys network-extension-wrapper.sh to all real KVM hosts in the zone
+  at /etc/cloudstack/extensions/ (best-effort, skipped if no KVM hosts found).
 
 Teardown:
   1. Delete external network device.
@@ -126,11 +130,11 @@ MARVIN_SSH_USER = 'root'
 # Namespace name prefix (a random suffix is added per test run)
 NS_PREFIX = 'cs-extnet'
 
-# Path on the Marvin node where the script is placed
-SCRIPT_DIR = '/tmp'
+# Directory on KVM hosts and the Marvin node where scripts are installed
+EXTENSIONS_DIR = '/etc/cloudstack/extensions'
 SCRIPT_FILENAME = 'network-extension-wrapper.sh'
 
-ENTRY_POINT_FILENAME = 'entry-point'
+ENTRY_POINT_FILENAME = 'network-extension.sh'
 
 # Network capabilities JSON
 NETWORK_CAPABILITIES_JSON = json.dumps({
@@ -147,18 +151,20 @@ NETWORK_CAPABILITIES_JSON = json.dumps({
 })
 
 # Path to the reference network-extension-wrapper.sh in the source tree
+# (lives in extensions/network-extension/ — not packaged in any RPM/deb)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..', '..'))
-REFERENCE_SCRIPT_SRC = os.path.join(
-    _REPO_ROOT,
-    'framework', 'extensions',
-    'src', 'main', 'resources', 'scripts', 'network-extension-wrapper.sh'
+WRAPPER_SCRIPT_SRC = os.path.join(
+    _REPO_ROOT, 'extensions', 'network-extension', 'network-extension-wrapper.sh'
 )
-# Static entry-point wrapper (in extensions/ in the repo) — deployed to the
+# Keep REFERENCE_SCRIPT_SRC as alias for compatibility
+REFERENCE_SCRIPT_SRC = WRAPPER_SCRIPT_SRC
+
+# Static network-extension.sh (in extensions/ in the repo) — deployed to the
 # extension path on the management server unchanged. All connection details
 # are passed as environment variables by NetworkExtensionElement.
 STATIC_ENTRY_POINT_SRC = os.path.join(
-    _REPO_ROOT, 'extensions', 'network-extension', 'entry-point'
+    _REPO_ROOT, 'extensions', 'network-extension', 'network-extension.sh'
 )
 
 
@@ -293,14 +299,22 @@ class NetnsNetworkServer:
     # ---- helpers ----
 
     def _install_script(self):
-        """Copy network-extension-wrapper.sh to a temp path on the Marvin node."""
-        dest = os.path.join(self._tmpdir, SCRIPT_FILENAME)
-        if os.path.exists(REFERENCE_SCRIPT_SRC):
-            shutil.copy2(REFERENCE_SCRIPT_SRC, dest)
-            self.logger.info("Copied %s -> %s", REFERENCE_SCRIPT_SRC, dest)
+        """Install network-extension-wrapper.sh to /etc/cloudstack/extensions/ on the Marvin node.
+
+        The Marvin node acts as the remote network device in this test.
+        The wrapper is installed to the standard location /etc/cloudstack/extensions/
+        so that network-extension.sh (on the management server) can find it at
+        the default DEFAULT_SCRIPT_PATH.
+        """
+        dest_dir = EXTENSIONS_DIR
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, SCRIPT_FILENAME)
+        if os.path.exists(WRAPPER_SCRIPT_SRC):
+            shutil.copy2(WRAPPER_SCRIPT_SRC, dest)
+            self.logger.info("Installed wrapper %s -> %s", WRAPPER_SCRIPT_SRC, dest)
         else:
             self.logger.warning(
-                "Reference script not found at %s; installing no-op stub", REFERENCE_SCRIPT_SRC)
+                "Wrapper script not found at %s; installing no-op stub", WRAPPER_SCRIPT_SRC)
             with open(dest, 'w') as fh:
                 fh.write('#!/bin/bash\n'
                          'mkdir -p /var/log 2>/dev/null || true\n'
@@ -356,7 +370,7 @@ class NetnsNetworkServer:
 # ---------------------------------------------------------------------------
 
 class MgmtServerDeployer:
-    """Copies the SSH private key and entry-point wrapper to the management server.
+    """Copies the SSH private key and network-extension.sh to the management server.
 
     If mgmt server == Marvin node (localhost), files are written directly.
     Otherwise they are transferred via SshClient.
@@ -441,6 +455,99 @@ class MgmtServerDeployer:
 
 
 # ---------------------------------------------------------------------------
+# KvmHostDeployer  – deploys network-extension-wrapper.sh to KVM hosts
+# ---------------------------------------------------------------------------
+
+class KvmHostDeployer:
+    """Copies network-extension-wrapper.sh to all KVM hosts in the zone.
+
+    The script is not packaged in any CloudStack RPM/deb — it must be copied
+    manually to /etc/cloudstack/extensions/ on each KVM host that will act as
+    a network device for the NetworkExtension plugin.
+
+    This class uses the CloudStack API (via apiclient) to discover KVM hosts,
+    then copies the script via SSH using the host credentials from the Marvin
+    test configuration.
+    """
+
+    DEST_PATH = EXTENSIONS_DIR + '/' + SCRIPT_FILENAME
+
+    def __init__(self, apiclient, zone_id, host_credentials=None, logger=None):
+        """
+        :param apiclient:        Marvin API client.
+        :param zone_id:          CloudStack zone ID to search for KVM hosts.
+        :param host_credentials: dict with 'user' and 'password' for SSH to
+                                 KVM hosts.  Falls back to root/password.
+        :param logger:           Optional logger.
+        """
+        self.apiclient        = apiclient
+        self.zone_id          = zone_id
+        self.host_credentials = host_credentials or {}
+        self.logger           = logger or logging.getLogger('KvmHostDeployer')
+        self._deployed_hosts  = []
+
+    def _get_kvm_hosts(self):
+        """Return list of (name, ip) tuples for all UP KVM hosts in the zone."""
+        from marvin.cloudstackAPI import listHosts as listHostsAPI
+        cmd = listHostsAPI.listHostsCmd()
+        cmd.zoneid   = self.zone_id
+        cmd.type     = 'Routing'
+        cmd.hypervisor = 'KVM'
+        cmd.state    = 'Up'
+        cmd.listall  = True
+        hosts = self.apiclient.listHosts(cmd)
+        if not hosts:
+            return []
+        return [(h.name, h.ipaddress) for h in hosts]
+
+    def _copy_to_host(self, host_ip):
+        """SCP network-extension-wrapper.sh to /etc/cloudstack/extensions/ on host_ip."""
+        if not os.path.exists(WRAPPER_SCRIPT_SRC):
+            self.logger.warning(
+                "Wrapper script not found at %s; skipping KVM host %s",
+                WRAPPER_SCRIPT_SRC, host_ip)
+            return False
+        user   = self.host_credentials.get('user', 'root')
+        passwd = self.host_credentials.get('password', 'password')
+        try:
+            ssh = SshClient(host_ip, 22, user, passwd)
+            ssh.execute("mkdir -p '%s'" % EXTENSIONS_DIR)
+            import base64
+            with open(WRAPPER_SCRIPT_SRC, 'rb') as fh:
+                b64 = base64.b64encode(fh.read()).decode()
+            ssh.execute(
+                "echo '%s' | base64 -d > '%s' && chmod 755 '%s'" %
+                (b64, self.DEST_PATH, self.DEST_PATH)
+            )
+            self.logger.info("Deployed wrapper to KVM host %s at %s", host_ip, self.DEST_PATH)
+            return True
+        except Exception as e:
+            self.logger.warning("Failed to deploy wrapper to KVM host %s: %s", host_ip, e)
+            return False
+
+    def deploy(self):
+        """Deploy the wrapper script to all KVM hosts in the zone.
+
+        Returns the list of host IPs where deployment succeeded.
+        """
+        hosts = self._get_kvm_hosts()
+        if not hosts:
+            self.logger.warning(
+                "No UP KVM hosts found in zone %s — wrapper not deployed to KVM hosts",
+                self.zone_id)
+            return []
+        self._deployed_hosts = []
+        for name, ip in hosts:
+            self.logger.info("Deploying wrapper to KVM host %s (%s)", name, ip)
+            if self._copy_to_host(ip):
+                self._deployed_hosts.append(ip)
+        return self._deployed_hosts
+
+    def deployed_hosts(self):
+        return list(self._deployed_hosts)
+
+
+# ---------------------------------------------------------------------------
 # Test class
 # ---------------------------------------------------------------------------
 
@@ -480,6 +587,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.ns_server            = None
         self.mgmt_deployer        = None
         self._mgmt_wrapper_path   = None
+        self.kvm_deployer         = None
 
     def tearDown(self):
         self._safe_teardown()
@@ -574,34 +682,70 @@ class TestExternalNetworkProvider(cloudstackTestCase):
     # ------------------------------------------------------------------
 
     def _init_ns_and_deployer(self):
-        """Create the network namespace and management server deployer."""
+        """Create the network namespace, management server deployer, and deploy to KVM hosts.
+
+        Steps:
+        1. Create MgmtServerDeployer to handle files on the management server.
+        2. Create NetnsNetworkServer (namespace on the Marvin node — also acts as the
+           'KVM host' / network device in the test environment).
+        3. Deploy network-extension-wrapper.sh to the Marvin node at
+           /etc/cloudstack/extensions/ (done by NetnsNetworkServer.start → _install_script).
+        4. Deploy network-extension-wrapper.sh to all real KVM hosts in the zone
+           (via KvmHostDeployer).  If no KVM hosts are found, a warning is logged but
+           the test continues (the Marvin node itself serves as the device).
+        """
         self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
                                                 logger=self.logger)
         marvin_ip = self.mgmt_deployer.get_marvin_ip_as_seen_from_mgmt()
         self.ns_server = NetnsNetworkServer(marvin_ip=marvin_ip,
                                             logger=self.logger)
+        # start() creates the namespace and installs the wrapper to
+        # /etc/cloudstack/extensions/ on the Marvin node
         self.ns_server.start()
+
+        # Deploy wrapper to real KVM hosts in the zone (best-effort)
+        host_creds = {
+            'user':     self.mgtSvrDetails.get('user', 'root'),
+            'password': self.mgtSvrDetails.get('passwd', 'password'),
+        }
+        self.kvm_deployer = KvmHostDeployer(
+            self.apiclient, self.zone.id,
+            host_credentials=host_creds,
+            logger=self.logger
+        )
+        deployed = self.kvm_deployer.deploy()
+        if deployed:
+            self.logger.info(
+                "Deployed network-extension-wrapper.sh to %d KVM host(s): %s",
+                len(deployed), deployed)
+        else:
+            self.logger.info(
+                "No additional KVM hosts found; Marvin node acts as the network device")
         return marvin_ip
 
     def _deploy_to_mgmt_server(self, ext_path):
-        """Deploy the static entry-point script to the extension path on the mgmt server.
+        """Deploy network-extension.sh to the extension path on the mgmt server.
 
-        The static entry-point (extensions/network-extension/entry-point) reads all
+        The script (extensions/network-extension/network-extension.sh) reads all
         connection details (host, port, username, sshkey, namespace, script_path) from
         environment variables injected by NetworkExtensionElement — so no dynamic
         wrapper generation is needed.
 
+        The script is placed in /etc/cloudstack/extensions/<ext-name>/network-extension.sh
+        which is the standard installation path.
+
         Returns the private-key PEM content so the caller can store it in
         extension_resource_map_details via addExternalNetworkDevice.
         """
-        # 1. Find the static entry-point from the extensions/ directory in the repo
+        # 1. Find network-extension.sh from the extensions/ directory in the repo
         entry_point_src = STATIC_ENTRY_POINT_SRC
         if not os.path.exists(entry_point_src):
             raise RuntimeError(
-                "Static entry-point not found at %s. "
-                "Please ensure extensions/network-extension/entry-point exists." % entry_point_src)
+                "network-extension.sh not found at %s. "
+                "Please ensure extensions/network-extension/network-extension.sh exists." % entry_point_src)
 
-        # 2. Deploy it to the extension path on the management server
+        # 2. Deploy it to /etc/cloudstack/extensions/<ext-name>/network-extension.sh
+        # ext_path is the resolved extension path (e.g. /etc/cloudstack/extensions/<ext-name>)
         self._mgmt_wrapper_path = os.path.join(ext_path, ENTRY_POINT_FILENAME)
         with open(entry_point_src, 'r') as fh:
             entry_point_content = fh.read()
@@ -610,7 +754,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             entry_point_content,
             mode='0755'
         )
-        self.logger.info("Static entry-point deployed to mgmt server at %s",
+        self.logger.info("network-extension.sh deployed to mgmt server at %s",
                          self._mgmt_wrapper_path)
 
         # 3. Return PEM key content for use in addExternalNetworkDevice
@@ -672,12 +816,12 @@ class TestExternalNetworkProvider(cloudstackTestCase):
           3.  Copy network-extension-wrapper.sh to a temp path.
 
         Management server:
-          4.  Deploy static entry-point (extensions/network-extension/entry-point)
-              to <extension_path>/entry-point — no dynamic wrapper generation.
-              The entry-point reads all connection details from env vars at runtime.
+          4.  Deploy network-extension.sh (extensions/network-extension/network-extension.sh)
+              to <extension_path>/network-extension.sh — no dynamic wrapper generation.
+              The script reads all connection details from env vars at runtime.
 
         CloudStack:
-          5.  Create NetworkOrchestrator extension (path=network-extension/entry-point).
+          5.  Create NetworkOrchestrator extension (path=network-extension/network-extension.sh).
           6.  Register extension with physical network.
           7.  addExternalNetworkDevice: store host, port, username, sshkey,
               namespace, script_path as extension_resource_map_details.
@@ -690,8 +834,9 @@ class TestExternalNetworkProvider(cloudstackTestCase):
          10.  Create network offering using the extension name as service provider.
          11.  Create account.
          12.  Create isolated network.
-              → entry-point receives: CS_NET_DEV_HOST, CS_NET_DEV_SSHKEY,
-                CS_NET_NAMESPACE, CS_NET_SCRIPT_PATH, etc.
+              → network-extension.sh receives:
+                CS_PHYSICAL_NETWORK_EXTENSION_DETAILS (JSON with hosts, port, username, sshkey…)
+                CS_NETWORK_EXTENSION_DETAILS          (per-network JSON blob)
               → SSHes to Marvin, runs: ip netns exec <ns> <script> implement ...
          13.  Deploy VM   → prepare called.
          14.  Acquire public IP → assign-ip command.
@@ -706,17 +851,16 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         Cleanup:
          22.  Disable/delete provider.
          23.  Unregister/delete extension.
-         24.  Remove entry-point from mgmt server.
+         24.  Remove network-extension.sh from mgmt server.
          25.  Delete network namespace; remove authorized_keys entry.
 
         Notes:
           - Each registered extension becomes its own network service provider named
             after the extension. This avoids ambiguity when multiple external network
             extensions are registered to the same physical network.
-          - The entry-point (extensions/network-extension/entry-point) is a static
-            script that reads ALL details from environment variables — no hardcoding.
-          - namespace and script_path are passed as addExternalNetworkDevice details,
-            becoming CS_NET_NAMESPACE and CS_NET_SCRIPT_PATH env vars.
+          - network-extension.sh (extensions/network-extension/network-extension.sh)
+            is a static script that reads ALL details from environment variables.
+          - namespace and script_path are passed as addExternalNetworkDevice details.
           - The extension can be enabled/disabled via updateExtension(state=...).
           - The extension can only be deleted when not registered to any resources.
         """
@@ -764,8 +908,8 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             self.assertIn("network.capabilities", d)
         self.logger.info("Extension %s created, path=%s", ext_name, self.extension_path)
 
-        # ---- Steps 6-7: Deploy static entry-point to management server ----
-        # The static entry-point (extensions/network-extension/entry-point) reads
+        # ---- Steps 6-7: Deploy network-extension.sh to management server ----
+        # The script (extensions/network-extension/network-extension.sh) reads
         # all connection details from env vars - no dynamic wrapper generation needed.
         # Returns the private key PEM to store in addExternalNetworkDevice.
         ssh_key_pem = self._deploy_to_mgmt_server(self.extension_path)
@@ -789,8 +933,8 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         # extension_resource_map_details. Sensitive fields (sshkey) are stored
         # with display=false and never returned by listExternalNetworkDevices.
         # NetworkExtensionElement reads all details (including hidden) and injects
-        # them as env vars: CS_NET_DEV_HOST, CS_NET_DEV_PORT, CS_NET_DEV_USERNAME,
-        # CS_NET_DEV_SSHKEY, CS_NET_NAMESPACE, CS_NET_SCRIPT_PATH.
+        # them as a JSON object: CS_PHYSICAL_NETWORK_EXTENSION_DETAILS
+        # The per-network blob is passed as: CS_NETWORK_EXTENSION_DETAILS
         device = self._add_external_network_device(
             physicalnetworkid=self.physical_network.id,
             host=marvin_ip,
