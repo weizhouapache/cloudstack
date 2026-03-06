@@ -25,14 +25,13 @@ required**.
 5. [Step-by-step API setup](#step-by-step-api-setup)
    - [1. Create the extension](#1-create-the-extension)
    - [2. Register the extension with a physical network](#2-register-the-extension-with-a-physical-network)
-   - [3. Add external network device credentials](#3-add-external-network-device-credentials)
-   - [4. Create a network offering](#4-create-a-network-offering)
-   - [5. Create an isolated network](#5-create-an-isolated-network)
-   - [6. Acquire a public IP and enable Source NAT](#6-acquire-a-public-ip-and-enable-source-nat)
-   - [7. Enable / disable Static NAT](#7-enable--disable-static-nat)
-   - [8. Add / delete Port Forwarding](#8-add--delete-port-forwarding)
-   - [9. Delete the network](#9-delete-the-network)
-   - [10. Unregister and delete the extension](#10-unregister-and-delete-the-extension)
+   - [3. Create a network offering](#3-create-a-network-offering)
+   - [4. Create an isolated network](#4-create-an-isolated-network)
+   - [5. Acquire a public IP and enable Source NAT](#5-acquire-a-public-ip-and-enable-source-nat)
+   - [6. Enable / disable Static NAT](#6-enable--disable-static-nat)
+   - [7. Add / delete Port Forwarding](#7-add--delete-port-forwarding)
+   - [8. Delete the network](#8-delete-the-network)
+   - [9. Unregister and delete the extension](#9-unregister-and-delete-the-extension)
 6. [Multiple extensions on the same physical network](#multiple-extensions-on-the-same-physical-network)
 7. [Wrapper script operations reference](#wrapper-script-operations-reference)
 8. [Environment variable reference](#environment-variable-reference)
@@ -172,7 +171,7 @@ chmod +x /etc/cloudstack/extensions/network-extension-wrapper.sh
 The default path expected by `network-extension.sh` is
 `/etc/cloudstack/extensions/network-extension-wrapper.sh`.
 You can override this per-physical-network by passing a `script_path` detail
-when calling `addExternalNetworkDevice` (see below).
+when calling `registerExtension` (see below).
 
 **Prerequisites on the remote device:**
 * `iproute2` (`ip link`, `ip addr`, `ip netns`)
@@ -269,52 +268,7 @@ cmk unregisterExtension \
     resourceid=<phys-net-uuid>
 ```
 
-### 3. Add external network device credentials
-
-Store the connection details for the remote device.  These are packed into the
-`CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` JSON object passed to `network-extension.sh`
-at runtime:
-
-```bash
-cmk addExternalNetworkDevice \
-    physicalnetworkid=<phys-net-uuid> \
-    host=192.168.1.50 \
-    port=22 \
-    "details[0].key=username"    "details[0].value=root" \
-    "details[1].key=sshkey"      "details[1].value=$(cat /root/.ssh/id_rsa)" \
-    "details[2].key=namespace"   "details[2].value=cs-net-prod" \
-    "details[3].key=script_path" "details[3].value=/etc/cloudstack/extensions/network-extension-wrapper.sh"
-```
-
-> **Security note:** `sshkey` (and `password`) are stored with `display=false`
-> and are **never** returned by `listExternalNetworkDevices`.  All other keys
-> (`host`, `port`, `username`, `namespace`, `script_path`) are visible in list
-> responses.
-
-All details become key/value pairs inside the JSON object
-`CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` that `network-extension.sh` reads.
-There are no pre-defined keys — the user and the script agree on the schema.
-Sensitive keys (`password`, `sshkey`) are redacted in log output but are still
-present in the JSON passed to the script.
-
-List devices (sensitive fields are hidden):
-```bash
-cmk listExternalNetworkDevices physicalnetworkid=<phys-net-uuid>
-```
-
-Update device details (e.g. change namespace):
-```bash
-cmk updateExternalNetworkDevice \
-    physicalnetworkid=<phys-net-uuid> \
-    "details[0].key=namespace" "details[0].value=cs-net-new"
-```
-
-Delete device:
-```bash
-cmk deleteExternalNetworkDevice physicalnetworkid=<phys-net-uuid>
-```
-
-### 4. Create a network offering
+### 3. Create a network offering
 
 Use the **extension name** (`my-extnet`) as the service provider — not the
 generic string `NetworkExtension`:
@@ -346,7 +300,7 @@ cmk updateNetworkOffering id=<offering-uuid> state=Enabled
 > declare a capability value for a service, CloudStack accepts any value (or no
 > value) without error.
 
-### 5. Create an isolated network
+### 4. Create an isolated network
 
 ```bash
 cmk createNetwork \
@@ -380,7 +334,7 @@ The wrapper creates a VLAN sub-interface and Linux bridge, assigns the gateway
 IP to the bridge, enables IP forwarding, and creates dedicated per-network
 iptables chains (`CS_EXTNET_42` in `nat` and `CS_EXTNET_FWD_42` in `filter`).
 
-### 6. Acquire a public IP and enable Source NAT
+### 5. Acquire a public IP and enable Source NAT
 
 ```bash
 cmk associateIpAddress networkid=<network-uuid>
@@ -408,7 +362,7 @@ The wrapper:
 When the IP is released (via `disassociateIpAddress`), `release-ip` is called,
 which removes all associated rules and the IP address.
 
-### 7. Enable / disable Static NAT
+### 6. Enable / disable Static NAT
 
 ```bash
 # Enable static NAT: map public IP 203.0.113.20 to VM private IP 10.0.1.5
@@ -446,7 +400,7 @@ cmk disableStaticNat ipaddressid=<public-ip-uuid>
 
 CloudStack calls `delete-static-nat`, which removes all four rules above.
 
-### 8. Add / delete Port Forwarding
+### 7. Add / delete Port Forwarding
 
 ```bash
 # Forward TCP port 2222 on public IP 203.0.113.20 → VM port 22
@@ -491,7 +445,7 @@ cmk deletePortForwardingRule id=<rule-uuid>
 
 This calls `delete-port-forward` which removes the DNAT and FORWARD rules.
 
-### 9. Delete the network
+### 8. Delete the network
 
 ```bash
 cmk deleteNetwork id=<network-uuid>
@@ -513,15 +467,18 @@ The wrapper:
    not passed in arguments).
 5. Removes all state under `/var/lib/cloudstack/network-extension/42/`.
 
-### 10. Unregister and delete the extension
+### 9. Unregister and delete the extension
 
 ```bash
 # Disable and delete the NSP
 cmk updateNetworkServiceProvider id=<nsp-uuid> state=Disabled
 cmk deleteNetworkServiceProvider id=<nsp-uuid>
 
-# Remove external network device credentials
-cmk deleteExternalNetworkDevice physicalnetworkid=<phys-net-uuid>
+# Remove external network device credentials (if any)
+# Device credentials are stored as `extension_resource_map_details` for the
+# extension registration. Remove or update them via `updateExtension` or
+# by unregistering the extension from the physical network (unregisterExtension)
+# and then updating the Extension record if necessary.
 
 # Unregister the extension from the physical network
 cmk unregisterExtension \
@@ -546,10 +503,14 @@ network:
 # Register two extensions, each backed by a different device
 cmk registerExtension id=<ext-a-uuid> resourcetype=PhysicalNetwork resourceid=<pn-uuid>
 cmk registerExtension id=<ext-b-uuid> resourcetype=PhysicalNetwork resourceid=<pn-uuid>
-
-# Add device credentials for each (currently one device per physical network)
-cmk addExternalNetworkDevice physicalnetworkid=<pn-uuid> host=10.0.0.1 ...
 ```
+
+# Store device connection details and script_path as registration details
+# (use updateNetworkServiceProvider or updateExtension details in the API / CMK)
+# Example: set hosts, sshkey, script_path for the registered extension on the physical network
+# Note: details are stored in extension_resource_map_details for the registration
+cmk updateExtension id=<ext-uuid> "details[0].key=hosts" "details[0].value=10.0.0.1,10.0.0.2" \
+    "details[1].key=script_path" "details[1].value=/etc/cloudstack/extensions/network-extension-wrapper.sh"
 
 When creating network offerings, reference the specific extension name:
 
@@ -889,4 +850,3 @@ nosetests test_network_extension_provider.py \
 * `iproute2` on the Marvin node (`ip netns list` must succeed).
 * The Marvin node must be reachable by SSH from the management server on port 22.
 * Set `MARVIN_NODE_IP=<ip>` if auto-detection of the Marvin node IP fails.
-
