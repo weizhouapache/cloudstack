@@ -69,8 +69,7 @@ coexist on the same physical network, each with its own named NSP entry.
 Teardown:
   1. Unregister extension from physical network.
   2. Delete namespace:           ip netns del cs-extnet-<id>
-  3. Remove public key from authorized_keys.
-  4. Remove network-extension.sh from management server.
+  3. Remove network-extension.sh from management server.
 """
 import json
 import logging
@@ -82,6 +81,7 @@ import tempfile
 import time
 import unittest
 import urllib.request
+import ssl
 
 from marvin.cloudstackTestCase import cloudstackTestCase
 from marvin.cloudstackAPI import (listPhysicalNetworks,
@@ -159,9 +159,64 @@ NETWORK_CAPABILITIES_JSON = json.dumps({
 def _download_script(url, dest_path):
     """Download *url* to *dest_path*, make it executable.  Returns dest_path."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    logging.getLogger('cs-extnet').info("Downloading %s -> %s", url, dest_path)
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        content = resp.read()
+    log = logging.getLogger('cs-extnet')
+    log.info("Downloading %s -> %s", url, dest_path)
+
+    # Build an SSL context explicitly to avoid depending on the global
+    # ssl._create_default_https_context being callable (some environments
+    # may override it incorrectly). Prefer an unverified context for
+    # downloading test scripts.
+    ctx = None
+    # Create an SSLContext directly and disable certificate verification.
+    # This avoids calling ssl._create_unverified_context which may be
+    # overridden or misassigned in some environments.
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    except Exception:
+        ctx = None
+
+    # Try curl/wget first to avoid potential urllib/SSLContext issues
+    curl_cmd = ['curl', '-fsSL', url, '-o', dest_path]
+    wget_cmd = ['wget', '-q', url, '-O', dest_path]
+    try:
+        rc = subprocess.run(curl_cmd, check=False).returncode
+        if rc == 0:
+            with open(dest_path, 'rb') as fh:
+                content = fh.read()
+        else:
+            rc2 = subprocess.run(wget_cmd, check=False).returncode
+            if rc2 == 0:
+                with open(dest_path, 'rb') as fh:
+                    content = fh.read()
+            else:
+                # Fall back to urllib with explicit context
+                log.info('curl/wget failed (rc=%s,%s); falling back to urllib', rc, rc2)
+                try:
+                    if ctx is not None:
+                        with urllib.request.urlopen(url, timeout=30, context=ctx) as resp:
+                            content = resp.read()
+                    else:
+                        with urllib.request.urlopen(url, timeout=30) as resp:
+                            content = resp.read()
+                except Exception as e:
+                    log.error('All download methods failed: %s', e)
+                    raise
+    except Exception as e:
+        # If subprocess.run itself raised (missing binary etc), fallback to urllib
+        log.warning('curl/wget attempt raised %s, falling back to urllib', e)
+        try:
+            if ctx is not None:
+                with urllib.request.urlopen(url, timeout=30, context=ctx) as resp:
+                    content = resp.read()
+            else:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    content = resp.read()
+        except Exception:
+            log.exception('urllib fallback download also failed')
+            raise
+
     with open(dest_path, 'wb') as fh:
         fh.write(content)
     os.chmod(dest_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP |
@@ -196,6 +251,7 @@ def _get_kvm_hosts_from_config(config):
 
     Returns a list of dicts: [{"username": .., "password": .., "ip": ..}, ...]
     """
+    import urllib.parse
     hosts = []
     try:
         zones = config.__dict__.get("zones", [])
@@ -209,11 +265,17 @@ def _get_kvm_hosts_from_config(config):
                         if hasattr(h, '__dict__'):
                             h = h.__dict__
                         url = h.get("url", "")
-                        ip = url.replace("http://", "").replace("https://", "").strip("/")
+                        # Ensure a scheme is present so urlparse can split host/port
+                        if not url.startswith('http://') and not url.startswith('https://'):
+                            url = 'http://' + url
+                        parsed = urllib.parse.urlparse(url)
+                        host = parsed.hostname or ''
+                        port = parsed.port or 22
                         hosts.append({
                             "username": h.get("username", "root"),
                             "password": h.get("password", ""),
-                            "ip": ip,
+                            "ip": host,
+                            "port": int(port),
                         })
     except Exception as e:
         logging.getLogger('cs-extnet').warning(
@@ -278,11 +340,7 @@ class NetnsNetworkServer:
         self.marvin_ip = marvin_ip
         self.logger = logger or logging.getLogger('NetnsNetworkServer')
         self._ns_name = '%s-%s' % (NS_PREFIX, random_gen())
-        self._tmpdir = None
-        self._key_file = None
-        self._pub_key = None
         self._script_path = None
-        self._authorized_keys_entry = None
         self.running = False
 
     # ---- public properties ----
@@ -290,14 +348,6 @@ class NetnsNetworkServer:
     @property
     def ns_name(self):
         return self._ns_name
-
-    @property
-    def key_file(self):
-        return self._key_file
-
-    @property
-    def pub_key(self):
-        return self._pub_key
 
     @property
     def script_path(self):
@@ -308,19 +358,6 @@ class NetnsNetworkServer:
     def start(self):
         """Create namespace, generate SSH key, install wrapper script."""
         _check_iproute2()
-
-        # Generate temp dir and SSH key pair on the Marvin node
-        self._tmpdir = tempfile.mkdtemp(prefix='cs-extnet-test-')
-        self._key_file = os.path.join(self._tmpdir, 'id_rsa_extnet')
-        self.logger.info("Generating SSH key pair at %s", self._key_file)
-        _run(['ssh-keygen', '-t', 'rsa', '-b', '2048',
-              '-N', '', '-f', self._key_file])
-        with open(self._key_file + '.pub') as fh:
-            self._pub_key = fh.read().strip()
-
-        # Add the public key to authorized_keys so the management server
-        # can SSH in as the test user
-        self._install_authorized_key()
 
         # Create the network namespace
         self.logger.info("Creating network namespace %s", self._ns_name)
@@ -344,9 +381,6 @@ class NetnsNetworkServer:
         if self._ns_name and self.running:
             _run(['ip', 'netns', 'del', self._ns_name], check=False)
             self.logger.info("Namespace %s deleted", self._ns_name)
-        self._remove_authorized_key()
-        if self._tmpdir and os.path.exists(self._tmpdir):
-            shutil.rmtree(self._tmpdir, ignore_errors=True)
         self.running = False
 
     # ---- helpers ----
@@ -368,38 +402,6 @@ class NetnsNetworkServer:
                  stat.S_IROTH | stat.S_IXOTH)
         self._script_path = dest
         self.logger.info("Installed wrapper script at %s", dest)
-
-    def _authorized_keys_path(self):
-        return os.path.expanduser('~%s/.ssh/authorized_keys' % MARVIN_SSH_USER)
-
-    def _install_authorized_key(self):
-        """Append the test public key to authorized_keys."""
-        ak_path = self._authorized_keys_path()
-        os.makedirs(os.path.dirname(ak_path), mode=0o700, exist_ok=True)
-        # Tag the entry so we can remove it precisely later
-        entry = '# cs-extnet-test-%s\n%s\n' % (self._ns_name, self._pub_key)
-        self._authorized_keys_entry = entry
-        with open(ak_path, 'a') as fh:
-            fh.write(entry)
-        os.chmod(ak_path, 0o600)
-        self.logger.info("Added test public key to %s", ak_path)
-
-    def _remove_authorized_key(self):
-        """Remove the test public key from authorized_keys."""
-        if not self._authorized_keys_entry:
-            return
-        ak_path = self._authorized_keys_path()
-        try:
-            if not os.path.exists(ak_path):
-                return
-            with open(ak_path, 'r') as fh:
-                content = fh.read()
-            content = content.replace(self._authorized_keys_entry, '')
-            with open(ak_path, 'w') as fh:
-                fh.write(content)
-            self.logger.info("Removed test public key from %s", ak_path)
-        except Exception as e:
-            self.logger.warning("Could not remove key from authorized_keys: %s", e)
 
     def run_in_ns(self, command, check=True):
         """Run *command* string inside the network namespace. Returns (rc, stdout, stderr)."""
@@ -429,15 +431,25 @@ class MgmtServerDeployer:
     """
 
     def __init__(self, mgt_details, logger=None):
-        self.ip     = mgt_details.get("mgtSvrIp", "localhost")
-        self.port   = int(mgt_details.get("port", 22))
-        self.user   = mgt_details.get("user", "root")
+        # Support mgt_details containing 'url' (e.g. http://host:2222)
+        import urllib.parse
+        url = mgt_details.get('url', '')
+        if url:
+            if not url.startswith('http://') and not url.startswith('https://'):
+                url = 'http://' + url
+            parsed = urllib.parse.urlparse(url)
+            self.ip = parsed.hostname or mgt_details.get('mgtSvrIp', 'localhost')
+            self.port = int(parsed.port or mgt_details.get('port', 22))
+        else:
+            self.ip     = mgt_details.get("mgtSvrIp", "localhost")
+            self.port   = int(mgt_details.get("port", 22))
+        self.user = mgt_details.get("user", "root")
         self.passwd = mgt_details.get("passwd", "")
         self.logger = logger or logging.getLogger('MgmtServerDeployer')
         self._is_local = self.ip in ('localhost', '127.0.0.1')
 
     def _ssh(self):
-        return SshClient(self.ip, self.port, self.user, self.passwd)
+        return SshClient(self.ip, int(self.port), self.user, self.passwd)
 
     def write_file(self, remote_path, content, mode='0755'):
         """Write *content* to *remote_path* on the management server."""
@@ -564,10 +576,19 @@ class KvmHostDeployer:
             return []
 
     def _copy_to_host(self, ip, username, password):
-        """SCP network-extension-wrapper.sh to /etc/cloudstack/extensions/ on *ip*."""
+        """SCP network-extension-wrapper.sh to /etc/cloudstack/extensions/ on *ip* (use provided port if in host dict).
+        The caller may pass an ip string or a host dict. If a dict is passed, it should contain 'ip' and 'port'."""
         wrapper_path, _ = _ensure_scripts_downloaded()
         try:
-            ssh = SshClient(ip, 22, username, password)
+            # ip may be a dict or a string; if dict, extract ip/port
+            host_ip = ip
+            host_port = 22
+            if isinstance(ip, dict):
+                host_ip = ip.get('ip', '')
+                host_port = int(ip.get('port', 22))
+                username = ip.get('username', username)
+                password = ip.get('password', password)
+            ssh = SshClient(host_ip, int(host_port), username, password)
             ssh.execute("mkdir -p '%s'" % EXTENSIONS_DIR)
             import base64
             with open(wrapper_path, 'rb') as fh:
@@ -595,14 +616,22 @@ class KvmHostDeployer:
             return []
         self._deployed_hosts = []
         for h in hosts:
-            ip       = h.get('ip', '')
-            username = h.get('username', 'root')
-            password = h.get('password', '')
+            if not isinstance(h, dict):
+                # keep backward compatibility: if h is a string ip
+                ip = h
+                username = 'root'
+                password = ''
+                port = 22
+            else:
+                ip = h.get('ip', '')
+                username = h.get('username', 'root')
+                password = h.get('password', '')
+                port = int(h.get('port', 22))
             if not ip:
                 continue
-            self.logger.info("Deploying wrapper to KVM host %s", ip)
-            if self._copy_to_host(ip, username, password):
-                self._deployed_hosts.append(ip)
+            self.logger.info("Deploying wrapper to KVM host %s:%s", ip, port)
+            if self._copy_to_host({'ip': ip, 'port': port, 'username': username, 'password': password}):
+                self._deployed_hosts.append((ip, port))
         return self._deployed_hosts
 
     def deployed_hosts(self):
@@ -610,15 +639,25 @@ class KvmHostDeployer:
         return list(self._deployed_hosts)
 
     def host_ips(self):
-        """Return all configured host IPs (regardless of deployment success)."""
-        return [h.get('ip', '') for h in self.config_hosts if h.get('ip')]
+        """Return all configured host IPs (optionally with :port) (regardless of deployment success)."""
+        out = []
+        for h in self.config_hosts:
+            ip = h.get('ip', '')
+            if not ip:
+                continue
+            port = h.get('port', None)
+            if port:
+                out.append(f"{ip}:{port}")
+            else:
+                out.append(ip)
+        return out
 
 
 # ---------------------------------------------------------------------------
 # Test class
 # ---------------------------------------------------------------------------
 
-class TestExternalNetworkProvider(cloudstackTestCase):
+class TestNetworkExtensionProvider(cloudstackTestCase):
     """Full lifecycle smoke test for the NetworkExtension plugin.
 
     A Linux network namespace on the Marvin node provides iptables isolation.
@@ -632,7 +671,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
     @classmethod
     def setUpClass(cls):
-        testClient = super(TestExternalNetworkProvider, cls).getClsTestClient()
+        testClient = super(TestNetworkExtensionProvider, cls).getClsTestClient()
         cls.apiclient     = testClient.getApiClient()
         cls.services      = testClient.getParsedTestDataConfig()
         cls.zone          = get_zone(cls.apiclient, testClient.getZoneForTests())
@@ -641,7 +680,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         cls.hypervisor    = testClient.getHypervisorInfo()
         cls.template      = get_template(cls.apiclient, cls.zone.id, cls.hypervisor)
         cls._cleanup      = []
-        cls.logger        = logging.getLogger('TestExternalNetworkProvider')
+        cls.logger        = logging.getLogger('TestNetworkExtensionProvider')
         cls.logger.setLevel(logging.DEBUG)
 
         # Read KVM host details from Marvin config (zones → pods → clusters → hosts)
@@ -659,7 +698,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
 
     @classmethod
     def tearDownClass(cls):
-        super(TestExternalNetworkProvider, cls).tearDownClass()
+        super(TestNetworkExtensionProvider, cls).tearDownClass()
 
     def setUp(self):
         self.cleanup              = []
@@ -822,13 +861,16 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.logger.info("network-extension.sh deployed to mgmt server at %s",
                          self._mgmt_wrapper_path)
 
-        # Return the private key PEM so the caller can store it and pass to
-        # the wrapper script via environment variables when executing network operations.
-        # Returns the SSH private key PEM to store in the extension registration
-        # details (e.g. as an `sshkey` detail when registering the extension
-        # to the physical network) so the wrapper script can SSH into the device.
-        with open(self.ns_server.key_file, 'r') as fh:
-            return fh.read()
+        # For password-based testing we do not generate SSH keys. Return mgmt
+        # credentials (ip, user, password, port) so the caller can include them
+        # in the extension registration details. The wrapper script will then
+        # use password-based SSH to connect to the Marvin node / KVM hosts.
+        return {
+            'ip': self.mgmt_deployer.ip,
+            'user': self.mgmt_deployer.user,
+            'password': self.mgmt_deployer.passwd,
+            'port': self.mgmt_deployer.port
+        }
 
     def _cleanup_mgmt_server_files(self):
         """Remove the network-extension.sh script from the management server."""
@@ -878,43 +920,41 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         Script deployment (before CloudStack operations):
           1.  Download scripts from GitHub (cached in /tmp/cs-extnet-script-cache/).
           2.  Create Linux network namespace on the Marvin node (ip netns add cs-extnet-<id>).
-          3.  Generate RSA key pair; inject public key into authorized_keys on Marvin node.
-          4.  Install network-extension-wrapper.sh to /etc/cloudstack/extensions/ on
+          3.  Install network-extension-wrapper.sh to /etc/cloudstack/extensions/ on
               the Marvin node (acts as the remote network device for this test).
-          5.  Deploy network-extension-wrapper.sh to all real KVM hosts at
+          4.  Deploy network-extension-wrapper.sh to all real KVM hosts at
               /etc/cloudstack/extensions/ using credentials from the Marvin config.
-          6.  Deploy network-extension.sh to /etc/cloudstack/extensions/<ext-name>/
+          5.  Deploy network-extension.sh to /etc/cloudstack/extensions/<ext-name>/
               on the management server.
 
         CloudStack operations:
-          7.  Create NetworkOrchestrator extension with network.capabilities detail.
-          8.  Register extension with the physical network (Guest traffic type),
+          6.  Create NetworkOrchestrator extension with network.capabilities detail.
+          7.  Register extension with the physical network (Guest traffic type),
               passing 'hosts' detail = comma-separated list of all KVM host IPs.
-          9.  Network service provider (NSP) named after the extension is auto-created
+          8.  Network service provider (NSP) named after the extension is auto-created
               when the extension is registered; enable it.
-         10.  Create network offering with the extension name as service provider.
-         11.  Create account.
-         12.  Create isolated network.
+          9.  Create network offering with the extension name as service provider.
+         10.  Create account.
+         11.  Create isolated network.
               → NetworkExtensionElement calls network-extension.sh with:
                 CS_PHYSICAL_NETWORK_EXTENSION_DETAILS (JSON: hosts, port, username, sshkey, …)
                 CS_NETWORK_EXTENSION_DETAILS           (per-network JSON blob)
               → network-extension.sh SSHes to the device, runs:
                 ip netns exec <ns> network-extension-wrapper.sh implement ...
-         13.  Deploy VM.
-         14.  Acquire public IP → assign-ip command on wrapper.
-         15.  Enable static NAT → add-static-nat command on wrapper.
-         16.  Disable static NAT → delete-static-nat command on wrapper.
-         17.  Acquire public IP for port forwarding.
-         18.  Create port forwarding rule → add-port-forward command on wrapper.
-         19.  Delete port forwarding rule → delete-port-forward command on wrapper.
-         20.  Destroy VM.
-         21.  Delete network → shutdown and destroy commands on wrapper.
+         12.  Deploy VM.
+         13.  Acquire public IP → assign-ip command on wrapper.
+         14.  Enable static NAT → add-static-nat command on wrapper.
+         15.  Disable static NAT → delete-static-nat command on wrapper.
+         16.  Acquire public IP for port forwarding.
+         17.  Create port forwarding rule → add-port-forward command on wrapper.
+         18.  Delete port forwarding rule → delete-port-forward command on wrapper.
+         19.  Destroy VM.
+         20.  Delete network → shutdown and destroy commands on wrapper.
 
         Cleanup:
          22.  Disable/delete provider.
          23.  Unregister/delete extension.
          24.  Remove network-extension.sh from management server.
-         25.  Delete network namespace; remove authorized_keys entry.
         """
 
         # ---- Steps 1-6: Download scripts, set up namespace, deploy scripts ----
@@ -964,7 +1004,7 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         # Returns the SSH private key PEM to store in the extension registration
         # details (e.g. as an `sshkey` detail when registering the extension
         # to the physical network) so the wrapper script can SSH into the device.
-        ssh_key_pem = self._deploy_to_mgmt_server(self.extension_path)
+        mgmt_server_info = self._deploy_to_mgmt_server(self.extension_path)
 
         # ---- Step 9b: Register extension with physical network ----
         # The 'hosts' detail contains all KVM host IPs (comma-separated).
@@ -976,7 +1016,24 @@ class TestExternalNetworkProvider(cloudstackTestCase):
             kvm_hosts_csv = marvin_ip
         self.logger.info("Registering extension with hosts detail: %s", kvm_hosts_csv)
 
-        register_details = [{"key": "hosts", "value": kvm_hosts_csv}]
+        # Prepare extension details: include hosts CSV for easy lookup and a
+        # JSON blob with management + per-host credentials so the wrapper can
+        # perform password-based SSH connections.
+        mgmt_creds = mgmt_server_info if isinstance(mgmt_server_info, dict) else {}
+        hosts_details = self.kvm_deployer.config_hosts if self.kvm_deployer and self.kvm_deployer.config_hosts else self.kvm_host_configs
+        ext_details_obj = {
+            'management': {
+                'ip': mgmt_creds.get('ip', self.mgmt_deployer.ip),
+                'user': mgmt_creds.get('user', self.mgmt_deployer.user),
+                'password': mgmt_creds.get('password', self.mgmt_deployer.passwd),
+                'port': int(mgmt_creds.get('port', self.mgmt_deployer.port))
+            },
+            'hosts': hosts_details
+        }
+        register_details = [
+            {"key": "hosts", "value": kvm_hosts_csv},
+            {"key": "extension_details", "value": json.dumps(ext_details_obj)}
+        ]
         self.extension.register(
             self.apiclient,
             self.physical_network.id,
@@ -1302,5 +1359,4 @@ class TestExternalNetworkProvider(cloudstackTestCase):
         self.extension = None
         self.physical_network = None
         self.logger.info("Extension deleted after unregister — delete restriction test PASSED")
-
 
