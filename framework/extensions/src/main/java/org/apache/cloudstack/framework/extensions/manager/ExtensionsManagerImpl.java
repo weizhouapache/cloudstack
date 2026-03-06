@@ -2072,6 +2072,95 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    public boolean start() {
+        long pathStateCheckInterval = PathStateCheckInterval.value();
+        long pathStateCheckInitialDelay = Math.min(60, pathStateCheckInterval);
+        logger.debug("Scheduling extensions path state check task with initial delay={}s and interval={}s",
+                pathStateCheckInitialDelay, pathStateCheckInterval);
+        extensionPathStateCheckExecutor.scheduleWithFixedDelay(new PathStateCheckWorker(),
+                pathStateCheckInitialDelay, pathStateCheckInterval, TimeUnit.SECONDS);
+        return true;
+    }
+
+    @Override
+    public boolean configure(String name, Map<String, Object> params) throws ConfigurationException {
+        try {
+            extensionPathStateCheckExecutor = Executors.newScheduledThreadPool(1,
+                    new NamedThreadFactory("Extension-Path-State-Check"));
+        } catch (final Exception e) {
+            throw new ConfigurationException("Unable to to configure ExtensionsManagerImpl");
+        }
+        return true;
+    }
+
+    @Override
+    public List<Class<?>> getCommands() {
+        List<Class<?>> cmds = new ArrayList<>();
+        cmds.add(AddCustomActionCmd.class);
+        cmds.add(ListCustomActionCmd.class);
+        cmds.add(DeleteCustomActionCmd.class);
+        cmds.add(UpdateCustomActionCmd.class);
+        cmds.add(RunCustomActionCmd.class);
+
+        cmds.add(CreateExtensionCmd.class);
+        cmds.add(ListExtensionsCmd.class);
+        cmds.add(DeleteExtensionCmd.class);
+        cmds.add(UpdateExtensionCmd.class);
+        cmds.add(RegisterExtensionCmd.class);
+        cmds.add(UnregisterExtensionCmd.class);
+        return cmds;
+    }
+
+    @Override
+    public String getConfigComponentName() {
+        return ExtensionsManager.class.getSimpleName();
+    }
+
+    @Override
+    public ConfigKey<?>[] getConfigKeys() {
+        return new ConfigKey[]{
+                PathStateCheckInterval
+        };
+    }
+
+    public class PathStateCheckWorker extends ManagedContextRunnable {
+
+        protected void runCheckUsingLongestRunningManagementServer() {
+            try {
+                List<ManagementServerHostVO> msHosts = managementServerHostDao.listBy(ManagementServerHost.State.Up);
+                msHosts.sort(Comparator.comparingLong(ManagementServerHostVO::getRunid));
+                ManagementServerHostVO msHost = msHosts.remove(0);
+                if (msHost == null || (msHost.getMsid() != ManagementServerNode.getManagementServerId())) {
+                    logger.debug("Skipping the extensions path state check on this management server");
+                    return;
+                }
+                List<ExtensionVO> extensions = extensionDao.listAll();
+                for (ExtensionVO extension : extensions) {
+                    checkExtensionPathState(extension, msHosts);
+                }
+            } catch (Exception e) {
+                logger.warn("Extensions path state check failed", e);
+            }
+        }
+
+        @Override
+        protected void runInContext() {
+            GlobalLock gcLock = GlobalLock.getInternLock("ExtensionPathStateCheck");
+            try {
+                if (gcLock.lock(3)) {
+                    try {
+                        runCheckUsingLongestRunningManagementServer();
+                    } finally {
+                        gcLock.unlock();
+                    }
+                }
+            } finally {
+                gcLock.releaseRef();
+            }
+        }
+    }
+
+    @Override
     public String getExtensionScriptPath(Extension extension) {
         if (extension == null) {
             return null;
@@ -2082,50 +2171,6 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     @Override
     public Map<String, String> getExtensionDetails(long extensionId) {
         return extensionDetailsDao.listDetailsKeyPairs(extensionId);
-    }
-
-    /** Find map entry for a given physicalNetworkId + extensionId combination. */
-    private ExtensionResourceMapVO findMapForPhysicalNetworkAndExtension(long physicalNetworkId, long extensionId) {
-        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(physicalNetworkId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork);
-        if (maps == null) return null;
-        for (ExtensionResourceMapVO m : maps) {
-            if (m.getExtensionId() == extensionId) return m;
-        }
-        return null;
-    }
-
-    /** Find the first map entry for a given physicalNetworkId. */
-    private ExtensionResourceMapVO findFirstMapForPhysicalNetwork(long physicalNetworkId) {
-        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(physicalNetworkId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork);
-        return (maps != null && !maps.isEmpty()) ? maps.get(0) : null;
-    }
-
-    @Override
-    public Map<String, String> getResourceMapDetailsForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = findFirstMapForPhysicalNetwork(physicalNetworkId);
-        if (map == null) {
-            return new HashMap<>();
-        }
-        Map<String, String> details = extensionResourceMapDetailsDao.listDetailsKeyPairs(map.getId(), true);
-        return details != null ? details : new HashMap<>();
-    }
-
-    @Override
-    public Map<String, String> getAllResourceMapDetailsForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = findFirstMapForPhysicalNetwork(physicalNetworkId);
-        if (map == null) {
-            return new HashMap<>();
-        }
-        Map<String, String> details = extensionResourceMapDetailsDao.listDetailsKeyPairs(map.getId());
-        return details != null ? details : new HashMap<>();
-    }
-
-    @Override
-    public Long getResourceMapIdForPhysicalNetwork(long physicalNetworkId) {
-        ExtensionResourceMapVO map = findFirstMapForPhysicalNetwork(physicalNetworkId);
-        return map != null ? map.getId() : null;
     }
 
     @Override
@@ -2226,204 +2271,20 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
-    public NetworkElement getNetworkElementForProvider(String providerName) {
-        return null;
-    }
-
-    @Override
-    public Map<Service, Map<Capability, String>> getNetworkCapabilitiesForProvider(
-            Long physicalNetworkId, String providerName) {
-        Extension extension = null;
-        if (physicalNetworkId != null) {
-            extension = getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
-            if (extension == null) {
-                extension = getExtensionForPhysicalNetwork(physicalNetworkId);
-            }
-        } else {
-            // search across all physical networks
-            List<Long> physNetIds = listPhysicalNetworkIdsWithExtension();
-            for (Long physNetId : physNetIds) {
-                extension = getExtensionForPhysicalNetworkAndProvider(physNetId, providerName);
-                if (extension != null) {
-                    break;
-                }
+    public List<Extension> listExtensionsByType(Extension.Type type) {
+        if (type == null) {
+            return new ArrayList<>();
+        }
+        List<ExtensionVO> extensions = extensionDao.listAll();
+        List<Extension> result = new ArrayList<>();
+        if (extensions == null || extensions.isEmpty()) {
+            return result;
+        }
+        for (ExtensionVO ext : extensions) {
+            if (ext != null && type.equals(ext.getType())) {
+                result.add(ext);
             }
         }
-        return parseNetworkCapabilitiesForExtension(extension);
-    }
-
-    /**
-     * Parses the {@code network.capabilities} JSON detail of the given extension into a
-     * {@code Service → (Capability → value)} map. Returns {@link #buildDefaultNetworkCapabilities()}
-     * if the extension is null or has no detail.
-     */
-    private Map<Service, Map<Capability, String>> parseNetworkCapabilitiesForExtension(Extension extension) {
-        if (extension == null) {
-            return buildDefaultNetworkCapabilities();
-        }
-        Map<String, String> details = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
-        if (details == null || !details.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
-            return buildDefaultNetworkCapabilities();
-        }
-        String json = details.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY);
-        return parseNetworkCapabilitiesJson(json);
-    }
-
-    /**
-     * Builds the default network capabilities (SourceNat, StaticNat, PortForwarding, Firewall, Gateway).
-     */
-    private Map<Service, Map<Capability, String>> buildDefaultNetworkCapabilities() {
-        Map<Service, Map<Capability, String>> caps = new HashMap<>();
-        Map<Capability, String> sourceNatCaps = new HashMap<>();
-        sourceNatCaps.put(Capability.SupportedSourceNatTypes, "peraccount");
-        sourceNatCaps.put(Capability.RedundantRouter, "false");
-        caps.put(Service.SourceNat, sourceNatCaps);
-        caps.put(Service.StaticNat, new HashMap<>());
-        caps.put(Service.PortForwarding, new HashMap<>());
-        Map<Capability, String> firewallCaps = new HashMap<>();
-        firewallCaps.put(Capability.TrafficStatistics, "per public ip");
-        caps.put(Service.Firewall, firewallCaps);
-        caps.put(Service.Gateway, new HashMap<>());
-        return caps;
-    }
-
-    /**
-     * Parses the network capabilities JSON string.
-     * <p>Expected format:</p>
-     * <pre>
-     * {
-     *   "services": ["SourceNat", "StaticNat", ...],
-     *   "capabilities": {
-     *     "SourceNat": { "SupportedSourceNatTypes": "peraccount" },
-     *     ...
-     *   }
-     * }
-     * </pre>
-     */
-    Map<Service, Map<Capability, String>> parseNetworkCapabilitiesJson(String json) {
-        if (StringUtils.isBlank(json)) {
-            return null; // caller should use default
-        }
-        Map<Service, Map<Capability, String>> caps = new HashMap<>();
-        try {
-            com.google.gson.JsonObject root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
-            com.google.gson.JsonArray servicesArray = root.getAsJsonArray("services");
-            if (servicesArray == null || servicesArray.isEmpty()) {
-                return null;
-            }
-            com.google.gson.JsonObject capabilitiesObj = root.has("capabilities") ?
-                    root.getAsJsonObject("capabilities") : new com.google.gson.JsonObject();
-            for (com.google.gson.JsonElement svcElem : servicesArray) {
-                String svcName = svcElem.getAsString();
-                Service service = Service.getService(svcName);
-                if (service == null) {
-                    continue;
-                }
-                Map<Capability, String> svcCaps = new HashMap<>();
-                if (capabilitiesObj.has(svcName)) {
-                    com.google.gson.JsonObject svcCapsObj = capabilitiesObj.getAsJsonObject(svcName);
-                    for (Map.Entry<String, com.google.gson.JsonElement> entry : svcCapsObj.entrySet()) {
-                        Capability cap = Capability.getCapability(entry.getKey());
-                        if (cap != null) {
-                            svcCaps.put(cap, entry.getValue().getAsString());
-                        }
-                    }
-                }
-                caps.put(service, svcCaps);
-            }
-            return caps;
-        } catch (Exception e) {
-            logger.warn("Failed to parse network.capabilities JSON: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    @Override
-    public boolean start() {
-        long pathStateCheckInterval = PathStateCheckInterval.value();
-        long pathStateCheckInitialDelay = Math.min(60, pathStateCheckInterval);
-        logger.debug("Scheduling extensions path state check task with initial delay={}s and interval={}s",
-                pathStateCheckInitialDelay, pathStateCheckInterval);
-        extensionPathStateCheckExecutor.scheduleWithFixedDelay(new PathStateCheckWorker(),
-                pathStateCheckInitialDelay, pathStateCheckInterval, TimeUnit.SECONDS);
-        return true;
-    }
-
-    @Override
-    public boolean configure(String name, Map<String, Object> params) throws ConfigurationException {
-        try {
-            extensionPathStateCheckExecutor = Executors.newScheduledThreadPool(1,
-                    new NamedThreadFactory("Extension-Path-State-Check"));
-        } catch (final Exception e) {
-            throw new ConfigurationException("Unable to to configure ExtensionsManagerImpl");
-        }
-        return true;
-    }
-
-    @Override
-    public List<Class<?>> getCommands() {
-        List<Class<?>> cmds = new ArrayList<>();
-        cmds.add(AddCustomActionCmd.class);
-        cmds.add(ListCustomActionCmd.class);
-        cmds.add(DeleteCustomActionCmd.class);
-        cmds.add(UpdateCustomActionCmd.class);
-        cmds.add(RunCustomActionCmd.class);
-
-        cmds.add(CreateExtensionCmd.class);
-        cmds.add(ListExtensionsCmd.class);
-        cmds.add(DeleteExtensionCmd.class);
-        cmds.add(UpdateExtensionCmd.class);
-        cmds.add(RegisterExtensionCmd.class);
-        cmds.add(UnregisterExtensionCmd.class);
-        return cmds;
-    }
-
-    @Override
-    public String getConfigComponentName() {
-        return ExtensionsManager.class.getSimpleName();
-    }
-
-    @Override
-    public ConfigKey<?>[] getConfigKeys() {
-        return new ConfigKey[]{
-                PathStateCheckInterval
-        };
-    }
-
-    public class PathStateCheckWorker extends ManagedContextRunnable {
-
-        protected void runCheckUsingLongestRunningManagementServer() {
-            try {
-                List<ManagementServerHostVO> msHosts = managementServerHostDao.listBy(ManagementServerHost.State.Up);
-                msHosts.sort(Comparator.comparingLong(ManagementServerHostVO::getRunid));
-                ManagementServerHostVO msHost = msHosts.remove(0);
-                if (msHost == null || (msHost.getMsid() != ManagementServerNode.getManagementServerId())) {
-                    logger.debug("Skipping the extensions path state check on this management server");
-                    return;
-                }
-                List<ExtensionVO> extensions = extensionDao.listAll();
-                for (ExtensionVO extension : extensions) {
-                    checkExtensionPathState(extension, msHosts);
-                }
-            } catch (Exception e) {
-                logger.warn("Extensions path state check failed", e);
-            }
-        }
-
-        @Override
-        protected void runInContext() {
-            GlobalLock gcLock = GlobalLock.getInternLock("ExtensionPathStateCheck");
-            try {
-                if (gcLock.lock(3)) {
-                    try {
-                        runCheckUsingLongestRunningManagementServer();
-                    } finally {
-                        gcLock.unlock();
-                    }
-                }
-            } finally {
-                gcLock.releaseRef();
-            }
-        }
+        return result;
     }
 }

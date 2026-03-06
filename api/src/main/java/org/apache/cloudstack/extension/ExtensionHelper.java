@@ -22,7 +22,6 @@ import java.util.Map;
 
 import com.cloud.network.Network.Capability;
 import com.cloud.network.Network.Service;
-import com.cloud.network.element.NetworkElement;
 
 public interface ExtensionHelper {
 
@@ -138,7 +137,15 @@ public interface ExtensionHelper {
      */
     boolean isNetworkExtensionProvider(String providerName);
 
-    NetworkElement getNetworkElementForProvider(String providerName);
+    /**
+     * List all registered extensions filtered by extension {@link Extension.Type}.
+     * Useful for callers that need to discover available providers of a given
+     * type (e.g. Orchestrator, NetworkOrchestrator).
+     *
+     * @param type extension type to filter by
+     * @return list of matching {@link Extension} instances (empty list if none)
+     */
+    List<Extension> listExtensionsByType(Extension.Type type);
 
     /**
      * Returns the effective {@link Service} → ({@link Capability} → value) capabilities

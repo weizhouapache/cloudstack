@@ -24,16 +24,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
@@ -125,7 +121,7 @@ import com.cloud.vm.VirtualMachineProfile;
  * {@code hosts} list in the physical-network details), checks it is reachable,
  * and prints a JSON object to stdout.  CloudStack stores this verbatim in
  * {@code network_details} under key {@value #NETWORK_DETAIL_EXTENSION_DETAILS}
- * and forwards it on every subsequent call as {@value #ENV_EXTENSION_DETAILS}.
+ * and forwards it on every subsequent call as {@value #ARG_NETWORK_EXTENSION_DETAILS}.
  *
  * <p>Example per-network details (KVM-namespace backend):</p>
  * <pre>{"host":"192.168.1.10","namespace":"cs-net-42"}</pre>
@@ -171,20 +167,13 @@ public class NetworkExtensionElement extends AdapterBase implements
     @Inject
     private IpAddressManager ipAddressManager;
 
-    // ---- Environment variable names ----
+    // ---- Script argument names ----
 
-    /**
-     * Environment variable carrying the physical-network extension details as a
-     * JSON object (all {@code extension_resource_map_details} merged).
-     * The script owns the schema; no keys are pre-defined by CloudStack.
-     */
-    public static final String ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS = "CS_PHYSICAL_NETWORK_EXTENSION_DETAILS";
+    /** CLI argument carrying physical-network extension details as a JSON object. */
+    public static final String ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS = "--physical-network-extension-details";
 
-    /**
-     * Environment variable carrying the per-network opaque JSON blob stored
-     * under key {@value #NETWORK_DETAIL_EXTENSION_DETAILS}.
-     */
-    public static final String ENV_EXTENSION_DETAILS = "CS_NETWORK_EXTENSION_DETAILS";
+    /** CLI argument carrying per-network opaque JSON blob. */
+    public static final String ARG_NETWORK_EXTENSION_DETAILS = "--network-extension-details";
 
     // ---- Network detail key ----
 
@@ -195,13 +184,6 @@ public class NetworkExtensionElement extends AdapterBase implements
      * namespace name, VRF ID, …).
      */
     public static final String NETWORK_DETAIL_EXTENSION_DETAILS = "ext.details";
-
-    // ---- Provider-name initialisation ----
-
-    public void initWithProviderName(String providerName) {
-        this.providerName = providerName;
-        logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
-    }
 
     public String getProviderName() {
         return providerName;
@@ -219,6 +201,8 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.networkDetailsDao = this.networkDetailsDao;
         copy.ipAddressManager  = this.ipAddressManager;
         copy.providerName      = providerName;
+
+        logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
         return copy;
     }
 
@@ -227,116 +211,6 @@ public class NetworkExtensionElement extends AdapterBase implements
     @Override
     public Map<Service, Map<Capability, String>> getCapabilities() {
         return DEFAULT_CAPABILITIES;
-    }
-
-    public Map<Service, Map<Capability, String>> getCapabilitiesFromExtension(long extensionId) {
-        Map<String, String> details = extensionHelper.getExtensionDetails(extensionId);
-        if (details == null || !details.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
-            return DEFAULT_CAPABILITIES;
-        }
-        return parseNetworkCapabilitiesJson(details.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY));
-    }
-
-    public Map<Service, Map<Capability, String>> getCapabilitiesForPhysicalNetwork(long physicalNetworkId) {
-        Extension extension = providerName != null
-                ? extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName)
-                : extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
-        if (extension == null) {
-            return DEFAULT_CAPABILITIES;
-        }
-        Map<Service, Map<Capability, String>> extCaps = getCapabilitiesFromExtension(extension.getId());
-        Map<String, String> resourceMapDetails = extensionHelper.getResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
-        String servicesValue = resourceMapDetails != null ? resourceMapDetails.get("services") : null;
-        if (servicesValue == null || servicesValue.isBlank()) {
-            return extCaps;
-        }
-        Set<String> enabledServiceNames = new HashSet<>(parseServicesList(servicesValue));
-        if (enabledServiceNames.isEmpty()) {
-            return extCaps;
-        }
-        Map<Service, Map<Capability, String>> filtered = new HashMap<>();
-        for (Map.Entry<Service, Map<Capability, String>> entry : extCaps.entrySet()) {
-            if (enabledServiceNames.contains(entry.getKey().getName())) {
-                filtered.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return filtered.isEmpty() ? extCaps : filtered;
-    }
-
-    public Map<Service, Map<Capability, String>> getCapabilitiesForProvider(long physicalNetworkId, String provider) {
-        if (provider == null || provider.isBlank()) {
-            provider = this.providerName;
-        }
-        if (provider == null || provider.isBlank()) {
-            return DEFAULT_CAPABILITIES;
-        }
-        Extension extension = extensionHelper.getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, provider);
-        if (extension == null) {
-            extension = extensionHelper.getExtensionForPhysicalNetwork(physicalNetworkId);
-        }
-        if (extension == null) {
-            return DEFAULT_CAPABILITIES;
-        }
-        return getCapabilitiesFromExtension(extension.getId());
-    }
-
-    private List<String> parseServicesList(String value) {
-        if (value == null || value.isBlank()) {
-            return List.of();
-        }
-        value = value.trim();
-        if (value.startsWith("[")) {
-            try {
-                JsonArray arr = JsonParser.parseString(value).getAsJsonArray();
-                List<String> result = new ArrayList<>();
-                for (JsonElement el : arr) {
-                    result.add(el.getAsString().trim());
-                }
-                return result;
-            } catch (Exception ignored) {
-                // fall through to comma-split
-            }
-        }
-        return Arrays.stream(value.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
-    }
-
-    protected static Map<Service, Map<Capability, String>> parseNetworkCapabilitiesJson(String json) {
-        Map<Service, Map<Capability, String>> caps = new HashMap<>();
-        if (json == null || json.isBlank()) {
-            return DEFAULT_CAPABILITIES;
-        }
-        try {
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            JsonArray servicesArray = root.getAsJsonArray("services");
-            if (servicesArray == null || servicesArray.isEmpty()) {
-                return DEFAULT_CAPABILITIES;
-            }
-            JsonObject capabilitiesObj = root.has("capabilities")
-                    ? root.getAsJsonObject("capabilities") : new JsonObject();
-            for (JsonElement svcElem : servicesArray) {
-                String svcName = svcElem.getAsString();
-                Service service = Service.getService(svcName);
-                if (service == null) {
-                    continue;
-                }
-                Map<Capability, String> svcCaps = new HashMap<>();
-                if (capabilitiesObj.has(svcName)) {
-                    for (Map.Entry<String, JsonElement> e : capabilitiesObj.getAsJsonObject(svcName).entrySet()) {
-                        Capability cap = Capability.getCapability(e.getKey());
-                        if (cap != null) {
-                            svcCaps.put(cap, e.getValue().getAsString());
-                        }
-                    }
-                }
-                caps.put(service, svcCaps);
-            }
-            return caps;
-        } catch (Exception e) {
-            return DEFAULT_CAPABILITIES;
-        }
     }
 
     @Override
@@ -527,17 +401,17 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     /**
      * Calls the network-extension.sh script with {@code ensure-network-device} before
-     * every network operation.  The script verifies the previously selected
+     * the first network operation.  The script verifies the previously selected
      * device is reachable (using the {@code hosts} list in the physical-network
      * extension details) and performs failover if needed.  The returned JSON is
      * persisted in {@code network_details} and forwarded to all subsequent calls
-     * as {@value #ENV_EXTENSION_DETAILS}.
+     * as the {@value #ARG_NETWORK_EXTENSION_DETAILS} argument.
      *
-     * <p>The script receives both JSON blobs:
+     * <p>The script receives both JSON blobs as named CLI arguments:</p>
      * <ul>
-     *   <li>{@value #ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS} – all physical-network
+     *   <li>{@value #ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS} – all physical-network
      *       registration details (includes {@code hosts}, credentials, etc.)</li>
-     *   <li>{@value #ENV_EXTENSION_DETAILS} – current per-network details
+     *   <li>{@value #ARG_NETWORK_EXTENSION_DETAILS} – current per-network details
      *       ({@code {}}) on first call)</li>
      * </ul>
      * and {@code --current-details} as a CLI argument so the script can
@@ -553,6 +427,8 @@ public class NetworkExtensionElement extends AdapterBase implements
         Extension extension = resolveExtension(network);
         File scriptFile = resolveScriptFile(network, extension);
 
+        String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
+
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
         cmdLine.add("ensure-network-device");
@@ -564,14 +440,18 @@ public class NetworkExtensionElement extends AdapterBase implements
         cmdLine.add(String.valueOf(network.getDataCenterId()));
         cmdLine.add("--current-details");
         cmdLine.add(currentDetails);
+        cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(physicalNetworkDetailsJson);
+        cmdLine.add(ARG_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(currentDetails);
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
             pb.redirectErrorStream(true);
             Map<String, String> env = pb.environment();
             env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-            injectPhysicalNetworkExtensionDetailsEnv(env, network.getPhysicalNetworkId(), extension);
-            env.put(ENV_EXTENSION_DETAILS, currentDetails);
+
+            Process process = pb.start();
 
             Process process = pb.start();
             String output = new String(process.getInputStream().readAllBytes()).trim();
@@ -710,14 +590,14 @@ public class NetworkExtensionElement extends AdapterBase implements
     /**
      * Executes the network-extension.sh script with the given command and arguments.
      *
-     * <p>Two environment variables are always injected:</p>
+     * <p>Two JSON blobs are always appended as named CLI arguments:</p>
      * <ul>
-     *   <li>{@value #ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS} – JSON object
-     *       built from all {@code extension_resource_map_details} for this
-     *       extension on the physical network.  Sensitive keys (password,
-     *       sshkey) are included but redacted in log output.</li>
-     *   <li>{@value #ENV_EXTENSION_DETAILS} – the per-network JSON blob from
-     *       {@code network_details} ({@code {}} if not yet set).</li>
+     *   <li>{@value #ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS} {@code <json>} – all
+     *       {@code extension_resource_map_details} for this extension on the physical
+     *       network.  Sensitive keys (password, sshkey) are included but redacted in
+     *       log output.</li>
+     *   <li>{@value #ARG_NETWORK_EXTENSION_DETAILS} {@code <json>} – the per-network
+     *       JSON blob from {@code network_details} ({@code {}} if not yet set).</li>
      * </ul>
      */
     protected boolean executeScript(Network network, String command, String... args) {
@@ -737,8 +617,6 @@ public class NetworkExtensionElement extends AdapterBase implements
             Map<String, String> env = pb.environment();
             env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
-            injectPhysicalNetworkExtensionDetailsEnv(env, network.getPhysicalNetworkId(), extension);
-            injectNetworkExtensionDetailsEnv(env, network.getId());
 
             Process process = pb.start();
             byte[] output = process.getInputStream().readAllBytes();
@@ -759,59 +637,63 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
     }
 
+    // ---- Detail helpers ----
+
     /**
-     * Builds a JSON object from all {@code extension_resource_map_details} for
-     * the given extension on the physical network and injects it as
-     * {@value #ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS}.
-     *
-     * <p>All keys are included.  Sensitive keys ({@code password}, {@code sshkey})
-     * are present in the JSON passed to the script but are redacted in log output.</p>
+     * Returns all {@code extension_resource_map_details} for the given extension
+     * on the physical network as a plain map.
      */
-    protected void injectPhysicalNetworkExtensionDetailsEnv(Map<String, String> env,
-            Long physicalNetworkId, Extension extension) {
+    private Map<String, String> buildPhysicalNetworkDetailsMap(Long physicalNetworkId, Extension extension) {
         if (physicalNetworkId == null) {
-            env.put(ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS, "{}");
-            return;
+            return new HashMap<>();
         }
         Map<String, String> details = extension != null
                 ? extensionHelper.getAllResourceMapDetailsForExtensionOnPhysicalNetwork(
                         physicalNetworkId, extension.getId())
                 : extensionHelper.getAllResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
-
-        String json = buildJsonFromMap(details);
-        env.put(ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS, json);
-
-        // Log all keys but redact sensitive values
-        if (logger.isDebugEnabled()) {
-            if (details != null) {
-                for (String key : details.keySet()) {
-                    if (SENSITIVE_KEYS.contains(key.toLowerCase())) {
-                        logger.debug("  {}[{}]=<redacted>", ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS, key);
-                    } else {
-                        logger.debug("  {}[{}]={}", ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS, key, details.get(key));
-                    }
-                }
-            }
-        }
+        return details != null ? details : new HashMap<>();
     }
 
     /**
-     * Reads the per-network JSON blob from {@code network_details} and injects
-     * it as {@value #ENV_EXTENSION_DETAILS} ({@code {}} if not yet set).
+     * Serialises the physical-network extension details to a compact JSON object string.
      */
-    protected void injectNetworkExtensionDetailsEnv(Map<String, String> env, long networkId) {
-        Map<String, String> networkDetails = networkDetailsDao.listDetailsKeyPairs(networkId);
-        String details = networkDetails != null
-                ? networkDetails.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
-        env.put(ENV_EXTENSION_DETAILS, details);
-        logger.debug("  {}={}", ENV_EXTENSION_DETAILS, details);
+    private String buildPhysicalNetworkDetailsJson(Long physicalNetworkId, Extension extension) {
+        return mapToJson(buildPhysicalNetworkDetailsMap(physicalNetworkId, extension));
     }
 
     /**
-     * Serialises a {@code Map<String, String>} to a JSON object string.
+     * Reads the per-network JSON blob from {@code network_details}
+     * (returns {@code {}} if not yet set).
+     */
+    private String getNetworkExtensionDetailsJson(long networkId) {
+        Map<String, String> networkDetails = networkDetailsDao.listDetailsKeyPairs(networkId);
+        return networkDetails != null
+                ? networkDetails.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
+    }
+
+    /**
+     * Returns a set-string of all keys, with sensitive values replaced by
+     * {@code <redacted>} for log output.
+     */
+    private String redactedKeys(Map<String, String> map) {
+        if (map == null || map.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (String key : map.keySet()) {
+            sb.append(SENSITIVE_KEYS.contains(key.toLowerCase()) ? key + "=<redacted>" : key);
+            sb.append(",");
+        }
+        if (sb.length() > 1) sb.setLength(sb.length() - 1);
+        sb.append("]");
+        return sb.toString();
+    }
+
+    /**
+     * Serialises a {@code Map<String, String>} to a compact JSON object string.
      * Returns {@code {}} for null or empty maps.
      */
-    private String buildJsonFromMap(Map<String, String> map) {
+    private String mapToJson(Map<String, String> map) {
         if (map == null || map.isEmpty()) {
             return "{}";
         }
@@ -839,6 +721,9 @@ public class NetworkExtensionElement extends AdapterBase implements
         Extension extension = resolveExtension(network);
         File scriptFile = resolveScriptFile(network, extension);
 
+        String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
+        String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
+
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
         cmdLine.add("custom-action");
@@ -846,6 +731,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         cmdLine.add(String.valueOf(network.getId()));
         cmdLine.add("--action");
         cmdLine.add(actionName);
+        cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(physicalNetworkDetailsJson);
+        cmdLine.add(ARG_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(networkExtensionDetailsJson);
 
         logger.info("Running custom action '{}' on network {} (extension: {})",
                 actionName, network.getId(), extension != null ? extension.getName() : "unknown");
@@ -855,9 +744,6 @@ public class NetworkExtensionElement extends AdapterBase implements
             pb.redirectErrorStream(true);
             Map<String, String> env = pb.environment();
             env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-
-            injectPhysicalNetworkExtensionDetailsEnv(env, network.getPhysicalNetworkId(), extension);
-            injectNetworkExtensionDetailsEnv(env, network.getId());
 
             if (parameters != null) {
                 for (Map.Entry<String, Object> entry : parameters.entrySet()) {
