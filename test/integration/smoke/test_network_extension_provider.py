@@ -543,13 +543,12 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
             "displaytext":       "ExtNet smoke-test offering",
             "guestiptype":       "Isolated",
             "traffictype":       "GUEST",
-            "supportedservices": "SourceNat,StaticNat,PortForwarding,Firewall,Gateway",
+            "supportedservices": "SourceNat,StaticNat,PortForwarding,Firewall",
             "serviceProviderList": {
                 "SourceNat":      ext_name,
                 "StaticNat":      ext_name,
                 "PortForwarding": ext_name,
                 "Firewall":       ext_name,
-                "Gateway":        ext_name,
             },
             "serviceCapabilityList": {
                 "SourceNat": {"SupportedSourceNatTypes": "peraccount"},
