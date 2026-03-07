@@ -1,0 +1,870 @@
+# NetworkExtension for Apache CloudStack
+
+This directory contains the **NetworkExtension** `NetworkOrchestrator` extension —
+a CloudStack plugin that delegates all network operations to an external device
+over SSH.  The device can be a Linux server (using network namespaces,
+bridges, and iptables), a network appliance that accepts SSH commands, or any
+other host that can run the `network-extension-wrapper.sh` (or a compatible
+script) to perform network configurations.
+
+The extension is implemented in
+`framework/extensions/src/main/java/org/apache/cloudstack/framework/extensions/network/NetworkExtensionElement.java`
+and loaded automatically by the management server — **no separate plugin JAR is
+required**.
+
+---
+
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Directory contents](#directory-contents)
+3. [How it works](#how-it-works)
+4. [Installation](#installation)
+   - [Management server](#management-server)
+   - [Remote network device](#remote-network-device)
+5. [Step-by-step API setup](#step-by-step-api-setup)
+   - [1. Create the extension](#1-create-the-extension)
+   - [2. Register the extension with a physical network](#2-register-the-extension-with-a-physical-network)
+   - [3. Create a network offering](#3-create-a-network-offering)
+   - [4. Create an isolated network](#4-create-an-isolated-network)
+   - [5. Acquire a public IP and enable Source NAT](#5-acquire-a-public-ip-and-enable-source-nat)
+   - [6. Enable / disable Static NAT](#6-enable--disable-static-nat)
+   - [7. Add / delete Port Forwarding](#7-add--delete-port-forwarding)
+   - [8. Delete the network](#8-delete-the-network)
+   - [9. Unregister and delete the extension](#9-unregister-and-delete-the-extension)
+6. [Multiple extensions on the same physical network](#multiple-extensions-on-the-same-physical-network)
+7. [Wrapper script operations reference](#wrapper-script-operations-reference)
+8. [CLI argument reference](#cli-argument-reference)
+9. [Custom actions](#custom-actions)
+10. [Developer / testing notes](#developer--testing-notes)
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  CloudStack Management Server                            │
+│                                                          │
+│  NetworkExtensionElement.java                            │
+│      │ executes (path resolved from Extension record)    │
+│      ▼                                                   │
+│  /etc/cloudstack/extensions/<ext-name>/                  │
+│      network-extension.sh                                │
+│  (this directory, deployed during installation)          │
+└──────────────────────┬───────────────────────────────────┘
+                       │ SSH (host : port from extension details)
+                       │ credentials from extension_resource_map_details
+                       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Remote Network Device  (Linux server / appliance)       │
+│                                                          │
+│  ip netns exec <namespace>                               │
+│      network-extension-wrapper.sh <command> [args...]    │
+│                                                          │
+│  Operations performed inside the namespace:              │
+│    • VLAN sub-interface + Linux bridge creation          │
+│    • iptables SNAT  (source NAT / masquerade)            │
+│    • iptables DNAT  (static NAT, port forwarding)        │
+│    • iptables FORWARD rules                              │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Key design principles:**
+
+* The `network-extension.sh` script runs on the **management server**.  All
+  connection details (`host`, `port`, `username`, `sshkey`, etc.) are passed as
+  two named CLI arguments injected by `NetworkExtensionElement` — the script
+  itself is completely generic and requires no local configuration.
+* The `network-extension-wrapper.sh` script runs on the **remote device** inside
+  a network namespace.  It performs the actual iptables and bridge operations.
+* The two scripts are intentionally decoupled: you can replace either script
+  with a custom implementation (Python, Go, etc.) as long as the interface
+  contract (arguments and exit codes) is maintained.  The script can be any
+  executable — shell script, Python script, compiled binary, etc.
+* The **extension name** is used as the **Network Service Provider (NSP) name**.
+  This means multiple different NetworkExtension extensions can be registered to
+  the same physical network, each appearing as its own named provider.
+
+---
+
+## Directory contents
+
+| File | Installed location | Purpose |
+|------|--------------------|---------|
+| `network-extension.sh` | management server | SSH proxy — executed by `NetworkExtensionElement` |
+| `network-extension-wrapper.sh` | remote network device | Performs iptables / bridge operations |
+| `README.md` | — | This documentation |
+
+> **Source tree paths:**
+> * `network-extension.sh` → `extensions/network-extension/network-extension.sh`
+> * `network-extension-wrapper.sh` → `extensions/network-extension/network-extension-wrapper.sh`
+
+---
+
+## How it works
+
+### Lifecycle of a CloudStack network operation
+
+1. **CloudStack** decides that a network operation must be applied (e.g.
+   `implement`, `addStaticNat`, `applyPortForwardingRules`).
+2. **`NetworkExtensionElement`** (Java) resolves the extension that is registered
+   on the physical network whose name matches the network's service provider.  It
+   reads all device details stored in `extension_resource_map_details`.
+3. `NetworkExtensionElement` builds a command line:
+   ```
+   <extension_path>/network-extension.sh <command> --network-id <id> [--vlan V] [--gateway G] ...
+       --physical-network-extension-details '<json>'
+       --network-extension-details '<json>'
+   ```
+   Both JSON blobs are always appended as named CLI arguments:
+   * `--physical-network-extension-details` — JSON object with all physical-network
+     registration details (hosts, port, username, sshkey, …)
+   * `--network-extension-details` — per-network JSON blob (selected host, namespace, …)
+4. **`network-extension.sh`** parses those CLI arguments, writes the SSH
+   private key to a temporary file (if `sshkey` is set in the physical-network
+   details), then SSHes to the remote host and runs the wrapper script with both
+   JSON blobs forwarded as CLI arguments.
+5. **`network-extension-wrapper.sh`** parses the CLI arguments and executes the
+   requested operation using `ip link`, `iptables`, `ip addr`, etc. inside the
+   network namespace.
+6. Exit code `0` = success; any non-zero exit causes CloudStack to treat the
+   operation as failed.
+
+### Authentication priority (network-extension.sh)
+
+1. `sshkey` field in `--physical-network-extension-details` — PEM key written
+   to a temp file, used with `ssh -i`.  **Preferred** — the temp file is deleted
+   on exit.
+2. `password` field — passed to `sshpass(1)` if available.
+3. Neither set — relies on the SSH agent or host key on the management server.
+
+---
+
+## Installation
+
+### Management server
+
+During package installation the `network-extension.sh` script is deployed to:
+
+```
+/etc/cloudstack/extensions/<extension-name>/network-extension.sh
+```
+
+In **developer mode** the extensions directory defaults to `extensions/` relative
+to the repo root working directory, so `extensions/network-extension/network-extension.sh`
+is found automatically when `path=network-extension` is set at extension creation
+time (CloudStack looks for `<extensionName>.sh` inside the directory).
+
+### Remote network device
+
+Copy `network-extension-wrapper.sh` to each remote device that will act as the
+network gateway:
+
+```bash
+# From the CloudStack source tree:
+scp extensions/network-extension/network-extension-wrapper.sh \
+    root@<device>:/etc/cloudstack/extensions/network-extension-wrapper.sh
+chmod +x /etc/cloudstack/extensions/network-extension-wrapper.sh
+```
+
+The default path expected by `network-extension.sh` is
+`/etc/cloudstack/extensions/network-extension-wrapper.sh`.
+You can override this per-physical-network by passing a `script_path` detail
+when calling `registerExtension` (see below).
+
+**Prerequisites on the remote device:**
+* `iproute2` (`ip link`, `ip addr`, `ip netns`)
+* `iptables`
+* `sshd` running and reachable from the management server
+* The SSH user must have permission to run `ip` and `iptables` (root or `sudo`)
+
+---
+
+## Step-by-step API setup
+
+All examples below use `cmk` (the CloudStack CLI).  Replace `<zone-uuid>`,
+`<phys-net-uuid>`, etc. with real values from your environment.
+
+### 1. Create the extension
+
+```bash
+cmk createExtension \
+    name=my-extnet \
+    type=NetworkOrchestrator \
+    path=network-extension \
+    "details[0].key=network.capabilities" \
+    "details[0].value={\"services\":[\"SourceNat\",\"StaticNat\",\"PortForwarding\",\"Firewall\",\"Gateway\"],\"capabilities\":{\"SourceNat\":{\"SupportedSourceNatTypes\":\"peraccount\",\"RedundantRouter\":\"false\"},\"Firewall\":{\"TrafficStatistics\":\"per public ip\"}}}"
+```
+
+The `network.capabilities` detail declares which services this extension provides
+and their CloudStack capability values.  These are consulted when listing network
+service providers and when validating network offerings.
+
+**`network.capabilities` JSON format:**
+```json
+{
+  "services": ["SourceNat", "StaticNat", "PortForwarding", "Firewall", "Gateway"],
+  "capabilities": {
+    "SourceNat": {
+      "SupportedSourceNatTypes": "peraccount",
+      "RedundantRouter": "false"
+    },
+    "Firewall": {
+      "TrafficStatistics": "per public ip"
+    }
+  }
+}
+```
+
+Services not listed in `capabilities` (e.g. `StaticNat`, `PortForwarding`,
+`Gateway`) are still offered — CloudStack treats missing capability values as
+"no constraint" and accepts any value when creating the network offering.
+
+If you omit the `network.capabilities` detail entirely, the extension defaults
+to all five services with `SourceNat.SupportedSourceNatTypes=peraccount`.
+
+Verify the extension was created and its state is `Enabled`:
+```bash
+cmk listExtensions name=my-extnet
+```
+
+To enable or disable the extension:
+```bash
+cmk updateExtension id=<ext-uuid> state=Enabled
+cmk updateExtension id=<ext-uuid> state=Disabled
+```
+
+### 2. Register the extension with a physical network
+
+```bash
+cmk registerExtension \
+    id=<extension-uuid> \
+    resourcetype=PhysicalNetwork \
+    resourceid=<phys-net-uuid>
+```
+
+This creates a **Network Service Provider** (NSP) entry named `my-extnet` on the
+physical network and enables it automatically.  The NSP name is the **extension
+name** — not the generic string `NetworkExtension`.
+
+Verify:
+```bash
+cmk listNetworkServiceProviders physicalnetworkid=<phys-net-uuid>
+# → a provider named "my-extnet" should appear in state Enabled
+```
+
+To disable or re-enable the NSP:
+```bash
+cmk updateNetworkServiceProvider id=<nsp-uuid> state=Disabled
+cmk updateNetworkServiceProvider id=<nsp-uuid> state=Enabled
+```
+
+To unregister:
+```bash
+cmk unregisterExtension \
+    id=<extension-uuid> \
+    resourcetype=PhysicalNetwork \
+    resourceid=<phys-net-uuid>
+```
+
+### 3. Create a network offering
+
+Use the **extension name** (`my-extnet`) as the service provider — not the
+generic string `NetworkExtension`:
+
+```bash
+cmk createNetworkOffering \
+    name="My ExtNet Offering" \
+    displaytext="Isolated network via my-extnet" \
+    guestiptype=Isolated \
+    traffictype=GUEST \
+    supportedservices="SourceNat,StaticNat,PortForwarding,Firewall,Gateway" \
+    "serviceProviderList[0].service=SourceNat"      "serviceProviderList[0].provider=my-extnet" \
+    "serviceProviderList[1].service=StaticNat"      "serviceProviderList[1].provider=my-extnet" \
+    "serviceProviderList[2].service=PortForwarding" "serviceProviderList[2].provider=my-extnet" \
+    "serviceProviderList[3].service=Firewall"       "serviceProviderList[3].provider=my-extnet" \
+    "serviceProviderList[4].service=Gateway"        "serviceProviderList[4].provider=my-extnet" \
+    "serviceCapabilityList[0].service=SourceNat" \
+    "serviceCapabilityList[0].capabilitytype=SupportedSourceNatTypes" \
+    "serviceCapabilityList[0].capabilityvalue=peraccount"
+```
+
+Enable the offering:
+```bash
+cmk updateNetworkOffering id=<offering-uuid> state=Enabled
+```
+
+> The `serviceCapabilityList` entries must match the values declared in the
+> extension's `network.capabilities` detail.  If the extension's JSON does not
+> declare a capability value for a service, CloudStack accepts any value (or no
+> value) without error.
+
+### 4. Create an isolated network
+
+```bash
+cmk createNetwork \
+    name=my-network \
+    displaytext="My isolated network" \
+    networkofferingid=<offering-uuid> \
+    zoneid=<zone-uuid>
+```
+
+When a VM is first deployed into this network, CloudStack calls
+`NetworkExtensionElement.implement()`, which triggers the `implement` command:
+
+```bash
+# Management server executes:
+network-extension.sh implement \
+    --network-id 42 \
+    --vlan 100 \
+    --gateway 10.0.1.1 \
+    --cidr 10.0.1.0/24
+
+# network-extension.sh SSHes to device and runs inside the namespace:
+ip netns exec cs-net-prod \
+    /etc/cloudstack/extensions/network-extension-wrapper.sh implement \
+    --network-id 42 \
+    --vlan 100 \
+    --gateway 10.0.1.1 \
+    --cidr 10.0.1.0/24
+```
+
+The wrapper creates a VLAN sub-interface and Linux bridge, assigns the gateway
+IP to the bridge, enables IP forwarding, and creates dedicated per-network
+iptables chains (`CS_EXTNET_42` in `nat` and `CS_EXTNET_FWD_42` in `filter`).
+
+### 5. Acquire a public IP and enable Source NAT
+
+```bash
+cmk associateIpAddress networkid=<network-uuid>
+```
+
+CloudStack calls `applyIps()` which issues `assign-ip` with `--source-nat true`
+for the source-NAT IP:
+
+```bash
+network-extension.sh assign-ip \
+    --network-id 42 \
+    --vlan 100 \
+    --public-ip 203.0.113.10 \
+    --source-nat true \
+    --gateway 10.0.1.1 \
+    --cidr 10.0.1.0/24
+```
+
+The wrapper:
+1. Adds `203.0.113.10/32` as a secondary address on the physical interface.
+2. Adds an iptables SNAT rule: traffic from `10.0.1.0/24` outbound → source `203.0.113.10`.
+3. Adds an iptables FORWARD rule allowing traffic from the guest CIDR to the
+   physical interface.
+
+When the IP is released (via `disassociateIpAddress`), `release-ip` is called,
+which removes all associated rules and the IP address.
+
+### 6. Enable / disable Static NAT
+
+```bash
+# Enable static NAT: map public IP 203.0.113.20 to VM private IP 10.0.1.5
+cmk enableStaticNat \
+    ipaddressid=<public-ip-uuid> \
+    virtualmachineid=<vm-uuid> \
+    networkid=<network-uuid>
+```
+
+CloudStack calls `applyStaticNats()` → `add-static-nat`:
+
+```bash
+network-extension.sh add-static-nat \
+    --network-id 42 \
+    --vlan 100 \
+    --public-ip 203.0.113.20 \
+    --private-ip 10.0.1.5
+```
+
+iptables rules added:
+```bash
+# DNAT inbound
+iptables -t nat -A CS_EXTNET_42 -d 203.0.113.20 -j DNAT --to-destination 10.0.1.5
+# SNAT outbound
+iptables -t nat -A CS_EXTNET_42 -s 10.0.1.5 -o eth0 -j SNAT --to-source 203.0.113.20
+# FORWARD inbound + outbound
+iptables -t filter -A CS_EXTNET_FWD_42 -d 10.0.1.5 -o csbr42 -j ACCEPT
+iptables -t filter -A CS_EXTNET_FWD_42 -s 10.0.1.5 -i csbr42 -j ACCEPT
+```
+
+```bash
+# Disable static NAT
+cmk disableStaticNat ipaddressid=<public-ip-uuid>
+```
+
+CloudStack calls `delete-static-nat`, which removes all four rules above.
+
+### 7. Add / delete Port Forwarding
+
+```bash
+# Forward TCP port 2222 on public IP 203.0.113.20 → VM port 22
+cmk createPortForwardingRule \
+    ipaddressid=<public-ip-uuid> \
+    privateport=22 \
+    publicport=2222 \
+    protocol=TCP \
+    virtualmachineid=<vm-uuid> \
+    networkid=<network-uuid>
+```
+
+CloudStack calls `applyPFRules()` → `add-port-forward`:
+
+```bash
+network-extension.sh add-port-forward \
+    --network-id 42 \
+    --vlan 100 \
+    --public-ip 203.0.113.20 \
+    --public-port 2222 \
+    --private-ip 10.0.1.5 \
+    --private-port 22 \
+    --protocol TCP
+```
+
+iptables rules added:
+```bash
+# DNAT inbound
+iptables -t nat -A CS_EXTNET_42 -p tcp -d 203.0.113.20 --dport 2222 \
+    -j DNAT --to-destination 10.0.1.5:22
+# FORWARD
+iptables -t filter -A CS_EXTNET_FWD_42 -p tcp -d 10.0.1.5 --dport 22 \
+    -o csbr42 -j ACCEPT
+```
+
+Port ranges (e.g. `80:90`) are supported and passed verbatim to iptables `--dport`.
+
+```bash
+# Delete the rule
+cmk deletePortForwardingRule id=<rule-uuid>
+```
+
+This calls `delete-port-forward` which removes the DNAT and FORWARD rules.
+
+### 8. Delete the network
+
+```bash
+cmk deleteNetwork id=<network-uuid>
+```
+
+CloudStack calls `shutdown()` (to clean up active state) then `destroy()` (full
+removal).  Both commands perform identical cleanup:
+
+```bash
+network-extension.sh shutdown --network-id 42 --vlan 100
+network-extension.sh destroy  --network-id 42 --vlan 100
+```
+
+The wrapper:
+1. Removes jump rules from PREROUTING, POSTROUTING, and FORWARD.
+2. Flushes and deletes iptables chains `CS_EXTNET_42` and `CS_EXTNET_FWD_42`.
+3. Brings down and deletes bridge `csbr42`.
+4. Brings down and deletes VLAN interface `eth0.100` (VLAN ID read from state if
+   not passed in arguments).
+5. Removes all state under `/var/lib/cloudstack/network-extension/42/`.
+
+### 9. Unregister and delete the extension
+
+```bash
+# Disable and delete the NSP
+cmk updateNetworkServiceProvider id=<nsp-uuid> state=Disabled
+cmk deleteNetworkServiceProvider id=<nsp-uuid>
+
+# Remove external network device credentials (if any)
+# Device credentials are stored as `extension_resource_map_details` for the
+# extension registration. Remove or update them via `updateExtension` or
+# by unregistering the extension from the physical network (unregisterExtension)
+# and then updating the Extension record if necessary.
+
+# Unregister the extension from the physical network
+cmk unregisterExtension \
+    id=<extension-uuid> \
+    resourcetype=PhysicalNetwork \
+    resourceid=<phys-net-uuid>
+
+# Delete the extension
+# (only possible once it is unregistered from all physical networks)
+cmk deleteExtension id=<extension-uuid>
+```
+
+---
+
+## Multiple extensions on the same physical network
+
+Because each extension is registered as its own NSP (named after the extension),
+multiple independent external network providers can coexist on the same physical
+network:
+
+```bash
+# Register two extensions, each backed by a different device
+cmk registerExtension id=<ext-a-uuid> resourcetype=PhysicalNetwork resourceid=<pn-uuid>
+cmk registerExtension id=<ext-b-uuid> resourcetype=PhysicalNetwork resourceid=<pn-uuid>
+```
+
+# Store device connection details and script_path as registration details
+# (use updateNetworkServiceProvider or updateExtension details in the API / CMK)
+# Example: set hosts, sshkey, script_path for the registered extension on the physical network
+# Note: details are stored in extension_resource_map_details for the registration
+cmk updateExtension id=<ext-uuid> "details[0].key=hosts" "details[0].value=10.0.0.1,10.0.0.2" \
+    "details[1].key=script_path" "details[1].value=/etc/cloudstack/extensions/network-extension-wrapper.sh"
+
+When creating network offerings, reference the specific extension name:
+
+```bash
+# Network offering backed by ext-a-name
+cmk createNetworkOffering ... \
+    "serviceProviderList[0].provider=ext-a-name" ...
+
+# Network offering backed by ext-b-name
+cmk createNetworkOffering ... \
+    "serviceProviderList[0].provider=ext-b-name" ...
+```
+
+CloudStack resolves which extension to call by:
+1. Looking up the service provider name stored in `ntwk_service_map` for the
+   guest network.
+2. Finding the registered extension on the physical network whose name matches
+   that provider name.
+3. Calling `NetworkExtensionElement` scoped to that specific provider/extension
+   (via `NetworkExtensionElement.withProviderName()`).
+
+---
+
+## Wrapper script operations reference
+
+The `network-extension-wrapper.sh` script runs on the remote device inside a
+Linux network namespace.  It receives the command as its first positional argument
+followed by named `--option value` pairs.
+
+All commands:
+* Write timestamped entries to `/var/log/cloudstack/management/network-extension.log`.
+* Use a per-network lock file (`/var/run/cloudstack/extnet-<id>.lock`) to
+  serialise concurrent operations.
+* Persist state under `/var/lib/cloudstack/network-extension/<network-id>/`.
+
+### `implement`
+
+Called when CloudStack activates the network (typically on first VM deploy).
+
+```
+network-extension-wrapper.sh implement \
+    --network-id <id> \
+    --vlan <vlan-id>        (empty string if no VLAN tagging)
+    --gateway <gateway-ip> \
+    --cidr <cidr>
+```
+
+Actions:
+1. Create VLAN sub-interface `<PHYS_IFACE>.<vlan>` (skipped if `--vlan` is empty).
+2. Create Linux bridge `csbr<id>` and bring it up.
+3. Attach VLAN interface to bridge.
+4. Assign `<gateway-ip>/<prefix>` to the bridge.
+5. Enable IPv4 forwarding (`sysctl net.ipv4.ip_forward=1`).
+6. Create iptables chains `CS_EXTNET_<id>` (nat table) and
+   `CS_EXTNET_FWD_<id>` (filter table).
+7. Add jump rules: nat PREROUTING → `CS_EXTNET_<id>`, nat POSTROUTING →
+   `CS_EXTNET_<id>`, filter FORWARD → `CS_EXTNET_FWD_<id>`.
+8. Add FORWARD ACCEPT rules for bridge ingress / ESTABLISHED egress.
+9. Save VLAN, gateway, CIDR, bridge name to state files.
+
+The physical interface is configured via the `NETWORK_EXTENSION_PHYS_IFACE`
+environment variable (default: `eth0`).
+
+### `shutdown` / `destroy`
+
+Called when a network is shut down or permanently destroyed.  Both commands
+perform identical cleanup.
+
+```
+network-extension-wrapper.sh shutdown --network-id <id> [--vlan <vlan-id>]
+network-extension-wrapper.sh destroy  --network-id <id> [--vlan <vlan-id>]
+```
+
+Actions:
+1. Remove jump rules from nat PREROUTING, nat POSTROUTING, filter FORWARD.
+2. Flush and delete chains `CS_EXTNET_<id>` (nat) and `CS_EXTNET_FWD_<id>` (filter).
+3. Bring down and delete bridge `csbr<id>`.
+4. Bring down and delete VLAN interface (VLAN ID read from state if `--vlan` is
+   not supplied).
+5. Remove state directory `/var/lib/cloudstack/network-extension/<id>/`.
+
+### `assign-ip`
+
+Called when a public IP is associated with the network.
+
+```
+network-extension-wrapper.sh assign-ip \
+    --network-id <id> \
+    --vlan <vlan-id> \
+    --public-ip <ip> \
+    --source-nat true|false \
+    --gateway <gw> \
+    --cidr <cidr>
+```
+
+Actions:
+1. Add `<public-ip>/32` as a secondary address on `<PHYS_IFACE>`.
+2. If `--source-nat true`:
+   * SNAT rule: traffic from `<cidr>` outbound → source `<public-ip>`.
+   * FORWARD ACCEPT: traffic from `<cidr>` towards `<PHYS_IFACE>`.
+3. Save IP state to `/var/lib/cloudstack/network-extension/<id>/ips/<public-ip>`.
+
+### `release-ip`
+
+Called when a public IP is released / disassociated.
+
+```
+network-extension-wrapper.sh release-ip \
+    --network-id <id> \
+    --public-ip <ip>
+```
+
+Actions:
+1. Remove SNAT rule for `<cidr>` → `<public-ip>` (CIDR read from state if not set).
+2. Remove any DNAT/SNAT rules referencing `<public-ip>`.
+3. Remove `<public-ip>/32` from `<PHYS_IFACE>`.
+4. Delete IP state file.
+
+### `add-static-nat`
+
+Called when Static NAT (one-to-one NAT) is enabled for a public IP.
+
+```
+network-extension-wrapper.sh add-static-nat \
+    --network-id <id> \
+    --vlan <vlan-id> \
+    --public-ip <public-ip> \
+    --private-ip <private-ip>
+```
+
+iptables rules added (all in chain `CS_EXTNET_<id>` / `CS_EXTNET_FWD_<id>`):
+
+| Table | Chain | Rule |
+|-------|-------|------|
+| `nat` | `CS_EXTNET_<id>` | `-d <public-ip> -j DNAT --to-destination <private-ip>` |
+| `nat` | `CS_EXTNET_<id>` | `-s <private-ip> -o <PHYS_IFACE> -j SNAT --to-source <public-ip>` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-d <private-ip> -o csbr<id> -j ACCEPT` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-s <private-ip> -i csbr<id> -j ACCEPT` |
+
+State saved to `/var/lib/cloudstack/network-extension/<id>/static-nat/<public-ip>`.
+
+### `delete-static-nat`
+
+```
+network-extension-wrapper.sh delete-static-nat \
+    --network-id <id> \
+    --public-ip <public-ip> \
+    [--private-ip <private-ip>]
+```
+
+Removes all four rules added by `add-static-nat`.  If `--private-ip` is omitted,
+it is read from the state file.
+
+### `add-port-forward`
+
+Called when a Port Forwarding rule is added.
+
+```
+network-extension-wrapper.sh add-port-forward \
+    --network-id <id> \
+    --vlan <vlan-id> \
+    --public-ip <public-ip> \
+    --public-port <port-or-range> \
+    --private-ip <private-ip> \
+    --private-port <port-or-range> \
+    --protocol tcp|udp
+```
+
+iptables rules added:
+
+| Table | Chain | Rule |
+|-------|-------|------|
+| `nat` | `CS_EXTNET_<id>` | `-p <proto> -d <public-ip> --dport <public-port> -j DNAT --to-destination <private-ip>:<private-port>` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-p <proto> -d <private-ip> --dport <private-port> -o csbr<id> -j ACCEPT` |
+
+Port ranges (`80:90`) are passed verbatim to iptables `--dport`.
+
+State saved to
+`/var/lib/cloudstack/network-extension/<id>/port-forward/<proto>_<public-ip>_<public-port>`.
+
+### `delete-port-forward`
+
+```
+network-extension-wrapper.sh delete-port-forward \
+    --network-id <id> \
+    --public-ip <public-ip> \
+    --public-port <port-or-range> \
+    --private-ip <private-ip> \
+    --private-port <port-or-range> \
+    --protocol tcp|udp
+```
+
+Removes the DNAT and FORWARD rules added by `add-port-forward`.
+
+### `custom-action`
+
+```
+network-extension-wrapper.sh custom-action \
+    --network-id <id> \
+    --action <action-name>
+```
+
+Built-in actions:
+
+| Action | Description |
+|--------|-------------|
+| `reboot-device` | Bounces the bridge: `ip link set csbr<id> down && up` |
+| `dump-config` | Prints iptables rules and bridge/interface state to stdout |
+
+To add custom actions, place an executable script at
+`/var/lib/cloudstack/network-extension/hooks/custom-action-<name>.sh`.
+Unknown action names are delegated to the hook if present; otherwise the command
+fails with a descriptive error.
+
+---
+
+## CLI argument reference
+
+### JSON blobs passed as CLI arguments (by `NetworkExtensionElement`)
+
+Both scripts receive these two arguments on every invocation:
+
+| CLI Argument | Description |
+|--------------|-------------|
+| `--physical-network-extension-details <json>` | All `extension_resource_map_details` registered at the physical network level (hosts, port, username, sshkey, phys_iface, …) |
+| `--network-extension-details <json>` | Per-network opaque JSON blob (selected host, namespace, …) |
+
+### Connection details (keys in `--physical-network-extension-details`)
+
+| JSON key | Description |
+|----------|-------------|
+| `hosts` | Comma-separated list of candidate host IPs for HA selection |
+| `host` | Single host IP (used when `hosts` is absent) |
+| `port` | SSH port — default: `22` |
+| `username` | SSH user — default: `root` |
+| `password` | SSH password via `sshpass` — sensitive, not logged |
+| `sshkey` | PEM-encoded SSH private key — sensitive, not logged; preferred over password |
+| `phys_iface` | Physical network interface on the remote device for VLAN sub-interfaces (default: `eth0`) |
+| `public_bridge` | Shared bridge for public IP access (default: `cspublic`) |
+
+### Per-network details (keys in `--network-extension-details`)
+
+| JSON key | Description |
+|----------|-------------|
+| `host` | Previously selected host IP (set by `ensure-network-device`) |
+| `namespace` | Linux network namespace name (default: `cs-net-<networkId>`) |
+
+### Physical interface on the remote device
+
+Set `NETWORK_EXTENSION_PHYS_IFACE` in the environment on the remote device to
+override the interface used for VLAN sub-interfaces and public IP secondary
+addresses (default: `eth0`).  This is also overridable via the `phys_iface`
+JSON key in `--physical-network-extension-details`.
+
+### Action parameters (custom-action only)
+
+Caller-supplied parameters from `runNetworkCustomAction` are passed as a JSON
+object via the `--action-params` CLI argument:
+
+```bash
+network-extension.sh custom-action \
+    --network-id <id> \
+    --action <name> \
+    --action-params '{"key1":"value1","key2":"value2"}' \
+    --physical-network-extension-details '<json>' \
+    --network-extension-details '<json>'
+```
+
+`network-extension-wrapper.sh` decodes the JSON object and exposes each
+key as a `CS_ACTION_PARAM_<KEY>` environment variable (upper-cased, non-
+alphanumeric characters replaced by `_`) before dispatching to the built-in
+handler or hook script.
+
+---
+
+## Custom actions
+
+Define custom actions per extension via the CloudStack API:
+
+```bash
+# Add a custom action to the extension
+cmk addCustomAction \
+    extensionid=<ext-uuid> \
+    name=dump-config \
+    description="Dump iptables rules and bridge state" \
+    resourcetype=Network
+```
+
+Trigger the action on a network, optionally with parameters:
+```bash
+cmk runNetworkCustomAction \
+    networkid=<network-uuid> \
+    actionid=<custom-action-uuid> \
+    "parameters[0].key=threshold" "parameters[0].value=90"
+```
+
+CloudStack calls `NetworkExtensionElement.runCustomAction()`, which issues:
+```bash
+network-extension.sh custom-action \
+    --network-id <id> \
+    --action dump-config \
+    --action-params '{"threshold":"90"}' \
+    --physical-network-extension-details '<json>' \
+    --network-extension-details '<json>'
+```
+
+`network-extension.sh` SSHes to the device and runs `network-extension-wrapper.sh`
+with identical arguments.  The wrapper parses `--action-params`, exports
+`CS_ACTION_PARAM_THRESHOLD=90`, and dispatches to the built-in handler or hook.
+
+---
+
+## Developer / testing notes
+
+The integration smoke test at
+`test/integration/smoke/test_network_extension_provider.py`
+exercises the full lifecycle using a **Linux network namespace** on the Marvin
+node as the simulated remote device:
+
+```
+Marvin node (this machine — also acts as the remote network device)
+  ├── ip netns add cs-extnet-<id>            ← isolated namespace
+  ├── ~/.ssh/authorized_keys ← test RSA key  ← management server connects here
+  └── /etc/cloudstack/extensions/
+        └── network-extension-wrapper.sh     ← copied from repo by test
+
+KVM hosts in the zone (best-effort, skipped if none found)
+  └── /etc/cloudstack/extensions/
+        └── network-extension-wrapper.sh     ← copied by KvmHostDeployer
+
+Management server (may be the same machine)
+  └── /etc/cloudstack/extensions/<ext-name>/
+        └── network-extension.sh             ← deployed by test (static copy)
+              reads CS_PHYSICAL_NETWORK_EXTENSION_DETAILS (JSON)
+                    CS_NETWORK_EXTENSION_DETAILS          (JSON)
+              SSHes back to Marvin node :22
+              runs ip netns exec cs-extnet-<id> <script> <args>
+```
+
+The test covers:
+* Create / list / update / delete external network device.
+* Full network lifecycle: implement → assign-ip (source NAT) → static NAT →
+  port forwarding → shutdown / destroy.
+* NSP state transitions: Disabled → Enabled → Disabled → Deleted.
+
+Run the test:
+```bash
+cd test/integration/smoke
+nosetests test_network_extension_provider.py \
+    --with-marvin --marvin-config=<config.cfg> \
+    -s -a 'tags=advanced,smoke' 2>&1 | tee /tmp/extnet-test.log
+```
+
+**Prerequisites:**
+* `iproute2` on the Marvin node (`ip netns list` must succeed).
+* The Marvin node must be reachable by SSH from the management server on port 22.
+* Set `MARVIN_NODE_IP=<ip>` if auto-detection of the Marvin node IP fails.
