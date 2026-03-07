@@ -37,67 +37,6 @@ public interface ExtensionHelper {
     Map<String, String> getExtensionDetails(long extensionId);
 
     /**
-     * Returns the extension_resource_map_details for the extension registered
-     * to the given physical network.  These details hold device-access
-     * information (host, port, username, password, sshkey) and any other
-     * per-physical-network properties set at registration time.
-     *
-     * @param physicalNetworkId  the physical network ID
-     * @return key/value details (display=true only), or an empty map if none are set
-     */
-    Map<String, String> getResourceMapDetailsForPhysicalNetwork(long physicalNetworkId);
-
-    /**
-     * Returns ALL extension_resource_map_details (including hidden) for the
-     * extension registered to the given physical network.  Used internally by
-     * {@code NetworkExtensionElement} to inject credentials into the script environment.
-     *
-     * @param physicalNetworkId  the physical network ID
-     * @return all key/value details including non-display ones, or an empty map
-     */
-    Map<String, String> getAllResourceMapDetailsForPhysicalNetwork(long physicalNetworkId);
-
-    /**
-     * Returns the extension_resource_map id for the extension registered to the
-     * given physical network, or {@code null} if not registered.
-     */
-    Long getResourceMapIdForPhysicalNetwork(long physicalNetworkId);
-
-    /**
-     * Updates (upserts) extension_resource_map_details for a given map entry.
-     * Existing keys in {@code details} are overwritten; keys not present in
-     * {@code details} are left unchanged.
-     *
-     * @param resourceMapId  the extension_resource_map.id
-     * @param details        key/value pairs to upsert
-     * @param displayKeys    set of keys whose display flag should be {@code true};
-     *                       any key NOT in this set gets display=false (hidden)
-     */
-    void updateResourceMapDetails(long resourceMapId, Map<String, String> details,
-            java.util.Set<String> displayKeys);
-
-    /**
-     * Removes specific keys from extension_resource_map_details for the given map entry.
-     *
-     * @param resourceMapId  the extension_resource_map.id
-     * @param keys           keys to remove
-     */
-    void removeResourceMapDetails(long resourceMapId, List<String> keys);
-
-    /**
-     * Lists all physical network IDs that have a NetworkOrchestrator extension
-     * registered (i.e. have an entry in extension_resource_map of type PhysicalNetwork).
-     */
-    List<Long> listPhysicalNetworkIdsWithExtension();
-
-    /**
-     * Returns all NetworkOrchestrator extensions registered with the given
-     * physical network. Multiple extensions can be registered with one network,
-     * each appearing as its own service provider tab named after the extension.
-     */
-    List<Extension> listExtensionsForPhysicalNetwork(long physicalNetworkId);
-
-    /**
      * Finds the extension registered with the given physical network whose name
      * matches the given provider name (case-insensitive).  Returns {@code null}
      * if no matching extension is found.
@@ -161,4 +100,5 @@ public interface ExtensionHelper {
      * @return capabilities map, or the default capabilities if no matching extension is found
      */
     Map<Service, Map<Capability, String>> getNetworkCapabilitiesForProvider(Long physicalNetworkId, String providerName);
+
 }

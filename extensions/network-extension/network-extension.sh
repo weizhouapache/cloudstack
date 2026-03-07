@@ -27,23 +27,24 @@
 #  1. ensure-network-device  (local, no SSH)
 #     Called by NetworkExtensionElement before every network operation.
 #     Selects or re-validates the network device for the given network ID.
-#     Reads the candidate host list from CS_PHYSICAL_NETWORK_EXTENSION_DETAILS["hosts"]
+#     Reads the candidate host list from --physical-network-extension-details["hosts"]
 #     (comma-separated).
 #     If the previously selected host (from --current-details JSON) is still
 #     reachable it is kept; otherwise a new host is chosen from the list.
 #     Prints a single-line JSON object to stdout, e.g.:
 #       {"host":"192.168.1.10","namespace":"cs-net-42"}
 #     The caller (NetworkExtensionElement) stores this in network_details and
-#     forwards it to all future calls as CS_NETWORK_EXTENSION_DETAILS.
+#     forwards it to all future calls as --network-extension-details.
 #
 #  2. All other commands  (forwarded to the target host via SSH)
-#     The target host is taken from CS_NETWORK_EXTENSION_DETAILS["host"].
+#     The target host is taken from --network-extension-details["host"].
 #     The remote script (network-extension-wrapper.sh) is called with all
-#     arguments and both JSON blobs set in its environment.
+#     arguments including both --physical-network-extension-details and
+#     --network-extension-details.
 #
-# ---- Environment variables injected by NetworkExtensionElement ----
+# ---- CLI arguments injected by NetworkExtensionElement ----
 #
-#   CS_PHYSICAL_NETWORK_EXTENSION_DETAILS
+#   --physical-network-extension-details <json>
 #       JSON object with all extension_resource_map_details registered for this
 #       extension on the physical network.  No pre-defined keys — the user and
 #       the script agree on the schema.  Typical keys for a KVM-namespace backend:
@@ -53,7 +54,7 @@
 #         password  – SSH password  (sensitive, not logged)
 #         sshkey    – PEM-encoded SSH private key  (sensitive, not logged)
 #
-#   CS_NETWORK_EXTENSION_DETAILS
+#   --network-extension-details <json>
 #       Per-network opaque JSON blob (from network_details key ext.details).
 #       '{}' on the first ensure-network-device call.
 #       This script is the sole owner — CloudStack stores and forwards it verbatim.
@@ -61,8 +62,8 @@
 #         namespace – Linux network namespace name (cs-net-<networkId>)
 #
 # ---- SSH authentication priority ----
-#   1. sshkey  field in CS_PHYSICAL_NETWORK_EXTENSION_DETAILS → PEM key
-#   2. password field                                          → sshpass(1)
+#   1. sshkey  field in --physical-network-extension-details → PEM key
+#   2. password field                                        → sshpass(1)
 #   3. No credentials → relies on SSH agent / host keys on mgmt server
 #
 # Exit codes:
@@ -106,11 +107,47 @@ json_get() {
 }
 
 # ---------------------------------------------------------------------------
-# Read connection parameters from CS_PHYSICAL_NETWORK_EXTENSION_DETAILS JSON
+# Validate input and parse command
 # ---------------------------------------------------------------------------
 
-PHYS_DETAILS="${CS_PHYSICAL_NETWORK_EXTENSION_DETAILS:-{}}"
-EXTENSION_DETAILS="${CS_NETWORK_EXTENSION_DETAILS:-{}}"
+if [ $# -lt 1 ]; then
+    die "Usage: network-extension.sh <command> [arguments...]" 1
+fi
+
+COMMAND="$1"
+shift
+
+# ---------------------------------------------------------------------------
+# Parse CLI arguments: extract known flags, collect the rest as FORWARD_ARGS
+# ---------------------------------------------------------------------------
+
+PHYS_DETAILS="{}"
+EXTENSION_DETAILS="{}"
+NETWORK_ID=""
+CURRENT_DETAILS="{}"
+FORWARD_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --physical-network-extension-details)
+            PHYS_DETAILS="${2:-{}}"
+            shift 2 ;;
+        --network-extension-details)
+            EXTENSION_DETAILS="${2:-{}}"
+            shift 2 ;;
+        --network-id)
+            NETWORK_ID="${2:-}"
+            FORWARD_ARGS+=("$1" "$2")
+            shift 2 ;;
+        --current-details)
+            CURRENT_DETAILS="${2:-{}}"
+            shift 2 ;;
+        *)
+            FORWARD_ARGS+=("$1")
+            shift ;;
+    esac
+done
+
 REMOTE_SCRIPT="${CS_NET_SCRIPT_PATH:-${DEFAULT_SCRIPT_PATH}}"
 
 REMOTE_PORT=$(json_get "${PHYS_DETAILS}" "port")
@@ -209,29 +246,10 @@ ssh_exec() {
 }
 
 # ---------------------------------------------------------------------------
-# Validate input
-# ---------------------------------------------------------------------------
-
-if [ $# -lt 1 ]; then
-    die "Usage: network-extension.sh <command> [arguments...]" 1
-fi
-
-COMMAND="$1"
-
-# ---------------------------------------------------------------------------
 # ensure-network-device
 # ---------------------------------------------------------------------------
 
 if [ "${COMMAND}" = "ensure-network-device" ]; then
-    NETWORK_ID=""
-    CURRENT_DETAILS="{}"
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --network-id)      NETWORK_ID="$2";      shift 2 ;;
-            --current-details) CURRENT_DETAILS="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
     [ -z "${NETWORK_ID}" ] && die "ensure-network-device: missing --network-id" 1
 
     if [ ${#HOST_LIST[@]} -eq 0 ]; then
@@ -240,8 +258,10 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
 
     NAMESPACE="cs-net-${NETWORK_ID}"
 
-    # Try the previously selected host first
+    # Try the previously selected host first (from --current-details or --network-extension-details)
     CURRENT_HOST=$(json_get "${CURRENT_DETAILS}" "host")
+    [ -z "${CURRENT_HOST}" ] && CURRENT_HOST=$(json_get "${EXTENSION_DETAILS}" "host")
+
     if [ -n "${CURRENT_HOST}" ]; then
         for h in "${HOST_LIST[@]}"; do
             h="${h// /}"
@@ -284,15 +304,15 @@ if [ -z "${REMOTE_HOST}" ]; then
 fi
 [ -z "${REMOTE_HOST}" ] && die "No target host available. Run ensure-network-device first." 1
 
-# Build the remote command — forward both JSON blobs
+# Build the remote command — quote each argument and forward both JSON blobs
 remote_args=()
-for arg in "$@"; do
+for arg in "${FORWARD_ARGS[@]}"; do
     remote_args+=("'${arg//"'"/"'\\''"}'" )
 done
 
 PHYS_ESCAPED="${PHYS_DETAILS//\'/\'\\\'\'}"
 EXT_ESCAPED="${EXTENSION_DETAILS//\'/\'\\\'\'}"
-REMOTE_CMD="CS_PHYSICAL_NETWORK_EXTENSION_DETAILS='${PHYS_ESCAPED}' CS_NETWORK_EXTENSION_DETAILS='${EXT_ESCAPED}' '${REMOTE_SCRIPT}' ${remote_args[*]}"
+REMOTE_CMD="'${REMOTE_SCRIPT}' '${COMMAND}' ${remote_args[*]} --physical-network-extension-details '${PHYS_ESCAPED}' --network-extension-details '${EXT_ESCAPED}'"
 
 log "Remote: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT} cmd=${COMMAND}"
 

@@ -34,7 +34,7 @@ required**.
    - [9. Unregister and delete the extension](#9-unregister-and-delete-the-extension)
 6. [Multiple extensions on the same physical network](#multiple-extensions-on-the-same-physical-network)
 7. [Wrapper script operations reference](#wrapper-script-operations-reference)
-8. [Environment variable reference](#environment-variable-reference)
+8. [CLI argument reference](#cli-argument-reference)
 9. [Custom actions](#custom-actions)
 10. [Developer / testing notes](#developer--testing-notes)
 
@@ -74,8 +74,8 @@ required**.
 
 * The `network-extension.sh` script runs on the **management server**.  All
   connection details (`host`, `port`, `username`, `sshkey`, etc.) are passed as
-  two JSON environment variables injected by `NetworkExtensionElement` — the
-  script itself is completely generic and requires no local configuration.
+  two named CLI arguments injected by `NetworkExtensionElement` — the script
+  itself is completely generic and requires no local configuration.
 * The `network-extension-wrapper.sh` script runs on the **remote device** inside
   a network namespace.  It performs the actual iptables and bridge operations.
 * The two scripts are intentionally decoupled: you can replace either script
@@ -114,26 +114,26 @@ required**.
 3. `NetworkExtensionElement` builds a command line:
    ```
    <extension_path>/network-extension.sh <command> --network-id <id> [--vlan V] [--gateway G] ...
+       --physical-network-extension-details '<json>'
+       --network-extension-details '<json>'
    ```
-   and injects all details as two JSON environment variables:
-   * `CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` — JSON object with all physical-network
+   Both JSON blobs are always appended as named CLI arguments:
+   * `--physical-network-extension-details` — JSON object with all physical-network
      registration details (hosts, port, username, sshkey, …)
-   * `CS_NETWORK_EXTENSION_DETAILS` — per-network JSON blob (selected host, namespace, …)
-4. **`network-extension.sh`** reads those environment variables, writes the SSH
+   * `--network-extension-details` — per-network JSON blob (selected host, namespace, …)
+4. **`network-extension.sh`** parses those CLI arguments, writes the SSH
    private key to a temporary file (if `sshkey` is set in the physical-network
-   details), then SSHes to the remote host and runs:
-   ```bash
-   ip netns exec <namespace>  \
-       <script_path> <command> [arguments...]
-   ```
-5. **`network-extension-wrapper.sh`** executes the requested operation using
-   `ip link`, `iptables`, `ip addr`, etc. inside the network namespace.
+   details), then SSHes to the remote host and runs the wrapper script with both
+   JSON blobs forwarded as CLI arguments.
+5. **`network-extension-wrapper.sh`** parses the CLI arguments and executes the
+   requested operation using `ip link`, `iptables`, `ip addr`, etc. inside the
+   network namespace.
 6. Exit code `0` = success; any non-zero exit causes CloudStack to treat the
    operation as failed.
 
 ### Authentication priority (network-extension.sh)
 
-1. `sshkey` field in `CS_PHYSICAL_NETWORK_EXTENSION_DETAILS` — PEM key written
+1. `sshkey` field in `--physical-network-extension-details` — PEM key written
    to a temp file, used with `ssh -i`.  **Preferred** — the temp file is deleted
    on exit.
 2. `password` field — passed to `sshpass(1)` if available.
@@ -727,47 +727,49 @@ fails with a descriptive error.
 
 ---
 
-## Environment variable reference
+## CLI argument reference
 
-### Connection details (injected from `extension_resource_map_details`)
+### JSON blobs passed as CLI arguments (by `NetworkExtensionElement`)
 
-| Variable | Source key | Description |
-|----------|------------|-------------|
-| `CS_NET_DEV_HOST` | `host` (top-level) | IP / hostname of the remote device — **required** |
-| `CS_NET_DEV_PORT` | `port` (top-level) | SSH port — default: 22 |
-| `CS_NET_DEV_USERNAME` | `username` | SSH user — default: root |
-| `CS_NET_DEV_PASSWORD` | `password` | SSH password via `sshpass` — sensitive, not logged |
-| `CS_NET_DEV_SSHKEY` | `sshkey` | PEM-encoded SSH private key — sensitive, not logged; preferred |
-| `CS_NET_NAMESPACE` | `namespace` | Linux network namespace on the remote host — **required** |
-| `CS_NET_SCRIPT_PATH` | `script_path` | Full path to `network-extension-wrapper.sh` on remote host |
+Both scripts receive these two arguments on every invocation:
 
-### Per-network details (injected from `network_details`, keys prefixed `ext.`)
+| CLI Argument | Description |
+|--------------|-------------|
+| `--physical-network-extension-details <json>` | All `extension_resource_map_details` registered at the physical network level (hosts, port, username, sshkey, phys_iface, …) |
+| `--network-extension-details <json>` | Per-network opaque JSON blob (selected host, namespace, …) |
 
-Only `network_details` keys starting with `ext.` are injected.  The key is
-upper-cased and dots are replaced by underscores:
+### Connection details (keys in `--physical-network-extension-details`)
 
-| Variable | Source key | Description |
-|----------|------------|-------------|
-| `CS_NET_EXT_NAMESPACE` | `ext.namespace` | Per-network namespace override |
-| `CS_NET_EXT_VRF` | `ext.vrf` | VRF name (custom use) |
-| `CS_NET_EXT_BRIDGE` | `ext.bridge` | Bridge name override (custom use) |
+| JSON key | Description |
+|----------|-------------|
+| `hosts` | Comma-separated list of candidate host IPs for HA selection |
+| `host` | Single host IP (used when `hosts` is absent) |
+| `port` | SSH port — default: `22` |
+| `username` | SSH user — default: `root` |
+| `password` | SSH password via `sshpass` — sensitive, not logged |
+| `sshkey` | PEM-encoded SSH private key — sensitive, not logged; preferred over password |
+| `phys_iface` | Physical network interface on the remote device for VLAN sub-interfaces (default: `eth0`) |
+| `public_bridge` | Shared bridge for public IP access (default: `cspublic`) |
 
-Set per-network details via:
-```bash
-cmk updateNetwork id=<network-uuid> \
-    "details[0].key=ext.namespace" "details[0].value=cs-net-42-override"
-```
+### Per-network details (keys in `--network-extension-details`)
+
+| JSON key | Description |
+|----------|-------------|
+| `host` | Previously selected host IP (set by `ensure-network-device`) |
+| `namespace` | Linux network namespace name (default: `cs-net-<networkId>`) |
 
 ### Physical interface on the remote device
 
-Set `NETWORK_EXTENSION_PHYS_IFACE` (or legacy alias `EXTERNAL_NETWORK_PHYS_IFACE`)
-in the environment on the remote device to change the interface used for VLAN
-sub-interfaces and public IP secondary addresses (default: `eth0`).
+Set `NETWORK_EXTENSION_PHYS_IFACE` in the environment on the remote device to
+override the interface used for VLAN sub-interfaces and public IP secondary
+addresses (default: `eth0`).  This is also overridable via the `phys_iface`
+JSON key in `--physical-network-extension-details`.
 
 ### Action parameters (custom-action only)
 
 Caller-supplied parameters from `runNetworkCustomAction` are exposed as
-`CS_ACTION_PARAM_<KEY>` (upper-cased, spaces / dashes / dots replaced by `_`).
+`CS_ACTION_PARAM_<KEY>` (upper-cased, spaces / dashes / dots replaced by `_`)
+environment variables set on the script process by `NetworkExtensionElement`.
 
 ---
 

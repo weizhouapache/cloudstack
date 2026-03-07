@@ -53,6 +53,12 @@
 #   add-port-forward   - Add a DNAT port forwarding rule
 #   delete-port-forward - Remove a DNAT port forwarding rule
 #   custom-action      - Run a built-in or hook-based operator action
+#
+# Both JSON blobs are forwarded by network-extension.sh as named CLI arguments:
+#   --physical-network-extension-details <json>
+#       All extension_resource_map_details (hosts, port, username, phys_iface, …)
+#   --network-extension-details <json>
+#       Per-network opaque JSON blob (host, namespace, …)
 ##############################################################################
 
 set -e
@@ -61,13 +67,7 @@ LOG_FILE="/var/log/cloudstack/network-extension.log"
 STATE_DIR="/var/lib/cloudstack/network-extension"
 
 # ---------------------------------------------------------------------------
-# Both JSON blobs forwarded by network-extension.sh:
-#   CS_PHYSICAL_NETWORK_EXTENSION_DETAILS – all extension_resource_map_details
-#       (hosts, port, username, password, sshkey, phys_iface, public_bridge, …)
-#   CS_NETWORK_EXTENSION_DETAILS – per-network details
-#       (host, namespace, …)
-#
-# We use a simple grep approach so jq is not required.
+# JSON helpers (no jq dependency)
 # ---------------------------------------------------------------------------
 
 _json_get() {
@@ -75,8 +75,31 @@ _json_get() {
     printf '%s' "$1" | grep -o "\"$2\":\"[^\"]*\"" | cut -d'"' -f4 || true
 }
 
+# ---------------------------------------------------------------------------
+# Pre-scan all arguments for the two JSON blobs.
+# CLI args take precedence over environment variables.
+# ---------------------------------------------------------------------------
+
 PHYS_DETAILS="${CS_PHYSICAL_NETWORK_EXTENSION_DETAILS:-{}}"
 EXTENSION_DETAILS="${CS_NETWORK_EXTENSION_DETAILS:-{}}"
+
+_pre_scan_args() {
+    local i=1
+    local args=("$@")
+    while [ $i -le $# ]; do
+        case "${args[$i-1]}" in
+            --physical-network-extension-details)
+                PHYS_DETAILS="${args[$i]:-{}}"
+                i=$((i+2)) ;;
+            --network-extension-details)
+                EXTENSION_DETAILS="${args[$i]:-{}}"
+                i=$((i+2)) ;;
+            *) i=$((i+1)) ;;
+        esac
+    done
+}
+
+_pre_scan_args "$@"
 
 # Physical interface for VLAN traffic — read from physical-network details,
 # then fall back to env-var / default.
@@ -180,6 +203,9 @@ parse_args() {
             --private-port) PRIVATE_PORT="$2";  shift 2 ;;
             --protocol)     PROTOCOL="$2";      shift 2 ;;
             --source-nat)   SOURCE_NAT="$2";    shift 2 ;;
+            # already consumed by _pre_scan_args — skip silently
+            --physical-network-extension-details|--network-extension-details)
+                            shift 2 ;;
             *)              shift ;;
         esac
     done

@@ -2174,53 +2174,6 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
-    public void updateResourceMapDetails(long resourceMapId, Map<String, String> details,
-            Set<String> displayKeys) {
-        if (MapUtils.isEmpty(details)) {
-            return;
-        }
-        List<ExtensionResourceMapDetailsVO> detailsList = new ArrayList<>();
-        for (Map.Entry<String, String> entry : details.entrySet()) {
-            boolean display = displayKeys == null || displayKeys.contains(entry.getKey());
-            detailsList.add(new ExtensionResourceMapDetailsVO(resourceMapId, entry.getKey(),
-                    entry.getValue(), display));
-        }
-        extensionResourceMapDetailsDao.saveDetails(detailsList);
-    }
-
-    @Override
-    public void removeResourceMapDetails(long resourceMapId, List<String> keys) {
-        if (keys == null || keys.isEmpty()) {
-            return;
-        }
-        for (String key : keys) {
-            extensionResourceMapDetailsDao.removeDetail(resourceMapId, key);
-        }
-    }
-
-    @Override
-    public List<Long> listPhysicalNetworkIdsWithExtension() {
-        return extensionResourceMapDao.listResourceIdsByType(ExtensionResourceMap.ResourceType.PhysicalNetwork);
-    }
-
-    @Override
-    public List<Extension> listExtensionsForPhysicalNetwork(long physicalNetworkId) {
-        List<ExtensionResourceMapVO> maps = extensionResourceMapDao.listByResourceIdAndType(
-                physicalNetworkId, ExtensionResourceMap.ResourceType.PhysicalNetwork);
-        if (maps == null || maps.isEmpty()) {
-            return new ArrayList<>();
-        }
-        List<Extension> result = new ArrayList<>();
-        for (ExtensionResourceMapVO map : maps) {
-            ExtensionVO ext = extensionDao.findById(map.getExtensionId());
-            if (ext != null) {
-                result.add(ext);
-            }
-        }
-        return result;
-    }
-
-    @Override
     public Extension getExtensionForPhysicalNetworkAndProvider(long physicalNetworkId, String providerName) {
         if (StringUtils.isBlank(providerName)) {
             return null;
@@ -2255,19 +2208,17 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         return new HashMap<>();
     }
 
-
     @Override
     public boolean isNetworkExtensionProvider(String providerName) {
         if (StringUtils.isBlank(providerName)) {
             return false;
         }
-        List<Long> physNetIds = listPhysicalNetworkIdsWithExtension();
-        for (Long physNetId : physNetIds) {
-            if (getExtensionForPhysicalNetworkAndProvider(physNetId, providerName) != null) {
-                return true;
-            }
+        List<ExtensionVO> networkOrchExtensions = extensionDao.listByType(Extension.Type.NetworkOrchestrator);
+        if (networkOrchExtensions == null || networkOrchExtensions.isEmpty()) {
+            return false;
         }
-        return false;
+        return networkOrchExtensions.stream()
+                .anyMatch(ext -> providerName.equalsIgnoreCase(ext.getName()));
     }
 
     @Override
@@ -2275,15 +2226,93 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         if (type == null) {
             return new ArrayList<>();
         }
-        List<ExtensionVO> extensions = extensionDao.listAll();
-        List<Extension> result = new ArrayList<>();
+        List<ExtensionVO> extensions = extensionDao.listByType(type);
         if (extensions == null || extensions.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return new ArrayList<>(extensions);
+    }
+
+    @Override
+    public Map<Service, Map<Capability, String>> getNetworkCapabilitiesForProvider(Long physicalNetworkId,
+            String providerName) {
+        if (StringUtils.isBlank(providerName)) {
+            return new HashMap<>();
+        }
+        Extension extension = null;
+        if (physicalNetworkId != null) {
+            extension = getExtensionForPhysicalNetworkAndProvider(physicalNetworkId, providerName);
+        }
+        if (extension == null) {
+            // Search across all physical networks
+            List<ExtensionVO> networkOrchExtensions = extensionDao.listByType(Extension.Type.NetworkOrchestrator);
+            if (networkOrchExtensions != null) {
+                for (ExtensionVO ext : networkOrchExtensions) {
+                    if (providerName.equalsIgnoreCase(ext.getName())) {
+                        extension = ext;
+                        break;
+                    }
+                }
+            }
+        }
+        if (extension == null) {
+            return new HashMap<>();
+        }
+        Map<String, String> extDetails = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
+        if (extDetails == null || !extDetails.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
+            return new HashMap<>();
+        }
+        return parseCapabilitiesFromJson(extDetails.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY));
+    }
+
+    /**
+     * Parses a {@code network.capabilities} JSON string into a
+     * {@code Map<Service, Map<Capability, String>>} suitable for
+     * {@link com.cloud.network.element.NetworkElement#getCapabilities()}.
+     *
+     * <p>Expected JSON format:</p>
+     * <pre>
+     * {
+     *   "services": ["SourceNat", "StaticNat", ...],
+     *   "capabilities": {
+     *     "SourceNat": { "SupportedSourceNatTypes": "peraccount", "RedundantRouter": "false" }
+     *   }
+     * }
+     * </pre>
+     */
+    private Map<Service, Map<Capability, String>> parseCapabilitiesFromJson(String json) {
+        Map<Service, Map<Capability, String>> result = new HashMap<>();
+        if (StringUtils.isBlank(json)) {
             return result;
         }
-        for (ExtensionVO ext : extensions) {
-            if (ext != null && type.equals(ext.getType())) {
-                result.add(ext);
+        try {
+            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+            JsonArray servicesArr = root.getAsJsonArray("services");
+            if (servicesArr == null) {
+                return result;
             }
+            JsonObject capsObj = root.has("capabilities") ? root.getAsJsonObject("capabilities") : null;
+            for (JsonElement el : servicesArr) {
+                String svcName = el.getAsString();
+                Service service = Service.getService(svcName);
+                if (service == null) {
+                    logger.warn("Unknown network service '{}' in extension capabilities JSON — skipping", svcName);
+                    continue;
+                }
+                Map<Capability, String> capMap = new HashMap<>();
+                if (capsObj != null && capsObj.has(svcName)) {
+                    JsonObject svcCaps = capsObj.getAsJsonObject(svcName);
+                    for (Map.Entry<String, JsonElement> entry : svcCaps.entrySet()) {
+                        Capability cap = Capability.getCapability(entry.getKey());
+                        if (cap != null) {
+                            capMap.put(cap, entry.getValue().getAsString());
+                        }
+                    }
+                }
+                result.put(service, capMap);
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to parse network.capabilities JSON: {}", e.getMessage());
         }
         return result;
     }

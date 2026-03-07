@@ -301,14 +301,6 @@ public class ExtensionsManagerImplTest {
         assertNull(extensionsManager.getExtensionFromResource(ExtensionCustomAction.ResourceType.VirtualMachine, "uuid"));
     }
 
-    @Test
-    public void getActionMessageReturnsDefaultOnBlank() {
-        ExtensionCustomAction action = mock(ExtensionCustomAction.class);
-        Extension ext = mock(Extension.class);
-        when(action.getSuccessMessage()).thenReturn(null);
-        String msg = extensionsManager.getActionMessage(true, action, ext, ExtensionCustomAction.ResourceType.VirtualMachine, null);
-        assertTrue(msg.contains("Successfully completed"));
-    }
 
     @Test
     public void getActionMessageReturnsDefaultMessageForSuccessWithoutCustomMessage() {
@@ -354,14 +346,6 @@ public class ExtensionsManagerImplTest {
         assertEquals("Custom failure message", result);
     }
 
-    @Test
-    public void getActionMessageHandlesNullActionMessage() {
-        ExtensionCustomAction action = mock(ExtensionCustomAction.class);
-        when(action.getSuccessMessage()).thenReturn(null);
-        Extension extension = mock(Extension.class);
-        String result = extensionsManager.getActionMessage(true, action, extension, ExtensionCustomAction.ResourceType.VirtualMachine, null);
-        assertTrue(result.contains("Successfully completed"));
-    }
 
     @Test
     public void getFilteredExternalDetailsReturnsFilteredMap() {
@@ -392,26 +376,6 @@ public class ExtensionsManagerImplTest {
                 anyLong(), anyLong(), anyString(), anyString());
     }
 
-    @Test
-    public void updateExtensionPathReadyUpdatesWhenStateDiffers() {
-        Extension ext = mock(Extension.class);
-        when(ext.getId()).thenReturn(1L);
-        when(ext.isPathReady()).thenReturn(false);
-        ExtensionVO vo = mock(ExtensionVO.class);
-        when(extensionDao.createForUpdate(1L)).thenReturn(vo);
-        when(extensionDao.update(1L, vo)).thenReturn(true);
-        extensionsManager.updateExtensionPathReady(ext, true);
-        verify(extensionDao).update(1L, vo);
-    }
-
-    @Test
-    public void disableExtensionUpdatesState() {
-        ExtensionVO vo = mock(ExtensionVO.class);
-        when(extensionDao.createForUpdate(1L)).thenReturn(vo);
-        when(extensionDao.update(1L, vo)).thenReturn(true);
-        extensionsManager.disableExtension(1L);
-        verify(extensionDao).update(1L, vo);
-    }
 
     @Test
     public void getExtensionFromResourceReturnsExtensionForValidResource() {
@@ -569,42 +533,6 @@ public class ExtensionsManagerImplTest {
         assertEquals("/tmp/extensions", extensionsManager.getExtensionsPath());
     }
 
-    @Test
-    public void getExtensionIdForClusterReturnsNullIfNoMap() {
-        when(extensionResourceMapDao.findByResourceIdAndType(anyLong(), any())).thenReturn(null);
-        assertNull(extensionsManager.getExtensionIdForCluster(1L));
-    }
-
-    @Test
-    public void getExtensionIdForClusterReturnsIdIfMapExists() {
-        ExtensionResourceMapVO map = mock(ExtensionResourceMapVO.class);
-        when(map.getExtensionId()).thenReturn(5L);
-        when(extensionResourceMapDao.findByResourceIdAndType(anyLong(), any())).thenReturn(map);
-        assertEquals(Long.valueOf(5L), extensionsManager.getExtensionIdForCluster(1L));
-    }
-
-    @Test
-    public void getExtensionReturnsExtension() {
-        ExtensionVO ext = mock(ExtensionVO.class);
-        when(extensionDao.findById(1L)).thenReturn(ext);
-        assertEquals(ext, extensionsManager.getExtension(1L));
-    }
-
-    @Test
-    public void getExtensionForClusterReturnsNullIfNoId() {
-        when(extensionResourceMapDao.findByResourceIdAndType(anyLong(), any())).thenReturn(null);
-        assertNull(extensionsManager.getExtensionForCluster(1L));
-    }
-
-    @Test
-    public void getExtensionForClusterReturnsExtensionIfIdExists() {
-        ExtensionResourceMapVO map = mock(ExtensionResourceMapVO.class);
-        when(map.getExtensionId()).thenReturn(5L);
-        when(extensionResourceMapDao.findByResourceIdAndType(anyLong(), any())).thenReturn(map);
-        ExtensionVO ext = mock(ExtensionVO.class);
-        when(extensionDao.findById(5L)).thenReturn(ext);
-        assertEquals(ext, extensionsManager.getExtensionForCluster(1L));
-    }
 
     @Test
     public void checkExtensionPathSyncUpdatesReadyWhenStateDiffers() {
@@ -1030,13 +958,6 @@ public class ExtensionsManagerImplTest {
         verify(extensionDao).remove(1L);
     }
 
-    @Test
-    public void testRegisterExtensionWithResource_InvalidResourceType() {
-        RegisterExtensionCmd cmd = mock(RegisterExtensionCmd.class);
-        when(cmd.getResourceType()).thenReturn("InvalidType");
-
-        assertThrows(InvalidParameterValueException.class, () -> extensionsManager.registerExtensionWithResource(cmd));
-    }
 
     @Test
     public void registerExtensionWithResourceRegistersSuccessfullyForValidResourceType() {
@@ -2139,93 +2060,6 @@ public class ExtensionsManagerImplTest {
         assertNull(result);
     }
 
-    @Test
-    public void getResourceMapIdForPhysicalNetworkReturnsIdWhenRegistered() {
-        long physNetId = 10L;
-        long mapId = 99L;
-        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
-        when(mapVO.getId()).thenReturn(mapId);
-        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(List.of(mapVO));
-
-        Long result = extensionsManager.getResourceMapIdForPhysicalNetwork(physNetId);
-
-        assertNotNull(result);
-        assertEquals(Long.valueOf(mapId), result);
-    }
-
-    @Test
-    public void getResourceMapIdForPhysicalNetworkReturnsNullWhenNotRegistered() {
-        long physNetId = 10L;
-        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(Collections.emptyList());
-
-        Long result = extensionsManager.getResourceMapIdForPhysicalNetwork(physNetId);
-
-        assertNull(result);
-    }
-
-    @Test
-    public void getResourceMapDetailsForPhysicalNetworkReturnsDisplayDetailsOnly() {
-        long physNetId = 10L;
-        long mapId = 99L;
-        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
-        when(mapVO.getId()).thenReturn(mapId);
-        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(List.of(mapVO));
-        Map<String, String> displayDetails = Map.of("host", "192.168.1.1", "port", "22");
-        when(extensionResourceMapDetailsDao.listDetailsKeyPairs(mapId, true)).thenReturn(displayDetails);
-
-        Map<String, String> result = extensionsManager.getResourceMapDetailsForPhysicalNetwork(physNetId);
-
-        assertNotNull(result);
-        assertEquals(displayDetails, result);
-        verify(extensionResourceMapDetailsDao).listDetailsKeyPairs(mapId, true);
-    }
-
-    @Test
-    public void getResourceMapDetailsForPhysicalNetworkReturnsEmptyMapWhenNotRegistered() {
-        long physNetId = 10L;
-        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(Collections.emptyList());
-
-        Map<String, String> result = extensionsManager.getResourceMapDetailsForPhysicalNetwork(physNetId);
-
-        assertNotNull(result);
-        assertTrue(result.isEmpty());
-    }
-
-    @Test
-    public void getAllResourceMapDetailsForPhysicalNetworkReturnsAllDetails() {
-        long physNetId = 10L;
-        long mapId = 99L;
-        ExtensionResourceMapVO mapVO = mock(ExtensionResourceMapVO.class);
-        when(mapVO.getId()).thenReturn(mapId);
-        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(List.of(mapVO));
-        Map<String, String> allDetails = Map.of("host", "192.168.1.1", "port", "22",
-                "username", "root", "sshkey", "-----BEGIN RSA-----");
-        when(extensionResourceMapDetailsDao.listDetailsKeyPairs(mapId)).thenReturn(allDetails);
-
-        Map<String, String> result = extensionsManager.getAllResourceMapDetailsForPhysicalNetwork(physNetId);
-
-        assertNotNull(result);
-        assertEquals(allDetails, result);
-        // Must call without display filter so hidden keys (sshkey) are included
-        verify(extensionResourceMapDetailsDao).listDetailsKeyPairs(mapId);
-    }
-
-    @Test
-    public void getAllResourceMapDetailsForPhysicalNetworkReturnsEmptyMapWhenNotRegistered() {
-        long physNetId = 10L;
-        when(extensionResourceMapDao.listByResourceIdAndType(physNetId,
-                ExtensionResourceMap.ResourceType.PhysicalNetwork)).thenReturn(Collections.emptyList());
-
-        Map<String, String> result = extensionsManager.getAllResourceMapDetailsForPhysicalNetwork(physNetId);
-
-        assertNotNull(result);
-        assertTrue(result.isEmpty());
-    }
 
     // Helper: a mock object that is both a NetworkElement and a NetworkCustomActionProvider
     interface MockNetworkElement extends NetworkElement, NetworkCustomActionProvider {}

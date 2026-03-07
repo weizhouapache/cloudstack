@@ -20,7 +20,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -76,16 +75,17 @@ import com.cloud.vm.VirtualMachineProfile;
  *
  * <h3>Script invocation model</h3>
  * The script is called with a command name and optional CLI arguments.
- * Two JSON blobs are always forwarded as environment variables:
+ * Two JSON blobs are always forwarded as named CLI arguments:
  * <ul>
- *   <li>{@value #ENV_PHYSICAL_NETWORK_EXTENSION_DETAILS} – all details stored
- *       in {@code extension_resource_map_details} when the extension was
- *       registered with the physical network (connection info, host list,
- *       credentials, etc.).  The script owns the schema.</li>
- *   <li>{@value #ENV_EXTENSION_DETAILS} – the per-network JSON blob stored in
- *       {@code network_details} under key {@value #NETWORK_DETAIL_EXTENSION_DETAILS}.
- *       Populated by the script's {@code ensure-network-device} response and
- *       updated on failover (e.g. selected host, namespace, segment ID).</li>
+ *   <li>{@value #ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS} {@code <json>} – all
+ *       details stored in {@code extension_resource_map_details} when the
+ *       extension was registered with the physical network (connection info,
+ *       host list, credentials, etc.).  The script owns the schema.</li>
+ *   <li>{@value #ARG_NETWORK_EXTENSION_DETAILS} {@code <json>} – the
+ *       per-network JSON blob stored in {@code network_details} under key
+ *       {@value #NETWORK_DETAIL_EXTENSION_DETAILS}.  Populated by the
+ *       script's {@code ensure-network-device} response and updated on
+ *       failover (e.g. selected host, namespace, segment ID).</li>
  * </ul>
  *
  * <h3>Script resolution</h3>
@@ -121,7 +121,8 @@ import com.cloud.vm.VirtualMachineProfile;
  * {@code hosts} list in the physical-network details), checks it is reachable,
  * and prints a JSON object to stdout.  CloudStack stores this verbatim in
  * {@code network_details} under key {@value #NETWORK_DETAIL_EXTENSION_DETAILS}
- * and forwards it on every subsequent call as {@value #ARG_NETWORK_EXTENSION_DETAILS}.
+ * and forwards it on every subsequent call via
+ * {@value #ARG_NETWORK_EXTENSION_DETAILS}.
  *
  * <p>Example per-network details (KVM-namespace backend):</p>
  * <pre>{"host":"192.168.1.10","namespace":"cs-net-42"}</pre>
@@ -144,11 +145,6 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
 
-    /**
-     * Keys whose values must never appear in log output.
-     * The check is case-insensitive.
-     */
-    private static final Set<String> SENSITIVE_KEYS = new HashSet<>(Arrays.asList("password", "sshkey"));
 
     /**
      * When non-null, restricts all operations to the extension whose name
@@ -405,17 +401,12 @@ public class NetworkExtensionElement extends AdapterBase implements
      * device is reachable (using the {@code hosts} list in the physical-network
      * extension details) and performs failover if needed.  The returned JSON is
      * persisted in {@code network_details} and forwarded to all subsequent calls
-     * as the {@value #ARG_NETWORK_EXTENSION_DETAILS} argument.
+     * via {@value #ARG_NETWORK_EXTENSION_DETAILS}.
      *
-     * <p>The script receives both JSON blobs as named CLI arguments:</p>
-     * <ul>
-     *   <li>{@value #ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS} – all physical-network
-     *       registration details (includes {@code hosts}, credentials, etc.)</li>
-     *   <li>{@value #ARG_NETWORK_EXTENSION_DETAILS} – current per-network details
-     *       ({@code {}}) on first call)</li>
-     * </ul>
-     * and {@code --current-details} as a CLI argument so the script can
-     * short-circuit when the current host is healthy.</p>
+     * <p>The script receives both JSON blobs as named CLI arguments
+     * ({@value #ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS} and
+     * {@value #ARG_NETWORK_EXTENSION_DETAILS}) plus {@code --current-details}
+     * so the script can short-circuit when the current host is healthy.</p>
      */
     protected void ensureExtensionDetails(Network network) {
         Map<String, String> stored = networkDetailsDao.listDetailsKeyPairs(network.getId());
@@ -448,11 +439,6 @@ public class NetworkExtensionElement extends AdapterBase implements
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
             pb.redirectErrorStream(true);
-            Map<String, String> env = pb.environment();
-            env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-
-            Process process = pb.start();
-
             Process process = pb.start();
             String output = new String(process.getInputStream().readAllBytes()).trim();
             int exitCode = process.waitFor();
@@ -604,20 +590,23 @@ public class NetworkExtensionElement extends AdapterBase implements
         Extension extension = resolveExtension(network);
         File scriptFile = resolveScriptFile(network, extension);
 
+        String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
+        String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
+
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
         cmdLine.add(command);
         cmdLine.addAll(Arrays.asList(args));
+        cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(physicalNetworkDetailsJson);
+        cmdLine.add(ARG_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(networkExtensionDetailsJson);
 
         logger.debug("Executing network extension script: {}", String.join(" ", cmdLine));
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
             pb.redirectErrorStream(true);
-            Map<String, String> env = pb.environment();
-            env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-
-
             Process process = pb.start();
             byte[] output = process.getInputStream().readAllBytes();
             int exitCode = process.waitFor();
@@ -644,13 +633,11 @@ public class NetworkExtensionElement extends AdapterBase implements
      * on the physical network as a plain map.
      */
     private Map<String, String> buildPhysicalNetworkDetailsMap(Long physicalNetworkId, Extension extension) {
-        if (physicalNetworkId == null) {
+        if (physicalNetworkId == null || extension == null) {
             return new HashMap<>();
         }
-        Map<String, String> details = extension != null
-                ? extensionHelper.getAllResourceMapDetailsForExtensionOnPhysicalNetwork(
-                        physicalNetworkId, extension.getId())
-                : extensionHelper.getAllResourceMapDetailsForPhysicalNetwork(physicalNetworkId);
+        Map<String, String> details = extensionHelper.getAllResourceMapDetailsForExtensionOnPhysicalNetwork(
+                physicalNetworkId, extension.getId());
         return details != null ? details : new HashMap<>();
     }
 
@@ -671,23 +658,6 @@ public class NetworkExtensionElement extends AdapterBase implements
                 ? networkDetails.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
     }
 
-    /**
-     * Returns a set-string of all keys, with sensitive values replaced by
-     * {@code <redacted>} for log output.
-     */
-    private String redactedKeys(Map<String, String> map) {
-        if (map == null || map.isEmpty()) {
-            return "[]";
-        }
-        StringBuilder sb = new StringBuilder("[");
-        for (String key : map.keySet()) {
-            sb.append(SENSITIVE_KEYS.contains(key.toLowerCase()) ? key + "=<redacted>" : key);
-            sb.append(",");
-        }
-        if (sb.length() > 1) sb.setLength(sb.length() - 1);
-        sb.append("]");
-        return sb.toString();
-    }
 
     /**
      * Serialises a {@code Map<String, String>} to a compact JSON object string.
@@ -742,16 +712,15 @@ public class NetworkExtensionElement extends AdapterBase implements
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
             pb.redirectErrorStream(true);
-            Map<String, String> env = pb.environment();
-            env.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
+            // Pass per-action parameters as CS_ACTION_PARAM_<KEY> environment variables
+            // to avoid shell-escaping issues with complex values.
             if (parameters != null) {
+                Map<String, String> env = pb.environment();
                 for (Map.Entry<String, Object> entry : parameters.entrySet()) {
-                    if (entry.getKey() != null && entry.getValue() != null) {
-                        String envKey = "CS_ACTION_PARAM_" + entry.getKey().toUpperCase()
-                                .replace(' ', '_').replace('-', '_').replace('.', '_');
-                        env.put(envKey, String.valueOf(entry.getValue()));
-                    }
+                    String envKey = "CS_ACTION_PARAM_" + entry.getKey()
+                            .toUpperCase().replaceAll("[^A-Z0-9]", "_");
+                    env.put(envKey, entry.getValue() != null ? entry.getValue().toString() : "");
                 }
             }
 
