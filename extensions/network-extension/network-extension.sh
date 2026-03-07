@@ -89,7 +89,6 @@ log() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     printf '[%s] %s\n' "${ts}" "$*" >> "${LOG_FILE}" 2>/dev/null || true
-    printf '%s\n' "$*" >&2
 }
 
 die() {

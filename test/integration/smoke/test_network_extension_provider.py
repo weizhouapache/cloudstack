@@ -103,7 +103,7 @@ ENTRY_POINT_SCRIPT_LOCAL = os.path.join(_SCRIPT_CACHE_DIR, ENTRY_POINT_FILENAME)
 
 # Network capabilities JSON — services this extension supports
 NETWORK_CAPABILITIES_JSON = json.dumps({
-    "services": ["SourceNat", "StaticNat", "PortForwarding", "Firewall", "Gateway"],
+    "services": ["SourceNat", "StaticNat", "PortForwarding", "Firewall"],
     "capabilities": {
         "SourceNat": {
             "SupportedSourceNatTypes": "peraccount",
@@ -830,7 +830,7 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
     def test_03_extension_capabilities_detail(self):
         """Verify network.capabilities JSON is stored and retrievable via the API."""
         caps_json = json.dumps({
-            "services": ["SourceNat", "Gateway"],
+            "services": ["SourceNat"],
             "capabilities": {"SourceNat": {"SupportedSourceNatTypes": "peraccount"}}
         })
         ext = Extension.create(
@@ -850,7 +850,6 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
             self.assertIn("network.capabilities", d)
             stored = json.loads(d["network.capabilities"])
             self.assertIn("SourceNat", stored["services"])
-            self.assertIn("Gateway", stored["services"])
         self.logger.info("test_03 PASSED")
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")

@@ -121,7 +121,6 @@ log() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[${ts}] $*" >> "${LOG_FILE}" 2>/dev/null || true
-    echo "$*"
 }
 
 die() {

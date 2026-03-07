@@ -279,6 +279,19 @@ public interface Network extends ControlledEntity, StateObject<Network.State>, I
                     .append("name", name)
                     .toString();
         }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (!(obj instanceof Provider)) return false;
+            Provider provider = (Provider) obj;
+            return this.name.equals(provider.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return name.hashCode();
+        }
     }
 
     public static class Capability {

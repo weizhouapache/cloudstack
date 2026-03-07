@@ -370,7 +370,7 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
     @Inject
     private Ipv6GuestPrefixSubnetNetworkMapDao ipv6GuestPrefixSubnetNetworkMapDao;
     @Inject
-    private ExtensionHelper extensionHelper;
+    protected ExtensionHelper extensionHelper;
     @Inject
     private NetworkExtensionElement networkExtensionElement;
 

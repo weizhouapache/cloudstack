@@ -214,6 +214,9 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     @Override
     public Provider getProvider() {
+        if (providerName != null) {
+            return Provider.createTransientProvider(providerName);
+        }
         return Provider.NetworkExtension;
     }
 
