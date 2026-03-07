@@ -171,6 +171,9 @@ public class NetworkExtensionElement extends AdapterBase implements
     /** CLI argument carrying per-network opaque JSON blob. */
     public static final String ARG_NETWORK_EXTENSION_DETAILS = "--network-extension-details";
 
+    /** CLI argument carrying per-action parameters as a JSON object. */
+    public static final String ARG_ACTION_PARAMS = "--action-params";
+
     // ---- Network detail key ----
 
     /**
@@ -685,7 +688,11 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     /**
      * Runs a custom action on the external network device.
-     * Per-action parameters are exposed as {@code CS_ACTION_PARAM_<KEY>}.
+     * Per-action parameters are passed as a JSON object via
+     * {@value #ARG_ACTION_PARAMS}, e.g.:
+     * <pre>--action-params '{"key1":"value1","key2":"value2"}'</pre>
+     * The wrapper script decodes them and exposes each key as a
+     * {@code CS_ACTION_PARAM_<KEY>} environment variable for hook scripts.
      */
     public String runCustomAction(Network network, String actionName, Map<String, Object> parameters) {
         Extension extension = resolveExtension(network);
@@ -693,6 +700,7 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
         String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
+        String actionParamsJson = buildActionParamsJson(parameters);
 
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
@@ -701,29 +709,20 @@ public class NetworkExtensionElement extends AdapterBase implements
         cmdLine.add(String.valueOf(network.getId()));
         cmdLine.add("--action");
         cmdLine.add(actionName);
+        cmdLine.add(ARG_ACTION_PARAMS);
+        cmdLine.add(actionParamsJson);
         cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
         cmdLine.add(physicalNetworkDetailsJson);
         cmdLine.add(ARG_NETWORK_EXTENSION_DETAILS);
         cmdLine.add(networkExtensionDetailsJson);
 
-        logger.info("Running custom action '{}' on network {} (extension: {})",
-                actionName, network.getId(), extension != null ? extension.getName() : "unknown");
+        logger.info("Running custom action '{}' on network {} (extension: {}, params: {} key(s))",
+                actionName, network.getId(), extension != null ? extension.getName() : "unknown",
+                parameters != null ? parameters.size() : 0);
 
         try {
             ProcessBuilder pb = new ProcessBuilder(cmdLine);
             pb.redirectErrorStream(true);
-
-            // Pass per-action parameters as CS_ACTION_PARAM_<KEY> environment variables
-            // to avoid shell-escaping issues with complex values.
-            if (parameters != null) {
-                Map<String, String> env = pb.environment();
-                for (Map.Entry<String, Object> entry : parameters.entrySet()) {
-                    String envKey = "CS_ACTION_PARAM_" + entry.getKey()
-                            .toUpperCase().replaceAll("[^A-Z0-9]", "_");
-                    env.put(envKey, entry.getValue() != null ? entry.getValue().toString() : "");
-                }
-            }
-
             Process process = pb.start();
             byte[] output = process.getInputStream().readAllBytes();
             int exitCode = process.waitFor();
@@ -739,6 +738,22 @@ public class NetworkExtensionElement extends AdapterBase implements
             logger.error("Failed to execute custom action '{}': {}", actionName, e.getMessage(), e);
             throw new CloudRuntimeException("Failed to execute custom action: " + actionName, e);
         }
+    }
+
+    /**
+     * Serialises custom-action parameters to a compact JSON object string.
+     * Returns {@code {}} for null or empty maps.
+     */
+    private String buildActionParamsJson(Map<String, Object> parameters) {
+        if (parameters == null || parameters.isEmpty()) {
+            return "{}";
+        }
+        JsonObject obj = new JsonObject();
+        for (Map.Entry<String, Object> entry : parameters.entrySet()) {
+            obj.addProperty(entry.getKey(),
+                    entry.getValue() != null ? entry.getValue().toString() : "");
+        }
+        return new Gson().toJson(obj);
     }
 
     // ---- Script file resolution ----

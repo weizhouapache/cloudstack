@@ -712,15 +712,33 @@ cmd_delete_port_forward() {
 cmd_custom_action() {
     NETWORK_ID=""
     ACTION_NAME=""
+    ACTION_PARAMS_JSON="{}"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --network-id) NETWORK_ID="$2"; shift 2 ;;
-            --action)     ACTION_NAME="$2"; shift 2 ;;
-            *)            shift ;;
+            --network-id)    NETWORK_ID="$2";        shift 2 ;;
+            --action)        ACTION_NAME="$2";        shift 2 ;;
+            --action-params) ACTION_PARAMS_JSON="${2:-{}}"; shift 2 ;;
+            # already consumed by _pre_scan_args — skip silently
+            --physical-network-extension-details|--network-extension-details)
+                             shift 2 ;;
+            *)               shift ;;
         esac
     done
     [ -z "${NETWORK_ID}" ]  && die "custom-action: missing --network-id"
     [ -z "${ACTION_NAME}" ] && die "custom-action: missing --action"
+
+    # Expose each key from the action-params JSON as CS_ACTION_PARAM_<KEY>=value.
+    # Relies on a simple grep approach so jq is not required.
+    # Keys are upper-cased and non-alphanumeric characters replaced by _.
+    if [ "${ACTION_PARAMS_JSON}" != "{}" ] && [ -n "${ACTION_PARAMS_JSON}" ]; then
+        while IFS= read -r pair; do
+            raw_key=$(printf '%s' "${pair}" | cut -d'"' -f2)
+            raw_val=$(printf '%s' "${pair}" | sed 's/^"[^"]*":"\{0,1\}//;s/"\{0,1\}$//')
+            [ -z "${raw_key}" ] && continue
+            env_key="CS_ACTION_PARAM_$(printf '%s' "${raw_key}" | tr '[:lower:]' '[:upper:]' | tr -cs 'A-Z0-9' '_')"
+            export "${env_key}=${raw_val}"
+        done < <(printf '%s' "${ACTION_PARAMS_JSON}" | grep -o '"[^"]*":"[^"]*"')
+    fi
 
     _load_state
 

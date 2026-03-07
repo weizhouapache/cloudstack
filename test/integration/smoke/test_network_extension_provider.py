@@ -461,6 +461,78 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
         self._cleanup_mgmt_script()
 
     # ------------------------------------------------------------------
+    # KVM namespace verification helpers
+    # ------------------------------------------------------------------
+
+    def _ssh_kvm(self, cmd):
+        """Run *cmd* on the first deployed KVM host via SSH.
+
+        Returns (stdout_lines, returncode).  Returns ([], -1) if no KVM
+        host is available.
+        """
+        if not self.kvm_deployer or not self.kvm_deployer._deployed_hosts:
+            self.logger.warning("_ssh_kvm: no KVM hosts available — skipping")
+            return [], -1
+        host_ip = self.kvm_deployer._deployed_hosts[0]
+        h = next((x for x in self.kvm_host_configs if x.get('ip') == host_ip), None)
+        if h is None:
+            return [], -1
+        try:
+            ssh = SshClient(host_ip, 22,
+                            h.get('username', 'root'),
+                            h.get('password', ''))
+            out = ssh.execute(cmd)
+            return out, 0
+        except Exception as e:
+            self.logger.warning("_ssh_kvm(%s) failed: %s", cmd, e)
+            return [], -1
+
+    def _namespace_exists(self, namespace):
+        """Return True if *namespace* exists on the KVM host."""
+        lines, rc = self._ssh_kvm("ip netns list 2>/dev/null")
+        if rc != 0:
+            return None  # unknown (no KVM host available)
+        return any(namespace in line for line in lines)
+
+    def _namespace_has_ip(self, namespace, ip):
+        """Return True if *ip* is assigned inside *namespace* on the KVM host."""
+        lines, rc = self._ssh_kvm(
+            "ip netns exec %s ip addr 2>/dev/null" % namespace)
+        if rc != 0:
+            return None  # unknown
+        return any(ip in line for line in lines)
+
+    def _assert_namespace_exists(self, namespace, msg=None):
+        result = self._namespace_exists(namespace)
+        if result is None:
+            self.logger.warning("Skipping namespace check (no KVM host): %s", namespace)
+            return
+        self.assertTrue(result, msg or "Namespace %s should exist" % namespace)
+
+    def _assert_namespace_not_exists(self, namespace, msg=None):
+        result = self._namespace_exists(namespace)
+        if result is None:
+            self.logger.warning("Skipping namespace check (no KVM host): %s", namespace)
+            return
+        self.assertFalse(result, msg or "Namespace %s should not exist" % namespace)
+
+    def _assert_ip_in_namespace(self, namespace, ip, msg=None):
+        result = self._namespace_has_ip(namespace, ip)
+        if result is None:
+            self.logger.warning("Skipping IP check (no KVM host): %s in %s", ip, namespace)
+            return
+        self.assertTrue(result,
+                        msg or "IP %s should be in namespace %s" % (ip, namespace))
+
+    def _assert_ip_not_in_namespace(self, namespace, ip, msg=None):
+        result = self._namespace_has_ip(namespace, ip)
+        if result is None:
+            self.logger.warning("Skipping IP check (no KVM host): %s in %s", ip, namespace)
+            return
+        self.assertFalse(result,
+                         msg or "IP %s should NOT be in namespace %s" % (ip, namespace))
+
+    # ------------------------------------------------------------------
     # Tests
     # ------------------------------------------------------------------
 
@@ -477,10 +549,13 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
         7.  Create NetworkOffering backed by the extension.
         8.  Create account + isolated network.
         9.  Deploy VM.
-        10. Acquire public IP → enable static NAT → disable static NAT.
-        11. Acquire public IP → create port forwarding rule → delete it.
-        12. Destroy VM → delete network.
-        13. Disable/delete provider, unregister/delete extension, remove scripts.
+        10. implement — source NAT IP must be present in the namespace.
+        11. Enable static NAT — IP added to namespace.
+        12. Disable static NAT — IP removed from namespace.
+        13. Add port forwarding rule — IP added to namespace.
+        14. Delete port forwarding rule — IP removed from namespace.
+        15. Shutdown / destroy network — namespace removed.
+        16. Cleanup CloudStack resources, extension, scripts.
         """
 
         # ---- Step 1: Physical network ----
@@ -580,7 +655,10 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
         self.assertIsNotNone(network)
         self.logger.info("Isolated network created: %s (%s)", network.name, network.id)
 
-        # ---- Step 9: Deploy VM ----
+        # Derive expected namespace name (cs-net-<networkId>)
+        namespace = "cs-net-%s" % network.id
+
+        # ---- Step 9: Deploy VM — triggers implement ----
         svc_offering = ServiceOffering.list(self.apiclient, issystem=False)[0]
         vm = VirtualMachine.create(
             self.apiclient,
@@ -596,27 +674,63 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
         self.assertIsNotNone(vm)
         self.logger.info("VM deployed: %s (%s)", vm.name, vm.id)
 
-        # ---- Step 10: Static NAT ----
-        public_ip = PublicIPAddress.create(
+        # ---- Step 10: verify implement — namespace exists + source NAT IP present ----
+        self._assert_namespace_exists(namespace,
+            "Namespace %s should exist after network implement" % namespace)
+        self.logger.info("Verified: namespace %s exists after implement", namespace)
+
+        # Acquire the source NAT IP and verify it is in the namespace
+        source_nat_ip_obj = PublicIPAddress.create(
+            self.apiclient,
+            accountid=account.name,
+            zoneid=self.zone.id,
+            domainid=account.domainid,
+            networkid=network.id,
+            isSourceNat=True
+        )
+        source_nat_ip = source_nat_ip_obj.ipaddress.ipaddress
+        self.logger.info("Source NAT IP: %s", source_nat_ip)
+
+        self._assert_ip_in_namespace(namespace, source_nat_ip,
+            "Source NAT IP %s should be assigned in namespace %s after implement"
+            % (source_nat_ip, namespace))
+        self.logger.info("Verified: source NAT IP %s in namespace %s", source_nat_ip, namespace)
+
+        # ---- Step 11: Static NAT — enable → IP in namespace ----
+        static_ip = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
             zoneid=self.zone.id,
             domainid=account.domainid,
             networkid=network.id
         )
-        ip_id = public_ip.ipaddress.id
-        self.logger.info("Public IP: %s", public_ip.ipaddress.ipaddress)
+        static_ip_addr = static_ip.ipaddress.ipaddress
+        static_ip_id   = static_ip.ipaddress.id
+        self.logger.info("Static NAT public IP: %s", static_ip_addr)
 
         StaticNATRule.enable(self.apiclient,
-                             ipaddressid=ip_id,
+                             ipaddressid=static_ip_id,
                              virtualmachineid=vm.id,
                              networkid=network.id)
         self.logger.info("Static NAT enabled")
 
-        StaticNATRule.disable(self.apiclient, ipaddressid=ip_id)
+        self._assert_ip_in_namespace(namespace, static_ip_addr,
+            "Static NAT IP %s should be in namespace %s after add-static-nat"
+            % (static_ip_addr, namespace))
+        self.logger.info("Verified: static NAT IP %s in namespace %s", static_ip_addr, namespace)
+
+        # ---- Step 12: Static NAT — disable → IP removed from namespace ----
+        StaticNATRule.disable(self.apiclient, ipaddressid=static_ip_id)
         self.logger.info("Static NAT disabled")
 
-        # ---- Step 11: Port forwarding ----
+        self._assert_ip_not_in_namespace(namespace, static_ip_addr,
+            "Static NAT IP %s should NOT be in namespace %s after delete-static-nat"
+            % (static_ip_addr, namespace))
+        self.logger.info("Verified: static NAT IP %s removed from namespace %s",
+                         static_ip_addr, namespace)
+        static_ip.delete(self.apiclient)
+
+        # ---- Step 13: Port forwarding — create rule → IP in namespace ----
         pf_ip = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
@@ -624,6 +738,7 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
             domainid=account.domainid,
             networkid=network.id
         )
+        pf_ip_addr = pf_ip.ipaddress.ipaddress
         pf_rule = NATRule.create(
             self.apiclient, vm,
             {"privateport": 22, "publicport": 2222, "protocol": "TCP"},
@@ -631,15 +746,25 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
             networkid=network.id
         )
         self.assertIsNotNone(pf_rule)
-        self.logger.info("Port forwarding rule created: %s:2222 -> VM:22",
-                         pf_ip.ipaddress.ipaddress)
+        self.logger.info("Port forwarding rule created: %s:2222 -> VM:22", pf_ip_addr)
 
+        self._assert_ip_in_namespace(namespace, pf_ip_addr,
+            "Port forwarding IP %s should be in namespace %s after add-port-forward"
+            % (pf_ip_addr, namespace))
+        self.logger.info("Verified: PF IP %s in namespace %s", pf_ip_addr, namespace)
+
+        # ---- Step 14: Port forwarding — delete rule → IP removed from namespace ----
         pf_rule.delete(self.apiclient)
-        pf_ip.delete(self.apiclient)
-        public_ip.delete(self.apiclient)
         self.logger.info("Port forwarding rule deleted")
 
-        # ---- Step 12: Destroy VM + network ----
+        self._assert_ip_not_in_namespace(namespace, pf_ip_addr,
+            "Port forwarding IP %s should NOT be in namespace %s after delete-port-forward"
+            % (pf_ip_addr, namespace))
+        self.logger.info("Verified: PF IP %s removed from namespace %s", pf_ip_addr, namespace)
+        pf_ip.delete(self.apiclient)
+        source_nat_ip_obj.delete(self.apiclient)
+
+        # ---- Step 15: Destroy VM → shutdown + destroy network → namespace removed ----
         vm.delete(self.apiclient, expunge=True)
         self.cleanup = [o for o in self.cleanup if o != vm]
         self.logger.info("VM destroyed")
@@ -648,7 +773,11 @@ class TestNetworkExtensionProvider(cloudstackTestCase):
         self.cleanup = [o for o in self.cleanup if o != network]
         self.logger.info("Network deleted")
 
-        # ---- Step 13: Cleanup ----
+        self._assert_namespace_not_exists(namespace,
+            "Namespace %s should be removed after network destroy" % namespace)
+        self.logger.info("Verified: namespace %s removed after destroy", namespace)
+
+        # ---- Step 16: Cleanup ----
         self._update_provider_state(self.provider_id, 'Disabled')
         self._delete_provider(self.provider_id)
         self.provider_id = None

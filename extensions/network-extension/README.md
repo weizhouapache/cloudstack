@@ -767,9 +767,22 @@ JSON key in `--physical-network-extension-details`.
 
 ### Action parameters (custom-action only)
 
-Caller-supplied parameters from `runNetworkCustomAction` are exposed as
-`CS_ACTION_PARAM_<KEY>` (upper-cased, spaces / dashes / dots replaced by `_`)
-environment variables set on the script process by `NetworkExtensionElement`.
+Caller-supplied parameters from `runNetworkCustomAction` are passed as a JSON
+object via the `--action-params` CLI argument:
+
+```bash
+network-extension.sh custom-action \
+    --network-id <id> \
+    --action <name> \
+    --action-params '{"key1":"value1","key2":"value2"}' \
+    --physical-network-extension-details '<json>' \
+    --network-extension-details '<json>'
+```
+
+`network-extension-wrapper.sh` decodes the JSON object and exposes each
+key as a `CS_ACTION_PARAM_<KEY>` environment variable (upper-cased, non-
+alphanumeric characters replaced by `_`) before dispatching to the built-in
+handler or hook script.
 
 ---
 
@@ -786,24 +799,27 @@ cmk addCustomAction \
     resourcetype=Network
 ```
 
-Trigger the action on a network:
+Trigger the action on a network, optionally with parameters:
 ```bash
 cmk runNetworkCustomAction \
     networkid=<network-uuid> \
-    actionid=<custom-action-uuid>
+    actionid=<custom-action-uuid> \
+    "parameters[0].key=threshold" "parameters[0].value=90"
 ```
 
 CloudStack calls `NetworkExtensionElement.runCustomAction()`, which issues:
 ```bash
-network-extension.sh custom-action --network-id <id> --action dump-config
+network-extension.sh custom-action \
+    --network-id <id> \
+    --action dump-config \
+    --action-params '{"threshold":"90"}' \
+    --physical-network-extension-details '<json>' \
+    --network-extension-details '<json>'
 ```
 
-The `network-extension.sh` SSHes to the device and runs:
-```bash
-ip netns exec cs-net-prod \
-    /etc/cloudstack/extensions/network-extension-wrapper.sh \
-    custom-action --network-id <id> --action dump-config
-```
+`network-extension.sh` SSHes to the device and runs `network-extension-wrapper.sh`
+with identical arguments.  The wrapper parses `--action-params`, exports
+`CS_ACTION_PARAM_THRESHOLD=90`, and dispatches to the built-in handler or hook.
 
 ---
 
