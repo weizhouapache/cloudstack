@@ -23,6 +23,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.net.InetAddress;
+import java.nio.ByteBuffer;
 
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
@@ -490,13 +492,34 @@ public class NetworkExtensionElement extends AdapterBase implements
             boolean isRevoke = ip.getState() == IpAddress.State.Releasing;
             String action = isRevoke ? "release-ip" : "assign-ip";
 
-            boolean result = executeScript(network, action,
-                    "--network-id", String.valueOf(network.getId()),
-                    "--vlan",       safeStr(vlanId),
-                    "--public-ip",  ip.getAddress().addr(),
-                    "--source-nat", String.valueOf(isSourceNat),
-                    "--gateway",    safeStr(network.getGateway()),
-                    "--cidr",       safeStr(network.getCidr()));
+            // Compute public IP gateway and CIDR (from the PublicIpAddress if available)
+            String publicGateway;
+            String publicCidr;
+            try {
+                publicGateway = ip.getGateway();
+                // build public CIDR from public IP + netmask if possible
+                String publicIpStr = ip.getAddress() != null ? ip.getAddress().addr() : null;
+                String publicNetmask = ip.getNetmask();
+                publicCidr = buildCidrFromIpAndNetmask(publicIpStr, publicNetmask);
+            } catch (Exception e) {
+                // best-effort — leave values null
+                publicGateway = null;
+                publicCidr = null;
+            }
+
+            List<String> args = new ArrayList<>();
+            args.add("--network-id"); args.add(String.valueOf(network.getId()));
+            args.add("--vlan"); args.add(safeStr(vlanId));
+            args.add("--public-ip"); args.add(ip.getAddress().addr());
+            args.add("--source-nat"); args.add(String.valueOf(isSourceNat));
+            // pass network gateway/cidr for guest CIDR usage (SNAT matching)
+            args.add("--gateway"); args.add(safeStr(network.getGateway()));
+            args.add("--cidr"); args.add(safeStr(network.getCidr()));
+            // pass public IP network details separately so wrapper can set default route
+            args.add("--public-gateway"); args.add(safeStr(publicGateway));
+            args.add("--public-cidr"); args.add(safeStr(publicCidr));
+
+            boolean result = executeScript(network, action, args.toArray(new String[0]));
             if (!result) {
                 throw new ResourceUnavailableException(
                         "Failed to " + action + " for IP " + ip.getAddress().addr(),
@@ -506,9 +529,34 @@ public class NetworkExtensionElement extends AdapterBase implements
         return true;
     }
 
-    @Override
-    public IpDeployer getIpDeployer(Network network) {
-        return this;
+    /**
+     * Build a CIDR string from IP address and dotted netmask (or prefix).
+     * Returns "" if either value is null or parsing fails.
+     */
+    private String buildCidrFromIpAndNetmask(String ipStr, String netmaskStr) {
+        if (ipStr == null || ipStr.isEmpty() || netmaskStr == null || netmaskStr.isEmpty()) {
+            return "";
+        }
+        // If netmask is already CIDR (contains '/'), try to return network/prefix
+        if (netmaskStr.contains("/")) {
+            return netmaskStr;
+        }
+        try {
+            InetAddress ip = InetAddress.getByName(ipStr);
+            InetAddress mask = InetAddress.getByName(netmaskStr);
+            byte[] ipb = ip.getAddress();
+            byte[] mb = mask.getAddress();
+            int ipInt = ByteBuffer.wrap(ipb).getInt();
+            int maskInt = ByteBuffer.wrap(mb).getInt();
+            int network = ipInt & maskInt;
+            int prefix = Integer.bitCount(maskInt);
+            byte[] netBytes = ByteBuffer.allocate(4).putInt(network).array();
+            InetAddress netAddr = InetAddress.getByAddress(netBytes);
+            return netAddr.getHostAddress() + "/" + prefix;
+        } catch (Exception e) {
+            logger.debug("Failed to compute CIDR from ip/netmask {} {}: {}", ipStr, netmaskStr, e.getMessage());
+            return "";
+        }
     }
 
     // ---- StaticNatServiceProvider ----
@@ -694,8 +742,10 @@ public class NetworkExtensionElement extends AdapterBase implements
      * Per-action parameters are passed as a JSON object via
      * {@value #ARG_ACTION_PARAMS}, e.g.:
      * <pre>--action-params '{"key1":"value1","key2":"value2"}'</pre>
-     * The wrapper script decodes them and exposes each key as a
-     * {@code CS_ACTION_PARAM_<KEY>} environment variable for hook scripts.
+     * The wrapper script receives the `--action-params` JSON string and forwards
+     * it unchanged to hook scripts as the `--action-params` CLI argument; hook
+     * scripts should parse the JSON themselves (for example using `jq` or a
+     * small shell/awk parser).
      */
     public String runCustomAction(Network network, String actionName, Map<String, Object> parameters) {
         Extension extension = resolveExtension(network);
@@ -831,6 +881,12 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     private String safeStr(String value) {
         return value != null ? value : "";
+    }
+
+    @Override
+    public IpDeployer getIpDeployer(Network network) {
+        // This element itself implements IpDeployer; return this instance.
+        return this;
     }
 }
 

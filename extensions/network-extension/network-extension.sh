@@ -205,7 +205,11 @@ ssh_opts() {
     if [ -n "${KEY_TMPFILE}" ]; then
         opts+=(-i "${KEY_TMPFILE}" -o IdentitiesOnly=yes -o BatchMode=yes)
     elif [ -n "${REMOTE_PASS}" ]; then
-        opts+=(-o IdentitiesOnly=yes -o IdentityFile=/dev/null)
+        # When using password-based auth we should not force an IdentityFile of /dev/null
+        # because recent OpenSSH may attempt to parse it and emit libcrypto errors
+        # (seen as: Load key "/dev/null": error in libcrypto). Just rely on sshpass
+        # (SSHPASS) to provide the password if needed.
+        opts+=(-o IdentitiesOnly=yes)
     fi
     printf '%s\n' "${opts[@]}"
 }

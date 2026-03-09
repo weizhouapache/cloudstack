@@ -339,9 +339,8 @@ network-extension.sh implement \
     --gateway 10.0.1.1 \
     --cidr 10.0.1.0/24
 
-# network-extension.sh SSHes to device and runs inside the namespace:
-ip netns exec cs-net-prod \
-    /etc/cloudstack/extensions/network-extension-wrapper.sh implement \
+# network-extension.sh SSHes to the host and runs inside the host:
+network-extension-wrapper.sh implement \
     --network-id 42 \
     --vlan 100 \
     --gateway 10.0.1.1 \
@@ -407,8 +406,8 @@ iptables -t nat -A CS_EXTNET_42 -d 203.0.113.20 -j DNAT --to-destination 10.0.1.
 # SNAT outbound
 iptables -t nat -A CS_EXTNET_42 -s 10.0.1.5 -o eth0 -j SNAT --to-source 203.0.113.20
 # FORWARD inbound + outbound
-iptables -t filter -A CS_EXTNET_FWD_42 -d 10.0.1.5 -o csbr42 -j ACCEPT
-iptables -t filter -A CS_EXTNET_FWD_42 -s 10.0.1.5 -i csbr42 -j ACCEPT
+iptables -t filter -A CS_EXTNET_FWD_42 -d 10.0.1.5 -o cs-br-42 -j ACCEPT
+iptables -t filter -A CS_EXTNET_FWD_42 -s 10.0.1.5 -i cs-br-42 -j ACCEPT
 ```
 
 ```bash
@@ -451,7 +450,7 @@ iptables -t nat -A CS_EXTNET_42 -p tcp -d 203.0.113.20 --dport 2222 \
     -j DNAT --to-destination 10.0.1.5:22
 # FORWARD
 iptables -t filter -A CS_EXTNET_FWD_42 -p tcp -d 10.0.1.5 --dport 22 \
-    -o csbr42 -j ACCEPT
+    -o cs-br-42 -j ACCEPT
 ```
 
 Port ranges (e.g. `80:90`) are supported and passed verbatim to iptables `--dport`.
@@ -480,7 +479,7 @@ network-extension.sh destroy  --network-id 42 --vlan 100
 The wrapper:
 1. Removes jump rules from PREROUTING, POSTROUTING, and FORWARD.
 2. Flushes and deletes iptables chains `CS_EXTNET_42` and `CS_EXTNET_FWD_42`.
-3. Brings down and deletes bridge `csbr42`.
+3. Brings down and deletes bridge `cs-br-42`.
 4. Brings down and deletes VLAN interface `eth0.100` (VLAN ID read from state if
    not passed in arguments).
 5. Removes all state under `/var/lib/cloudstack/network-extension/42/`.
@@ -578,7 +577,7 @@ network-extension-wrapper.sh implement \
 
 Actions:
 1. Create VLAN sub-interface `<PHYS_IFACE>.<vlan>` (skipped if `--vlan` is empty).
-2. Create Linux bridge `csbr<id>` and bring it up.
+2. Create Linux bridge `cs-br-<id>` and bring it up.
 3. Attach VLAN interface to bridge.
 4. Assign `<gateway-ip>/<prefix>` to the bridge.
 5. Enable IPv4 forwarding (`sysctl net.ipv4.ip_forward=1`).
@@ -605,7 +604,7 @@ network-extension-wrapper.sh destroy  --network-id <id> [--vlan <vlan-id>]
 Actions:
 1. Remove jump rules from nat PREROUTING, nat POSTROUTING, filter FORWARD.
 2. Flush and delete chains `CS_EXTNET_<id>` (nat) and `CS_EXTNET_FWD_<id>` (filter).
-3. Bring down and delete bridge `csbr<id>`.
+3. Bring down and delete bridge `cs-br-<id>`.
 4. Bring down and delete VLAN interface (VLAN ID read from state if `--vlan` is
    not supplied).
 5. Remove state directory `/var/lib/cloudstack/network-extension/<id>/`.
@@ -621,15 +620,22 @@ network-extension-wrapper.sh assign-ip \
     --public-ip <ip> \
     --source-nat true|false \
     --gateway <gw> \
-    --cidr <cidr>
+    --cidr <cidr> \
+    --public-gateway <pub-gw> \   # OPTIONAL: gateway for the public IP network
+    --public-cidr <pub-cidr>      # OPTIONAL: public network CIDR (e.g. 203.0.113.0/24)
 ```
 
 Actions:
-1. Add `<public-ip>/32` as a secondary address on `<PHYS_IFACE>`.
-2. If `--source-nat true`:
-   * SNAT rule: traffic from `<cidr>` outbound → source `<public-ip>`.
-   * FORWARD ACCEPT: traffic from `<cidr>` towards `<PHYS_IFACE>`.
-3. Save IP state to `/var/lib/cloudstack/network-extension/<id>/ips/<public-ip>`.
+1. Add `<public-ip>/32` (or `<public-ip>/<prefix>` if `--public-cidr` is provided) as a secondary address on the namespace veth endpoint.
+2. If `--public-gateway` is provided, set the namespace default route to use that gateway via the veth device. This makes the public IP's gateway the namespace's default gateway (so replies use the correct next-hop).
+3. If `--source-nat true`:
+   * SNAT rule: traffic from `<cidr>` outbound → source `<public-ip>` (installed in POSTROUTING chain).
+   * FORWARD ACCEPT: traffic from `<cidr>` towards the veth device.
+4. Save IP state to `/var/lib/cloudstack/network-extension/<id>/ips/<public-ip>`.
+
+Notes:
+* `--public-cidr` is used only to pick the address prefix when configuring the IP inside the namespace; internal forwarding and SNAT matching continue to use the guest network CIDR passed via `--cidr`.
+* `--public-gateway` is used to set the namespace default route so that traffic using the public IPs will be routed via the correct next-hop.
 
 ### `release-ip`
 
@@ -665,8 +671,8 @@ iptables rules added (all in chain `CS_EXTNET_<id>` / `CS_EXTNET_FWD_<id>`):
 |-------|-------|------|
 | `nat` | `CS_EXTNET_<id>` | `-d <public-ip> -j DNAT --to-destination <private-ip>` |
 | `nat` | `CS_EXTNET_<id>` | `-s <private-ip> -o <PHYS_IFACE> -j SNAT --to-source <public-ip>` |
-| `filter` | `CS_EXTNET_FWD_<id>` | `-d <private-ip> -o csbr<id> -j ACCEPT` |
-| `filter` | `CS_EXTNET_FWD_<id>` | `-s <private-ip> -i csbr<id> -j ACCEPT` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-d <private-ip> -o cs-br-<id> -j ACCEPT` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-s <private-ip> -i cs-br-<id> -j ACCEPT` |
 
 State saved to `/var/lib/cloudstack/network-extension/<id>/static-nat/<public-ip>`.
 
@@ -702,7 +708,7 @@ iptables rules added:
 | Table | Chain | Rule |
 |-------|-------|------|
 | `nat` | `CS_EXTNET_<id>` | `-p <proto> -d <public-ip> --dport <public-port> -j DNAT --to-destination <private-ip>:<private-port>` |
-| `filter` | `CS_EXTNET_FWD_<id>` | `-p <proto> -d <private-ip> --dport <private-port> -o csbr<id> -j ACCEPT` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-p <proto> -d <private-ip> --dport <private-port> -o cs-br-<id> -j ACCEPT` |
 
 Port ranges (`80:90`) are passed verbatim to iptables `--dport`.
 
@@ -735,7 +741,7 @@ Built-in actions:
 
 | Action | Description |
 |--------|-------------|
-| `reboot-device` | Bounces the bridge: `ip link set csbr<id> down && up` |
+| `reboot-device` | Bounces the bridge: `ip link set cs-br-<id> down && up` |
 | `dump-config` | Prints iptables rules and bridge/interface state to stdout |
 
 To add custom actions, place an executable script at
@@ -797,10 +803,12 @@ network-extension.sh custom-action \
     --network-extension-details '<json>'
 ```
 
-`network-extension-wrapper.sh` decodes the JSON object and exposes each
-key as a `CS_ACTION_PARAM_<KEY>` environment variable (upper-cased, non-
-alphanumeric characters replaced by `_`) before dispatching to the built-in
-handler or hook script.
+`network-extension-wrapper.sh` receives the `--action-params` JSON string and
+forwards it to any hook script unchanged as the `--action-params` argument.
+Hook scripts should decode the JSON themselves (for example using `jq` or a
+small shell/awk parser). This avoids exporting potentially large or complex
+parameter sets as individual environment variables and makes the parameters
+available in a single, portable JSON object.
 
 ---
 
@@ -836,8 +844,9 @@ network-extension.sh custom-action \
 ```
 
 `network-extension.sh` SSHes to the device and runs `network-extension-wrapper.sh`
-with identical arguments.  The wrapper parses `--action-params`, exports
-`CS_ACTION_PARAM_THRESHOLD=90`, and dispatches to the built-in handler or hook.
+with identical arguments.  The wrapper parses `--action-params` and dispatches
+it to the built-in handler or hook script as the `--action-params` CLI
+argument; hook scripts should parse the JSON argument as needed.
 
 ---
 
