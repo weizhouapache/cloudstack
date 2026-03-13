@@ -27,6 +27,8 @@ import javax.persistence.Table;
 
 import org.apache.cloudstack.api.InternalIdentity;
 
+import com.cloud.network.Network.Provider;
+import com.cloud.network.Network.Service;
 import com.cloud.utils.db.GenericDao;
 
 @Entity
@@ -71,6 +73,12 @@ public class NetworkServiceMapVO implements InternalIdentity {
     }
 
     public NetworkServiceMapVO() {
+    }
+
+    public NetworkServiceMapVO(long networkId, Service service, Provider provider) {
+        this.networkId = networkId;
+        this.service = service.getName();
+        this.provider = provider.getName();
     }
 
     public NetworkServiceMapVO(long networkId, String serviceName, String providerName) {
