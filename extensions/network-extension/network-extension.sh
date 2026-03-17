@@ -124,6 +124,7 @@ PHYS_DETAILS="{}"
 EXTENSION_DETAILS="{}"
 NETWORK_ID=""
 CURRENT_DETAILS="{}"
+VPC_ID=""
 FORWARD_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -136,6 +137,10 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --network-id)
             NETWORK_ID="${2:-}"
+            FORWARD_ARGS+=("$1" "$2")
+            shift 2 ;;
+        --vpc-id)
+            VPC_ID="${2:-}"
             FORWARD_ARGS+=("$1" "$2")
             shift 2 ;;
         --current-details)
@@ -259,7 +264,13 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         die "ensure-network-device: no hosts configured. Set 'hosts' in registerExtension details." 1
     fi
 
-    NAMESPACE="cs-net-${NETWORK_ID}"
+    # Namespace: VPC networks share one namespace per VPC (cs-net-<vpcId>);
+    # standalone isolated networks get their own namespace (cs-net-<networkId>).
+    if [ -n "${VPC_ID}" ]; then
+        NAMESPACE="cs-net-${VPC_ID}"
+    else
+        NAMESPACE="cs-net-${NETWORK_ID}"
+    fi
 
     # Try the previously selected host first (from --current-details or --network-extension-details)
     CURRENT_HOST=$(json_get "${CURRENT_DETAILS}" "host")
@@ -271,7 +282,13 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
             if [ "${h}" = "${CURRENT_HOST}" ]; then
                 if host_reachable "${CURRENT_HOST}"; then
                     log "ensure-network-device: network=${NETWORK_ID} keeping current host=${CURRENT_HOST}"
-                    printf '{"host":"%s","namespace":"%s"}\n' "${CURRENT_HOST}" "${NAMESPACE}"
+                    if [ -n "${VPC_ID}" ]; then
+                        printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
+                            "${CURRENT_HOST}" "${NAMESPACE}" "${VPC_ID}"
+                    else
+                        printf '{"host":"%s","namespace":"%s"}\n' \
+                            "${CURRENT_HOST}" "${NAMESPACE}"
+                    fi
                     exit 0
                 else
                     log "ensure-network-device: current host ${CURRENT_HOST} not reachable — failover"
@@ -286,7 +303,12 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         h="${h// /}"
         if host_reachable "${h}"; then
             log "ensure-network-device: network=${NETWORK_ID} selected host=${h}"
-            printf '{"host":"%s","namespace":"%s"}\n' "${h}" "${NAMESPACE}"
+            if [ -n "${VPC_ID}" ]; then
+                printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
+                    "${h}" "${NAMESPACE}" "${VPC_ID}"
+            else
+                printf '{"host":"%s","namespace":"%s"}\n' "${h}" "${NAMESPACE}"
+            fi
             exit 0
         else
             log "ensure-network-device: host ${h} not reachable, trying next"

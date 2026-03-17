@@ -20,45 +20,60 @@
 # network-extension-wrapper.sh
 #
 # Network Extension wrapper script for Apache CloudStack.
-# Runs on a KVM host; manages Linux network namespaces, VLAN interfaces,
-# bridges, and iptables rules to implement isolated guest networks.
+# Runs on a KVM host; manages Linux network namespaces, VLAN bridges,
+# and iptables rules to implement isolated guest networks.
 #
-# Architecture:
-#   - Each CloudStack isolated network gets its own Linux network namespace
-#     named "cs-net-<networkId>" (passed via --namespace).
-#   - The namespace contains:
-#       * A bridge (cs-br-<networkId>) connected to the VLAN interface for
-#         guest VM traffic.
-#       * A veth pair (veth-host-<id> on host / veth-ns-<id> in namespace)
-#         connecting the namespace to the host's shared public bridge
-#         (cspublic) for source NAT and public IP access.
-#       * iptables rules for source NAT, static NAT, and port forwarding.
+# Architecture
+# ============
 #
-# Public-IP bridge:
-#   A shared bridge "cspublic" on the KVM host carries public IP addresses.
-#   Each network namespace connects to it via a veth pair; the namespace-side
-#   endpoint is given the public IP address(es) assigned to the network.
+# Guest (internal) side
+# ---------------------
+# Each CloudStack isolated network has a VLAN.  On the KVM host:
 #
-# Usage:
-#   network-extension-wrapper.sh <command> [options]
+#   ethX.<vlan>          – VLAN sub-interface on the physical NIC (ethX)
+#   br<ethX>-<vlan>      – Linux bridge:  ethX.<vlan> + veth-host-<vlan>
+#   veth-host-<vlan>     – host end of the veth pair → in the bridge
+#   veth-ns-<vlan>       – namespace end → assigned the network gateway IP
 #
-# Commands:
-#   implement          - Create namespace, internal bridge, veth pair, iptables
-#   shutdown           - Remove rules/veth pair (keep namespace for restart)
-#   destroy            - Fully delete namespace and all state
-#   assign-ip          - Add a public IP; configure source NAT if requested
-#   release-ip         - Remove a public IP and its iptables rules
-#   add-static-nat     - Add a 1:1 NAT mapping (public IP <-> private IP)
-#   delete-static-nat  - Remove a 1:1 NAT mapping
-#   add-port-forward   - Add a DNAT port forwarding rule
-#   delete-port-forward - Remove a DNAT port forwarding rule
-#   custom-action      - Run a built-in or hook-based operator action
+# ethX is resolved from the kvmnetworklabel stored in
+# --physical-network-extension-details:
+#   eth1     → eth1  (already a physical NIC)
+#   cloudbr1 → eth1  (find the first non-virtual bridge member)
+# by checking /sys/devices/virtual/net/ and /sys/class/net/<br>/brif/.
 #
-# Both JSON blobs are forwarded by network-extension.sh as named CLI arguments:
+# Namespace
+# ---------
+#   Isolated network : cs-net-<networkId>   (--network-id)
+#   VPC network      : cs-net-<vpcId>       (--vpc-id)
+#
+# Public (NAT) side
+# -----------------
+# For each public IP assigned to the network a veth pair is created:
+#
+#   vph-<pvlan>-<id>   – host end → added to br<pub_ethX>-<pvlan>
+#   vpn-<pvlan>-<id>   – namespace end → assigned the public IP
+#
+# where <pvlan>  = public VLAN tag (from --public-vlan)
+#       <id>     = network or VPC id (from --network-id or vpc-id)
+#       pub_ethX = resolved from public_kvmnetworklabel (falls back to ethX)
+#
+# Interface name lengths (Linux limit: 15 chars)
+#   veth-host-<vlan>   max 14 (vlan ≤ 4094) ✓
+#   veth-ns-<vlan>     max 12                ✓
+#   vph-<pvlan>-<id>   max 14 (pvlan ≤ 4094, id ≤ 9999) ✓
+#   vpn-<pvlan>-<id>   max 14                             ✓
+#
+# iptables chains (inside namespace)
+# ------------------------------------
+#   CS_EXTNET_<networkId>_PR   – PREROUTING  DNAT chain
+#   CS_EXTNET_<networkId>_POST – POSTROUTING SNAT chain
+#   CS_EXTNET_FWD_<networkId>  – FORWARD filter chain
+#
+# CLI arguments (forwarded by network-extension.sh):
 #   --physical-network-extension-details <json>
-#       All extension_resource_map_details (hosts, port, username, phys_iface, …)
+#       kvmnetworklabel, public_kvmnetworklabel, hosts, username, …
 #   --network-extension-details <json>
-#       Per-network opaque JSON blob (host, namespace, …)
+#       host, namespace, …
 ##############################################################################
 
 set -e
@@ -77,7 +92,6 @@ _json_get() {
 
 # ---------------------------------------------------------------------------
 # Pre-scan all arguments for the two JSON blobs.
-# CLI args take precedence over environment variables.
 # ---------------------------------------------------------------------------
 
 PHYS_DETAILS="${CS_PHYSICAL_NETWORK_EXTENSION_DETAILS:-{}}"
@@ -101,14 +115,46 @@ _pre_scan_args() {
 
 _pre_scan_args "$@"
 
-# Physical interface for VLAN traffic — read from physical-network details,
-# then fall back to env-var / default.
-PHYS_IFACE_FROM_DETAILS=$(_json_get "${PHYS_DETAILS}" "phys_iface")
-PHYS_IFACE="${PHYS_IFACE_FROM_DETAILS:-${NETWORK_EXTENSION_PHYS_IFACE:-eth0}}"
+# ---------------------------------------------------------------------------
+# Resolve physical NIC from a kvmnetworklabel
+#
+#   eth1     → eth1     (not in /sys/devices/virtual/net/ → already physical)
+#   cloudbr1 → eth1     (virtual bridge → find first non-virtual brif member)
+# ---------------------------------------------------------------------------
 
-# Shared bridge on the host for public IP access — same precedence.
-PUBLIC_BRIDGE_FROM_DETAILS=$(_json_get "${PHYS_DETAILS}" "public_bridge")
-PUBLIC_BRIDGE="${PUBLIC_BRIDGE_FROM_DETAILS:-cspublic}"
+get_eth_from_label() {
+    local label="$1"
+    [ -z "${label}" ] && echo "eth0" && return
+
+    # Already a physical NIC?
+    if [ ! -d "/sys/devices/virtual/net/${label}" ]; then
+        echo "${label}"
+        return
+    fi
+
+    # Virtual device – check if it is a bridge with physical members
+    if [ -d "/sys/class/net/${label}/brif" ]; then
+        local member iface
+        for member in /sys/class/net/${label}/brif/*; do
+            [ -e "${member}" ] || continue
+            iface=$(basename "${member}")
+            if [ ! -d "/sys/devices/virtual/net/${iface}" ]; then
+                echo "${iface}"
+                return
+            fi
+        done
+    fi
+
+    # Fallback: return the label itself
+    echo "${label}"
+}
+
+# Resolve guest-side and public-side physical interfaces
+KVM_LABEL_RAW=$(_json_get "${PHYS_DETAILS}" "kvmnetworklabel")
+PUB_KVM_LABEL_RAW=$(_json_get "${PHYS_DETAILS}" "public_kvmnetworklabel")
+
+GUEST_ETH=$(get_eth_from_label "${KVM_LABEL_RAW:-eth0}")
+PUB_ETH=$(get_eth_from_label "${PUB_KVM_LABEL_RAW:-${KVM_LABEL_RAW:-eth0}}")
 
 # iptables chain prefix
 CHAIN_PREFIX="CS_EXTNET"
@@ -144,11 +190,114 @@ release_lock() {
     exec 200>&- 2>/dev/null || true
 }
 
-bridge_name()    { echo "cs-br-${1}"; }
-veth_host_name() { echo "veth-host-${1}"; }
-veth_ns_name()   { echo "veth-ns-${1}"; }
-nat_chain()      { echo "${CHAIN_PREFIX}_${1}"; }
-filter_chain()   { echo "${CHAIN_PREFIX}_FWD_${1}"; }
+# ---------------------------------------------------------------------------
+# Interface / bridge name helpers
+# ---------------------------------------------------------------------------
+
+# Host bridge for a VLAN on a given physical NIC:  br<eth>-<vlan>
+host_bridge_name() { echo "br${1}-${2}"; }
+
+# Internal guest veth pair (keyed on VLAN ID and network id):
+#   vh-<vlan>-<id>  (host, in bridge)
+#   vn-<vlan>-<id>  (namespace, gets gateway IP)
+
+# shorten_id <id> -> short deterministic id portion suitable for interface names
+shorten_id() {
+    local id="$1"
+    [ -z "${id}" ] && echo "" && return
+    # If purely numeric, use hex to shorten (stable)
+    if printf '%d' "${id}" >/dev/null 2>&1; then
+        printf '%x' "${id}"
+        return
+    fi
+    # For non-numeric, prefer an md5 prefix if available
+    if command -v md5sum >/dev/null 2>&1; then
+        echo -n "${id}" | md5sum | awk '{print $1}' | cut -c1-6
+        return
+    fi
+    # Fallback: last 6 chars
+    echo "${id}" | awk '{n=length($0); print substr($0, n-5)}'
+}
+
+# Generate guest host veth name: vh-<vlan>-<id> (ensure <=15 chars)
+veth_host_name() {
+    local vlan="$1" id="$2" name short
+    name="vh-${vlan}-${id}"
+    if [ ${#name} -le 15 ]; then
+        echo "${name}"
+        return
+    fi
+    short=$(shorten_id "${id}")
+    name="vh-${vlan}-${short}"
+    if [ ${#name} -le 15 ]; then
+        echo "${name}"
+        return
+    fi
+    echo "${name:0:15}"
+}
+
+# Generate guest namespace veth name: vn-<vlan>-<id> (ensure <=15 chars)
+veth_ns_name() {
+    local vlan="$1" id="$2" name short
+    name="vn-${vlan}-${id}"
+    if [ ${#name} -le 15 ]; then
+        echo "${name}"
+        return
+    fi
+    short=$(shorten_id "${id}")
+    name="vn-${vlan}-${short}"
+    if [ ${#name} -le 15 ]; then
+        echo "${name}"
+        return
+    fi
+    echo "${name:0:15}"
+}
+
+# Public veth pair (keyed on public VLAN and network/vpc id):
+#   vph-<pvlan>-<id>  (host, in public bridge)
+#   vpn-<pvlan>-<id>  (namespace, gets public IP)
+pub_veth_host_name() { echo "vph-${1}-${2}"; }
+pub_veth_ns_name()   { echo "vpn-${1}-${2}"; }
+
+nat_chain()    { echo "${CHAIN_PREFIX}_${1}"; }
+filter_chain() { echo "${CHAIN_PREFIX}_FWD_${1}"; }
+
+# ---------------------------------------------------------------------------
+# ensure_host_bridge <eth> <vlan>
+# Idempotently creates br<eth>-<vlan> with <eth>.<vlan> as a member.
+# Prints the bridge name.
+# ---------------------------------------------------------------------------
+
+ensure_host_bridge() {
+    local eth="$1"
+    local vlan="$2"
+    local br vif current_master
+
+    br=$(host_bridge_name "${eth}" "${vlan}")
+    vif="${eth}.${vlan}"
+
+    # VLAN sub-interface
+    if ! ip link show "${vif}" >/dev/null 2>&1; then
+        ip link add link "${eth}" name "${vif}" type vlan id "${vlan}"
+        log "Created VLAN interface ${vif}"
+    fi
+    ip link set "${vif}" up 2>/dev/null || true
+
+    # Bridge
+    if ! ip link show "${br}" >/dev/null 2>&1; then
+        ip link add name "${br}" type bridge
+        ip link set "${br}" up
+        log "Created host bridge ${br}"
+    fi
+
+    # Attach VLAN interface to bridge (if not already there)
+    current_master=$(ip link show "${vif}" 2>/dev/null | grep -o 'master [^ ]*' | awk '{print $2}' || true)
+    if [ "${current_master}" != "${br}" ]; then
+        ip link set "${vif}" master "${br}" 2>/dev/null || true
+    fi
+
+    echo "${br}"
+}
 
 ensure_chain() {
     local table="$1" chain="$2"
@@ -164,14 +313,6 @@ ensure_jump() {
         -I "${parent}" 1 -j "${chain}"
 }
 
-ensure_public_bridge() {
-    if ! ip link show "${PUBLIC_BRIDGE}" >/dev/null 2>&1; then
-        ip link add name "${PUBLIC_BRIDGE}" type bridge
-        ip link set "${PUBLIC_BRIDGE}" up
-        log "Created shared public bridge ${PUBLIC_BRIDGE}"
-    fi
-}
-
 ##############################################################################
 # Parse common arguments
 ##############################################################################
@@ -179,6 +320,8 @@ ensure_public_bridge() {
 parse_args() {
     NETWORK_ID=""
     NAMESPACE=""
+    VPC_ID=""
+    CHOSEN_ID=""
     VLAN=""
     GATEWAY=""
     CIDR=""
@@ -190,39 +333,50 @@ parse_args() {
     SOURCE_NAT="false"
     PUBLIC_GATEWAY=""
     PUBLIC_CIDR=""
+    PUBLIC_VLAN=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --network-id)   NETWORK_ID="$2";   shift 2 ;;
-            --namespace)    NAMESPACE="$2";     shift 2 ;;
-            --vlan)         VLAN="$2";          shift 2 ;;
-            --gateway)      GATEWAY="$2";       shift 2 ;;
-            --cidr)         CIDR="$2";          shift 2 ;;
-            --public-ip)    PUBLIC_IP="$2";     shift 2 ;;
-            --private-ip)   PRIVATE_IP="$2";    shift 2 ;;
-            --public-port)  PUBLIC_PORT="$2";   shift 2 ;;
-            --private-port) PRIVATE_PORT="$2";  shift 2 ;;
-            --protocol)     PROTOCOL="$2";      shift 2 ;;
-            --source-nat)   SOURCE_NAT="$2";    shift 2 ;;
-            --public-gateway) PUBLIC_GATEWAY="$2"; shift 2 ;;
-            --public-cidr)    PUBLIC_CIDR="$2";    shift 2 ;;
-            # already consumed by _pre_scan_args — skip silently
+            --network-id)          NETWORK_ID="$2";         shift 2 ;;
+            --namespace)           NAMESPACE="$2";           shift 2 ;;
+            --vpc-id)              VPC_ID="$2";              shift 2 ;;
+            --vlan)                VLAN="$2";                shift 2 ;;
+            --gateway)             GATEWAY="$2";             shift 2 ;;
+            --cidr)                CIDR="$2";                shift 2 ;;
+            --public-ip)           PUBLIC_IP="$2";           shift 2 ;;
+            --private-ip)          PRIVATE_IP="$2";          shift 2 ;;
+            --public-port)         PUBLIC_PORT="$2";         shift 2 ;;
+            --private-port)        PRIVATE_PORT="$2";        shift 2 ;;
+            --protocol)            PROTOCOL="$2";            shift 2 ;;
+            --source-nat)          SOURCE_NAT="$2";          shift 2 ;;
+            --public-gateway)      PUBLIC_GATEWAY="$2";      shift 2 ;;
+            --public-cidr)         PUBLIC_CIDR="$2";         shift 2 ;;
+            --public-vlan)         PUBLIC_VLAN="$2";         shift 2 ;;
+            # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
-                            shift 2 ;;
-            *)              shift ;;
+                                   shift 2 ;;
+            *)                     shift ;;
         esac
     done
 
     [ -z "${NETWORK_ID}" ] && die "Missing --network-id"
 
-    # Derive namespace: prefer CLI arg, then ext.details JSON, then default pattern
+    # Namespace: VPC → cs-net-<vpcId>; standalone → cs-net-<networkId>
     if [ -z "${NAMESPACE}" ]; then
-        NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
-        NAMESPACE="${NS_FROM_DETAILS:-cs-net-${NETWORK_ID}}"
+        if [ -n "${VPC_ID}" ]; then
+            NAMESPACE="cs-net-${VPC_ID}"
+        else
+            local NS_FROM_DETAILS
+            NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
+            NAMESPACE="${NS_FROM_DETAILS:-cs-net-${NETWORK_ID}}"
+        fi
     fi
+
+    # CHOSEN_ID selects vpc-id when present, otherwise network-id
+    CHOSEN_ID="${VPC_ID:-${NETWORK_ID}}"
 }
 
-# Load persisted state (used by shutdown, destroy, IP operations)
+# Load persisted state (shutdown, destroy, IP operations)
 _load_state() {
     if [ -z "${VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/vlan" ]; then
         VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/vlan")
@@ -234,15 +388,22 @@ _load_state() {
         if [ -f "${STATE_DIR}/${NETWORK_ID}/namespace" ]; then
             NAMESPACE=$(cat "${STATE_DIR}/${NETWORK_ID}/namespace")
         else
-            # Derive from extension details JSON, then default
+            local NS_FROM_DETAILS
             NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
             NAMESPACE="${NS_FROM_DETAILS:-cs-net-${NETWORK_ID}}"
         fi
     fi
+    # CHOSEN_ID will be set by parse_args; do not read or persist legacy network_or_vpc_id
 }
 
 ##############################################################################
 # Command: implement
+#
+# 1. Create namespace cs-net-<id>
+# 2. Create host bridge br<ethX>-<vlan> with ethX.<vlan> sub-interface
+# 3. Create veth pair: veth-host-<vlan> (host, in bridge) / veth-ns-<vlan> (namespace)
+# 4. Assign gateway IP to veth-ns-<vlan> inside namespace
+# 5. Set up iptables chains inside namespace
 ##############################################################################
 
 cmd_implement() {
@@ -251,159 +412,78 @@ cmd_implement() {
 
     log "implement: network=${NETWORK_ID} ns=${NAMESPACE} vlan=${VLAN} gw=${GATEWAY} cidr=${CIDR}"
 
-    local br veth_h veth_n
-    br=$(bridge_name "${NETWORK_ID}")
-    veth_h=$(veth_host_name "${NETWORK_ID}")
-    veth_n=$(veth_ns_name "${NETWORK_ID}")
+    local veth_h veth_n nchain_pr nchain_post fchain
+    veth_h=$(veth_host_name "${VLAN}" "${CHOSEN_ID}")
+    veth_n=$(veth_ns_name   "${VLAN}" "${CHOSEN_ID}")
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
+    nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
+    fchain=$(filter_chain "${NETWORK_ID}")
 
-    # ---- Create namespace ----
+    # ---- 1. Create namespace ----
     if ! ip netns list 2>/dev/null | grep -q "^${NAMESPACE}\b"; then
         ip netns add "${NAMESPACE}"
         log "Created namespace ${NAMESPACE}"
     fi
     ip netns exec "${NAMESPACE}" ip link set lo up 2>/dev/null || true
 
-    # ---- VLAN interface and internal bridge ----
+    # ---- 2. Host bridge + VLAN sub-interface ----
     if [ -n "${VLAN}" ]; then
-        local vif="${PHYS_IFACE}.${VLAN}"
+        ensure_host_bridge "${GUEST_ETH}" "${VLAN}"
+        local br
+        br=$(host_bridge_name "${GUEST_ETH}" "${VLAN}")
 
-        # Create VLAN interface on host if not present
-        if ! ip link show "${vif}" >/dev/null 2>&1 && \
-           ! ip netns exec "${NAMESPACE}" ip link show "${vif}" >/dev/null 2>&1; then
-            ip link add link "${PHYS_IFACE}" name "${vif}" type vlan id "${VLAN}"
-            log "Created VLAN interface ${vif}"
+        # ---- 3. Guest veth pair ----
+        if ! ip link show "${veth_h}" >/dev/null 2>&1; then
+            ip link add "${veth_h}" type veth peer name "${veth_n}"
+            ip link set "${veth_n}" netns "${NAMESPACE}"
+            ip link set "${veth_h}" master "${br}"
+            ip link set "${veth_h}" up
+            ip netns exec "${NAMESPACE}" ip link set "${veth_n}" up
+            log "Created guest veth ${veth_h} (host→${br}) <-> ${veth_n} (namespace)"
+        else
+            ip link set "${veth_h}" up 2>/dev/null || true
+            ip netns exec "${NAMESPACE}" ip link set "${veth_n}" up 2>/dev/null || true
         fi
-
-        # Move VLAN interface into namespace (if not already there)
-        if ip link show "${vif}" >/dev/null 2>&1; then
-            ip link set "${vif}" netns "${NAMESPACE}"
-            log "Moved ${vif} to namespace ${NAMESPACE}"
-        fi
-        ip netns exec "${NAMESPACE}" ip link set "${vif}" up
-
-        # Create internal bridge inside namespace
-        if ! ip netns exec "${NAMESPACE}" ip link show "${br}" >/dev/null 2>&1; then
-            # Create on host and move into namespace
-            ip link add name "${br}" type bridge 2>/dev/null || true
-            ip link set "${br}" netns "${NAMESPACE}" 2>/dev/null || true
-            # If bridge was already in namespace (re-implement):
-            ip netns exec "${NAMESPACE}" ip link add name "${br}" type bridge 2>/dev/null || true
-            log "Created bridge ${br} in namespace ${NAMESPACE}"
-        fi
-        ip netns exec "${NAMESPACE}" ip link set "${br}" up
-
-        # Attach VLAN interface to bridge inside namespace
-        ip netns exec "${NAMESPACE}" ip link set "${vif}" master "${br}" 2>/dev/null || true
     fi
 
-    # Assign gateway IP to bridge inside namespace
+    # ---- 4. Assign gateway IP to namespace veth ----
     if [ -n "${GATEWAY}" ] && [ -n "${CIDR}" ]; then
         local prefix
         prefix=$(echo "${CIDR}" | cut -d'/' -f2)
-        ip netns exec "${NAMESPACE}" ip addr show "${br}" 2>/dev/null | \
+        ip netns exec "${NAMESPACE}" ip addr show "${veth_n}" 2>/dev/null | \
             grep -q "${GATEWAY}/${prefix}" || \
-            ip netns exec "${NAMESPACE}" ip addr add "${GATEWAY}/${prefix}" dev "${br}"
-        log "Assigned ${GATEWAY}/${prefix} to ${br} in ${NAMESPACE}"
+            ip netns exec "${NAMESPACE}" ip addr add "${GATEWAY}/${prefix}" dev "${veth_n}"
+        log "Assigned ${GATEWAY}/${prefix} to ${veth_n} in ${NAMESPACE}"
     fi
 
-    # ---- veth pair: connect namespace to shared public bridge ----
-    ensure_public_bridge
-
-    if ! ip link show "${veth_h}" >/dev/null 2>&1; then
-        ip link add "${veth_h}" type veth peer name "${veth_n}"
-        ip link set "${veth_n}" netns "${NAMESPACE}"
-        ip link set "${veth_h}" master "${PUBLIC_BRIDGE}"
-        ip link set "${veth_h}" up
-        ip netns exec "${NAMESPACE}" ip link set "${veth_n}" up
-        log "Created veth ${veth_h} (host) <-> ${veth_n} (namespace)"
-    fi
-
-    # Default route inside namespace: traffic leaves via veth
-    ip netns exec "${NAMESPACE}" ip route show | grep -q "^default" || \
-        ip netns exec "${NAMESPACE}" ip route add default dev "${veth_n}" 2>/dev/null || true
-
-    # ---- IP forwarding inside namespace ----
+    # ---- 5. IP forwarding ----
     ip netns exec "${NAMESPACE}" sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
-    # ---- iptables chains inside namespace ----
-    local nchain_base nchain_pr nchain_post fchain
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
-    fchain=$(filter_chain "${NETWORK_ID}")
-
-    # Migrate legacy single-chain setups (CS_EXTNET_<id>) to the new PR/POST split.
-    # If an old base chain exists, copy its rules into the PR/POST chains, classifying
-    # rules containing '-o ' or '-j SNAT' or '--to-source' as POST (SNAT), others as PR (DNAT).
-    if ip netns exec "${NAMESPACE}" iptables -t nat -n -L "${nchain_base}" >/dev/null 2>&1; then
-        log "Detected legacy NAT chain ${nchain_base} — migrating rules to ${nchain_pr} and ${nchain_post}"
-        # Ensure target chains exist
-        ip netns exec "${NAMESPACE}" iptables -t nat -n -L "${nchain_pr}" >/dev/null 2>&1 || \
-            ip netns exec "${NAMESPACE}" iptables -t nat -N "${nchain_pr}"
-        ip netns exec "${NAMESPACE}" iptables -t nat -n -L "${nchain_post}" >/dev/null 2>&1 || \
-            ip netns exec "${NAMESPACE}" iptables -t nat -N "${nchain_post}"
-
-        # Copy rules from the legacy chain
-        ip netns exec "${NAMESPACE}" iptables -t nat -S "${nchain_base}" 2>/dev/null | \
-        while read -r rule; do
-            # rule looks like: -A CS_EXTNET_209 ...rest...
-            # Extract the part after the chain name
-            rule_body=${rule#-A ${nchain_base}}
-            # Skip empty
-            [ -z "${rule_body// /}" ] && continue
-            # Classify as POST if it references an output interface (-o) or is a SNAT rule
-            if printf '%s' "${rule_body}" | grep -qE '\s-o\s|\-j\s+SNAT|--to-source'; then
-                ip netns exec "${NAMESPACE}" iptables -t nat -C "${nchain_post}" ${rule_body} 2>/dev/null || \
-                    ip netns exec "${NAMESPACE}" iptables -t nat -A "${nchain_post}" ${rule_body}
-            else
-                ip netns exec "${NAMESPACE}" iptables -t nat -C "${nchain_pr}" ${rule_body} 2>/dev/null || \
-                    ip netns exec "${NAMESPACE}" iptables -t nat -A "${nchain_pr}" ${rule_body}
-            fi
-        done || true
-
-        # Add jumps from PREROUTING/POSTROUTING to new chains if missing
-        ip netns exec "${NAMESPACE}" iptables -t nat -C PREROUTING -j "${nchain_pr}" 2>/dev/null || \
-            ip netns exec "${NAMESPACE}" iptables -t nat -I PREROUTING 1 -j "${nchain_pr}"
-        ip netns exec "${NAMESPACE}" iptables -t nat -C POSTROUTING -j "${nchain_post}" 2>/dev/null || \
-            ip netns exec "${NAMESPACE}" iptables -t nat -I POSTROUTING 1 -j "${nchain_post}"
-
-        # Remove legacy jumps to the old chain if present
-        ip netns exec "${NAMESPACE}" iptables -t nat -D PREROUTING -j "${nchain_base}" 2>/dev/null || true
-        ip netns exec "${NAMESPACE}" iptables -t nat -D POSTROUTING -j "${nchain_base}" 2>/dev/null || true
-
-        # Flush and delete the legacy chain to avoid confusion (best-effort)
-        ip netns exec "${NAMESPACE}" iptables -t nat -F "${nchain_base}" 2>/dev/null || true
-        ip netns exec "${NAMESPACE}" iptables -t nat -X "${nchain_base}" 2>/dev/null || true
-
-        log "Migration of ${nchain_base} completed"
-    fi
-
+    # ---- 6. iptables chains ----
     ensure_chain nat    "${nchain_pr}"
     ensure_chain nat    "${nchain_post}"
-    # PREROUTING -> nchain_pr (DNAT)
+    ensure_chain filter "${fchain}"
     ensure_jump  nat    PREROUTING  "${nchain_pr}"
-    # POSTROUTING -> nchain_post (SNAT)
     ensure_jump  nat    POSTROUTING "${nchain_post}"
     ensure_jump  filter FORWARD     "${fchain}"
 
-    # Allow forwarding for bridge (guest VM) traffic
+    # Allow forwarding for guest traffic in/out of veth-ns-<vlan>
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -C "${fchain}" -i "${br}" -j ACCEPT 2>/dev/null || \
+        -C "${fchain}" -i "${veth_n}" -j ACCEPT 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -A "${fchain}" -i "${br}" -j ACCEPT
+        -A "${fchain}" -i "${veth_n}" -j ACCEPT
 
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -C "${fchain}" -o "${br}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+        -C "${fchain}" -o "${veth_n}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -A "${fchain}" -o "${br}" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        -A "${fchain}" -o "${veth_n}" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
-    # ---- Persist state ----
+    # ---- 7. Persist state ----
     mkdir -p "${STATE_DIR}/${NETWORK_ID}"
-    echo "${VLAN}"      > "${STATE_DIR}/${NETWORK_ID}/vlan"
-    echo "${GATEWAY}"   > "${STATE_DIR}/${NETWORK_ID}/gateway"
-    echo "${CIDR}"      > "${STATE_DIR}/${NETWORK_ID}/cidr"
-    echo "${br}"        > "${STATE_DIR}/${NETWORK_ID}/bridge"
-    echo "${NAMESPACE}" > "${STATE_DIR}/${NETWORK_ID}/namespace"
+    echo "${VLAN}"              > "${STATE_DIR}/${NETWORK_ID}/vlan"
+    echo "${GATEWAY}"           > "${STATE_DIR}/${NETWORK_ID}/gateway"
+    echo "${CIDR}"              > "${STATE_DIR}/${NETWORK_ID}/cidr"
+    echo "${NAMESPACE}"         > "${STATE_DIR}/${NETWORK_ID}/namespace"
 
     release_lock
     log "implement: done network=${NETWORK_ID} namespace=${NAMESPACE}"
@@ -411,7 +491,8 @@ cmd_implement() {
 
 ##############################################################################
 # Command: shutdown
-# Remove iptables rules and veth pair. Keep namespace + bridge for restart.
+# Flush iptables chains and remove public veth pairs.
+# Keep namespace and guest veth (bridge stays on host for VM traffic).
 ##############################################################################
 
 cmd_shutdown() {
@@ -421,29 +502,37 @@ cmd_shutdown() {
 
     log "shutdown: network=${NETWORK_ID} ns=${NAMESPACE}"
 
-    local nchain_base nchain_pr nchain_post fchain veth_h
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
+    local nchain_pr nchain_post fchain
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
+    nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
-    veth_h=$(veth_host_name "${NETWORK_ID}")
 
-    # Flush and remove iptables chains (both nat chains)
-    ip netns exec "${NAMESPACE}" iptables -t nat    -D PREROUTING  -j "${nchain_pr}" 2>/dev/null || true
+    # Remove iptables chain jumps
+    ip netns exec "${NAMESPACE}" iptables -t nat    -D PREROUTING  -j "${nchain_pr}"   2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat    -D POSTROUTING -j "${nchain_post}" 2>/dev/null || true
-    ip netns exec "${NAMESPACE}" iptables -t filter -D FORWARD     -j "${fchain}" 2>/dev/null || true
+    ip netns exec "${NAMESPACE}" iptables -t filter -D FORWARD     -j "${fchain}"      2>/dev/null || true
 
-    ip netns exec "${NAMESPACE}" iptables -t nat    -F "${nchain_pr}" 2>/dev/null || true
-    ip netns exec "${NAMESPACE}" iptables -t nat    -X "${nchain_pr}" 2>/dev/null || true
+    # Flush and delete chains
+    ip netns exec "${NAMESPACE}" iptables -t nat    -F "${nchain_pr}"   2>/dev/null || true
+    ip netns exec "${NAMESPACE}" iptables -t nat    -X "${nchain_pr}"   2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat    -F "${nchain_post}" 2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat    -X "${nchain_post}" 2>/dev/null || true
-    ip netns exec "${NAMESPACE}" iptables -t filter -F "${fchain}" 2>/dev/null || true
-    ip netns exec "${NAMESPACE}" iptables -t filter -X "${fchain}" 2>/dev/null || true
+    ip netns exec "${NAMESPACE}" iptables -t filter -F "${fchain}"      2>/dev/null || true
+    ip netns exec "${NAMESPACE}" iptables -t filter -X "${fchain}"      2>/dev/null || true
 
-    # Remove veth pair (removes namespace end automatically)
-    ip link del "${veth_h}" 2>/dev/null || true
+    # Remove public veth pairs (host-side; namespace-side disappears when IP is removed)
+    if [ -d "${STATE_DIR}/${NETWORK_ID}/ips" ]; then
+        for f in "${STATE_DIR}/${NETWORK_ID}/ips/"*.pvlan; do
+            [ -f "${f}" ] || continue
+            local pvlan pveth_h
+            pvlan=$(cat "${f}")
+            pveth_h=$(pub_veth_host_name "${pvlan}" "${CHOSEN_ID}")
+            ip link del "${pveth_h}" 2>/dev/null || true
+            log "shutdown: removed public veth ${pveth_h}"
+        done
+    fi
 
-    # Clean IP/rule state (will be re-applied on next implement)
+    # Clean transient state
     rm -rf "${STATE_DIR}/${NETWORK_ID}/ips" \
            "${STATE_DIR}/${NETWORK_ID}/static-nat" \
            "${STATE_DIR}/${NETWORK_ID}/port-forward"
@@ -464,20 +553,23 @@ cmd_destroy() {
 
     log "destroy: network=${NETWORK_ID} ns=${NAMESPACE}"
 
+    # Remove guest veth host-side
     local veth_h
-    veth_h=$(veth_host_name "${NETWORK_ID}")
-
-    # Remove veth host end (also removes namespace end)
+    veth_h=$(veth_host_name "${VLAN}" "${CHOSEN_ID}")
     ip link del "${veth_h}" 2>/dev/null || true
 
-    # Remove VLAN interface (may be inside namespace)
-    if [ -n "${VLAN}" ]; then
-        local vif="${PHYS_IFACE}.${VLAN}"
-        ip netns exec "${NAMESPACE}" ip link del "${vif}" 2>/dev/null || \
-            ip link del "${vif}" 2>/dev/null || true
+    # Remove public veth pairs
+    if [ -d "${STATE_DIR}/${NETWORK_ID}/ips" ]; then
+        for f in "${STATE_DIR}/${NETWORK_ID}/ips/"*.pvlan; do
+            [ -f "${f}" ] || continue
+            local pvlan pveth_h
+            pvlan=$(cat "${f}")
+            pveth_h=$(pub_veth_host_name "${pvlan}" "${CHOSEN_ID}")
+            ip link del "${pveth_h}" 2>/dev/null || true
+        done
     fi
 
-    # Delete the namespace (removes all remaining interfaces inside it)
+    # Delete namespace (removes all interfaces inside it)
     if ip netns list 2>/dev/null | grep -q "^${NAMESPACE}\b"; then
         ip netns del "${NAMESPACE}"
         log "Deleted namespace ${NAMESPACE}"
@@ -491,6 +583,9 @@ cmd_destroy() {
 
 ##############################################################################
 # Command: assign-ip
+#
+# Creates a public veth pair for the given public IP/VLAN, assigns the IP
+# to the namespace end, and configures source NAT if requested.
 ##############################################################################
 
 cmd_assign_ip() {
@@ -499,56 +594,77 @@ cmd_assign_ip() {
     acquire_lock "${NETWORK_ID}"
 
     log "assign-ip: network=${NETWORK_ID} ns=${NAMESPACE} ip=${PUBLIC_IP} source_nat=${SOURCE_NAT}"
-    [ -z "${PUBLIC_IP}" ] && die "Missing --public-ip"
+    [ -z "${PUBLIC_IP}" ]   && die "Missing --public-ip"
+    [ -z "${PUBLIC_VLAN}" ] && die "Missing --public-vlan"
 
-    local veth_n nchain_base nchain_pr nchain_post fchain
-    veth_n=$(veth_ns_name "${NETWORK_ID}")
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
+    local pveth_h pveth_n nchain_post fchain
+    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN}" "${CHOSEN_ID}")
+    nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Add public IP to the namespace-side veth endpoint
-    # If public CIDR provided, use its prefix when adding the IP inside the namespace
+    # ---- Ensure public host bridge ----
+    ensure_host_bridge "${PUB_ETH}" "${PUBLIC_VLAN}"
+    local pub_br
+    pub_br=$(host_bridge_name "${PUB_ETH}" "${PUBLIC_VLAN}")
+
+    # ---- Create public veth pair (idempotent) ----
+    if ! ip link show "${pveth_h}" >/dev/null 2>&1; then
+        ip link add "${pveth_h}" type veth peer name "${pveth_n}"
+        ip link set "${pveth_n}" netns "${NAMESPACE}"
+        ip link set "${pveth_h}" master "${pub_br}"
+        ip link set "${pveth_h}" up
+        ip netns exec "${NAMESPACE}" ip link set "${pveth_n}" up
+        log "Created public veth ${pveth_h} (host→${pub_br}) <-> ${pveth_n} (namespace)"
+    else
+        ip link set "${pveth_h}" up 2>/dev/null || true
+        ip netns exec "${NAMESPACE}" ip link set "${pveth_n}" up 2>/dev/null || true
+    fi
+
+    # ---- Assign public IP to namespace end ----
+    local ADDR_SPEC
     if [ -n "${PUBLIC_CIDR}" ] && echo "${PUBLIC_CIDR}" | grep -q '/'; then
+        local PREFIX
         PREFIX=$(echo "${PUBLIC_CIDR}" | cut -d'/' -f2)
         ADDR_SPEC="${PUBLIC_IP}/${PREFIX}"
     else
         ADDR_SPEC="${PUBLIC_IP}/32"
     fi
-    ip netns exec "${NAMESPACE}" ip addr show "${veth_n}" 2>/dev/null | \
+    ip netns exec "${NAMESPACE}" ip addr show "${pveth_n}" 2>/dev/null | \
         grep -q "${PUBLIC_IP}/" || \
-        ip netns exec "${NAMESPACE}" ip addr add "${ADDR_SPEC}" dev "${veth_n}"
-    ip netns exec "${NAMESPACE}" ip link set "${veth_n}" up
+        ip netns exec "${NAMESPACE}" ip addr add "${ADDR_SPEC}" dev "${pveth_n}"
 
-    # Add host route so incoming traffic for this IP is sent to the veth host-end
+    # ---- Host route for incoming traffic ----
     ip route show | grep -q "^${PUBLIC_IP}" || \
-        ip route add "${PUBLIC_IP}/32" dev "$(veth_host_name "${NETWORK_ID}")" 2>/dev/null || true
+        ip route add "${PUBLIC_IP}/32" dev "${pveth_h}" 2>/dev/null || true
 
-    # If a public gateway is provided, set the namespace default route to it
+    # ---- Default route inside namespace toward upstream gateway ----
     if [ -n "${PUBLIC_GATEWAY}" ]; then
-        # Replace default route inside namespace to use the public gateway via veth
-        ip netns exec "${NAMESPACE}" ip route replace default via "${PUBLIC_GATEWAY}" dev "${veth_n}" 2>/dev/null || \
-            ip netns exec "${NAMESPACE}" ip route add default via "${PUBLIC_GATEWAY}" dev "${veth_n}" 2>/dev/null || true
-        log "Set default route inside ${NAMESPACE} via ${PUBLIC_GATEWAY} (dev ${veth_n})"
+        ip netns exec "${NAMESPACE}" ip route replace default \
+            via "${PUBLIC_GATEWAY}" dev "${pveth_n}" 2>/dev/null || \
+        ip netns exec "${NAMESPACE}" ip route add default \
+            via "${PUBLIC_GATEWAY}" dev "${pveth_n}" 2>/dev/null || true
+        log "Default route in ${NAMESPACE}: via ${PUBLIC_GATEWAY} dev ${pveth_n}"
     fi
 
-    # Source NAT: SNAT guest CIDR traffic leaving via veth
+    # ---- Source NAT ----
     if [ "${SOURCE_NAT}" = "true" ] && [ -n "${CIDR}" ]; then
-        # SNAT rules belong in POSTROUTING chain
         ip netns exec "${NAMESPACE}" iptables -t nat \
-            -C "${nchain_post}" -s "${CIDR}" -o "${veth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || \
+            -C "${nchain_post}" -s "${CIDR}" -o "${pveth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || \
         ip netns exec "${NAMESPACE}" iptables -t nat \
-            -A "${nchain_post}" -s "${CIDR}" -o "${veth_n}" -j SNAT --to-source "${PUBLIC_IP}"
+            -A "${nchain_post}" -s "${CIDR}" -o "${pveth_n}" -j SNAT --to-source "${PUBLIC_IP}"
         ip netns exec "${NAMESPACE}" iptables -t filter \
-            -C "${fchain}" -o "${veth_n}" -s "${CIDR}" -j ACCEPT 2>/dev/null || \
+            -C "${fchain}" -o "${pveth_n}" -s "${CIDR}" -j ACCEPT 2>/dev/null || \
         ip netns exec "${NAMESPACE}" iptables -t filter \
-            -A "${fchain}" -o "${veth_n}" -s "${CIDR}" -j ACCEPT
-        log "Source NAT: ${CIDR} -> ${PUBLIC_IP} in ${NAMESPACE}"
+            -A "${fchain}" -o "${pveth_n}" -s "${CIDR}" -j ACCEPT
+        log "Source NAT: ${CIDR} -> ${PUBLIC_IP} via ${pveth_n}"
     fi
 
+    # ---- Persist state ----
     mkdir -p "${STATE_DIR}/${NETWORK_ID}/ips"
-    echo "${SOURCE_NAT}" > "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}"
+    echo "${SOURCE_NAT}"  > "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}"
+    # Save public VLAN so add-static-nat / add-port-forward can look it up
+    echo "${PUBLIC_VLAN}" > "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan"
 
     release_lock
     log "assign-ip: done ${PUBLIC_IP} on network ${NETWORK_ID}"
@@ -566,48 +682,69 @@ cmd_release_ip() {
     log "release-ip: network=${NETWORK_ID} ns=${NAMESPACE} ip=${PUBLIC_IP}"
     [ -z "${PUBLIC_IP}" ] && die "Missing --public-ip"
 
-    local veth_n nchain_base nchain_pr nchain_post fchain
-    veth_n=$(veth_ns_name "${NETWORK_ID}")
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
+    # Restore PUBLIC_VLAN from state if not on CLI
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    fi
+    [ -z "${PUBLIC_VLAN}" ] && die "release-ip: cannot determine public VLAN for ${PUBLIC_IP}"
+
+    local pveth_h pveth_n nchain_post fchain
+    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN}" "${CHOSEN_ID}")
+    nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Remove source NAT
+    # Remove SNAT rule
     if [ -n "${CIDR}" ]; then
         ip netns exec "${NAMESPACE}" iptables -t nat \
-            -D "${nchain_post}" -s "${CIDR}" -o "${veth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || true
+            -D "${nchain_post}" -s "${CIDR}" -o "${pveth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || true
         ip netns exec "${NAMESPACE}" iptables -t filter \
-            -D "${fchain}" -o "${veth_n}" -s "${CIDR}" -j ACCEPT 2>/dev/null || true
+            -D "${fchain}" -o "${pveth_n}" -s "${CIDR}" -j ACCEPT 2>/dev/null || true
     fi
 
-    # Remove static NAT rules referencing this public IP (search in PR chain)
+    # Remove DNAT rules for this public IP
+    local nchain_pr
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     ip netns exec "${NAMESPACE}" iptables -t nat -S "${nchain_pr}" 2>/dev/null | \
-        grep -- "-d ${PUBLIC_IP}\|--to-source ${PUBLIC_IP}" | \
+        grep -- "-d ${PUBLIC_IP}" | \
         while read -r rule; do
             ip netns exec "${NAMESPACE}" iptables -t nat \
                 -D "${nchain_pr}" ${rule#-A ${nchain_pr}} 2>/dev/null || true
         done
 
-    # Remove host route and IP from veth
+    # Remove host route
     ip route del "${PUBLIC_IP}/32" 2>/dev/null || true
-    # Remove address using the same prefix we added (try CIDR prefix first, fall back to /32)
-    if [ -n "${PUBLIC_CIDR}" ] && echo "${PUBLIC_CIDR}" | grep -q '/'; then
-        PREFIX=$(echo "${PUBLIC_CIDR}" | cut -d'/' -f2)
-        ip netns exec "${NAMESPACE}" ip addr del "${PUBLIC_IP}/${PREFIX}" dev "${veth_n}" 2>/dev/null || true
-    fi
-    ip netns exec "${NAMESPACE}" ip addr del "${PUBLIC_IP}/32" dev "${veth_n}" 2>/dev/null || true
 
-    # If we set a default route to PUBLIC_GATEWAY and there are no remaining public IPs,
-    # remove that default route (best-effort)
+    # Remove IP from namespace veth
+    if [ -n "${PUBLIC_CIDR}" ] && echo "${PUBLIC_CIDR}" | grep -q '/'; then
+        local PREFIX
+        PREFIX=$(echo "${PUBLIC_CIDR}" | cut -d'/' -f2)
+        ip netns exec "${NAMESPACE}" ip addr del "${PUBLIC_IP}/${PREFIX}" dev "${pveth_n}" 2>/dev/null || true
+    fi
+    ip netns exec "${NAMESPACE}" ip addr del "${PUBLIC_IP}/32" dev "${pveth_n}" 2>/dev/null || true
+
+    # Delete public veth if no other IPs share the same public VLAN + network id
+    local remaining
+    remaining=$(find "${STATE_DIR}/${NETWORK_ID}/ips/" -name "*.pvlan" \
+        ! -name "${PUBLIC_IP}.pvlan" -exec grep -l "^${PUBLIC_VLAN}$" {} \; 2>/dev/null | wc -l)
+    if [ "${remaining}" -eq 0 ]; then
+        ip link del "${pveth_h}" 2>/dev/null || true
+        log "release-ip: removed public veth ${pveth_h}"
+    fi
+
+    # Remove default route if no IPs remain
     if [ -n "${PUBLIC_GATEWAY}" ]; then
-        if [ -d "${STATE_DIR}/${NETWORK_ID}/ips" ] && [ -z "$(ls -A "${STATE_DIR}/${NETWORK_ID}/ips" 2>/dev/null)" ]; then
-            ip netns exec "${NAMESPACE}" ip route del default via "${PUBLIC_GATEWAY}" dev "${veth_n}" 2>/dev/null || true
-            log "Removed default route via ${PUBLIC_GATEWAY} in ${NAMESPACE} (no remaining public IPs)"
+        local total_ips
+        total_ips=$(find "${STATE_DIR}/${NETWORK_ID}/ips/" -maxdepth 1 \
+            -not -name "*.pvlan" -type f 2>/dev/null | wc -l)
+        if [ "${total_ips}" -le 1 ]; then
+            ip netns exec "${NAMESPACE}" ip route del default \
+                via "${PUBLIC_GATEWAY}" dev "${pveth_n}" 2>/dev/null || true
         fi
     fi
 
-    rm -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}"
+    rm -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}" \
+          "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan"
 
     release_lock
     log "release-ip: done ${PUBLIC_IP} on network ${NETWORK_ID}"
@@ -626,43 +763,47 @@ cmd_add_static_nat() {
     [ -z "${PUBLIC_IP}" ]  && die "Missing --public-ip"
     [ -z "${PRIVATE_IP}" ] && die "Missing --private-ip"
 
-    local veth_n br nchain_base nchain_pr nchain_post fchain
-    veth_n=$(veth_ns_name "${NETWORK_ID}")
-    br=$(bridge_name "${NETWORK_ID}")
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
-    nchain="${nchain_pr}"
+    # Restore PUBLIC_VLAN from state (written by assign-ip)
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    fi
+
+    local pveth_h pveth_n veth_n nchain_pr nchain_post fchain
+    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
+    nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Ensure public IP is on veth
-    ip netns exec "${NAMESPACE}" ip addr show "${veth_n}" 2>/dev/null | \
+    # Idempotent: ensure public IP is on the namespace veth and host route exists
+    ip netns exec "${NAMESPACE}" ip addr show "${pveth_n}" 2>/dev/null | \
         grep -q "${PUBLIC_IP}/32" || \
-        ip netns exec "${NAMESPACE}" ip addr add "${PUBLIC_IP}/32" dev "${veth_n}" 2>/dev/null || true
+        ip netns exec "${NAMESPACE}" ip addr add "${PUBLIC_IP}/32" dev "${pveth_n}" 2>/dev/null || true
     ip route show | grep -q "^${PUBLIC_IP}" || \
-        ip route add "${PUBLIC_IP}/32" dev "$(veth_host_name "${NETWORK_ID}")" 2>/dev/null || true
+        ip route add "${PUBLIC_IP}/32" dev "${pveth_h}" 2>/dev/null || true
 
-    # DNAT: inbound to public IP -> private IP (PREROUTING chain)
+    # DNAT: inbound public IP → private IP (PREROUTING)
     ip netns exec "${NAMESPACE}" iptables -t nat \
         -C "${nchain_pr}" -d "${PUBLIC_IP}" -j DNAT --to-destination "${PRIVATE_IP}" 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t nat \
         -A "${nchain_pr}" -d "${PUBLIC_IP}" -j DNAT --to-destination "${PRIVATE_IP}"
 
-    # SNAT: outbound from private IP -> public IP (POSTROUTING chain)
+    # SNAT: outbound private IP → public IP (POSTROUTING, out public veth)
     ip netns exec "${NAMESPACE}" iptables -t nat \
-        -C "${nchain_post}" -s "${PRIVATE_IP}" -o "${veth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || \
+        -C "${nchain_post}" -s "${PRIVATE_IP}" -o "${pveth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t nat \
-        -A "${nchain_post}" -s "${PRIVATE_IP}" -o "${veth_n}" -j SNAT --to-source "${PUBLIC_IP}"
+        -A "${nchain_post}" -s "${PRIVATE_IP}" -o "${pveth_n}" -j SNAT --to-source "${PUBLIC_IP}"
 
-    # Forwarding
+    # FORWARD: allow traffic to/from private IP via guest veth
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -C "${fchain}" -d "${PRIVATE_IP}" -o "${br}" -j ACCEPT 2>/dev/null || \
+        -C "${fchain}" -d "${PRIVATE_IP}" -o "${veth_n}" -j ACCEPT 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -A "${fchain}" -d "${PRIVATE_IP}" -o "${br}" -j ACCEPT
+        -A "${fchain}" -d "${PRIVATE_IP}" -o "${veth_n}" -j ACCEPT
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -C "${fchain}" -s "${PRIVATE_IP}" -i "${br}" -j ACCEPT 2>/dev/null || \
+        -C "${fchain}" -s "${PRIVATE_IP}" -i "${veth_n}" -j ACCEPT 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -A "${fchain}" -s "${PRIVATE_IP}" -i "${br}" -j ACCEPT
+        -A "${fchain}" -s "${PRIVATE_IP}" -i "${veth_n}" -j ACCEPT
 
     mkdir -p "${STATE_DIR}/${NETWORK_ID}/static-nat"
     echo "${PRIVATE_IP}" > "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}"
@@ -688,22 +829,26 @@ cmd_delete_static_nat() {
     fi
     [ -z "${PRIVATE_IP}" ] && die "Missing --private-ip and no saved state"
 
-    local veth_n br nchain_base nchain_pr nchain_post fchain
-    veth_n=$(veth_ns_name "${NETWORK_ID}")
-    br=$(bridge_name "${NETWORK_ID}")
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
+    # Restore PUBLIC_VLAN from state
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    fi
+
+    local pveth_n veth_n nchain_pr nchain_post fchain
+    pveth_n=$(pub_veth_ns_name "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
+    nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
 
     ip netns exec "${NAMESPACE}" iptables -t nat \
         -D "${nchain_pr}" -d "${PUBLIC_IP}" -j DNAT --to-destination "${PRIVATE_IP}" 2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat \
-        -D "${nchain_post}" -s "${PRIVATE_IP}" -o "${veth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || true
+        -D "${nchain_post}" -s "${PRIVATE_IP}" -o "${pveth_n}" -j SNAT --to-source "${PUBLIC_IP}" 2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -D "${fchain}" -d "${PRIVATE_IP}" -o "${br}" -j ACCEPT 2>/dev/null || true
+        -D "${fchain}" -d "${PRIVATE_IP}" -o "${veth_n}" -j ACCEPT 2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t filter \
-        -D "${fchain}" -s "${PRIVATE_IP}" -i "${br}" -j ACCEPT 2>/dev/null || true
+        -D "${fchain}" -s "${PRIVATE_IP}" -i "${veth_n}" -j ACCEPT 2>/dev/null || true
 
     rm -f "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}"
 
@@ -727,20 +872,24 @@ cmd_add_port_forward() {
     [ -z "${PRIVATE_PORT}" ] && die "Missing --private-port"
     [ -z "${PROTOCOL}" ]     && PROTOCOL="tcp"
 
-    local veth_n br nchain_base nchain_pr nchain_post fchain
-    veth_n=$(veth_ns_name "${NETWORK_ID}")
-    br=$(bridge_name "${NETWORK_ID}")
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
+    # Restore PUBLIC_VLAN from state
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    fi
+
+    local pveth_h pveth_n veth_n nchain_pr fchain
+    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Ensure public IP on veth and host route
-    ip netns exec "${NAMESPACE}" ip addr show "${veth_n}" 2>/dev/null | \
+    # Idempotent: ensure public IP and host route
+    ip netns exec "${NAMESPACE}" ip addr show "${pveth_n}" 2>/dev/null | \
         grep -q "${PUBLIC_IP}/32" || \
-        ip netns exec "${NAMESPACE}" ip addr add "${PUBLIC_IP}/32" dev "${veth_n}" 2>/dev/null || true
+        ip netns exec "${NAMESPACE}" ip addr add "${PUBLIC_IP}/32" dev "${pveth_n}" 2>/dev/null || true
     ip route show | grep -q "^${PUBLIC_IP}" || \
-        ip route add "${PUBLIC_IP}/32" dev "$(veth_host_name "${NETWORK_ID}")" 2>/dev/null || true
+        ip route add "${PUBLIC_IP}/32" dev "${pveth_h}" 2>/dev/null || true
 
     # DNAT
     ip netns exec "${NAMESPACE}" iptables -t nat \
@@ -750,13 +899,13 @@ cmd_add_port_forward() {
         -A "${nchain_pr}" -p "${PROTOCOL}" -d "${PUBLIC_IP}" --dport "${PUBLIC_PORT}" \
         -j DNAT --to-destination "${PRIVATE_IP}:${PRIVATE_PORT}"
 
-    # Allow forwarding
+    # Allow forwarding for the mapped private port via guest veth
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -C "${fchain}" -p "${PROTOCOL}" -d "${PRIVATE_IP}" --dport "${PRIVATE_PORT}" \
-        -o "${br}" -j ACCEPT 2>/dev/null || \
+        -o "${veth_n}" -j ACCEPT 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -A "${fchain}" -p "${PROTOCOL}" -d "${PRIVATE_IP}" --dport "${PRIVATE_PORT}" \
-        -o "${br}" -j ACCEPT
+        -o "${veth_n}" -j ACCEPT
 
     local safe_port
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
@@ -784,11 +933,9 @@ cmd_delete_port_forward() {
     [ -z "${PRIVATE_PORT}" ] && die "Missing --private-port"
     [ -z "${PROTOCOL}" ]     && PROTOCOL="tcp"
 
-    local br nchain_base nchain_pr nchain_post fchain
-    br=$(bridge_name "${NETWORK_ID}")
-    nchain_base=$(nat_chain "${NETWORK_ID}")
-    nchain_pr="${nchain_base}_PR"
-    nchain_post="${nchain_base}_POST"
+    local veth_n nchain_pr fchain
+    veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
+    nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     fchain=$(filter_chain "${NETWORK_ID}")
 
     ip netns exec "${NAMESPACE}" iptables -t nat \
@@ -796,7 +943,7 @@ cmd_delete_port_forward() {
         -j DNAT --to-destination "${PRIVATE_IP}:${PRIVATE_PORT}" 2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -D "${fchain}" -p "${PROTOCOL}" -d "${PRIVATE_IP}" --dport "${PRIVATE_PORT}" \
-        -o "${br}" -j ACCEPT 2>/dev/null || true
+        -o "${veth_n}" -j ACCEPT 2>/dev/null || true
 
     local safe_port
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
@@ -812,14 +959,15 @@ cmd_delete_port_forward() {
 
 cmd_custom_action() {
     NETWORK_ID=""
+    VPC_ID=""
     ACTION_NAME=""
     ACTION_PARAMS_JSON="{}"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --network-id)    NETWORK_ID="$2";        shift 2 ;;
-            --action)        ACTION_NAME="$2";        shift 2 ;;
-            --action-params) ACTION_PARAMS_JSON="${2:-{}}"; shift 2 ;;
-            # already consumed by _pre_scan_args — skip silently
+            --network-id)    NETWORK_ID="$2";               shift 2 ;;
+            --vpc-id)        VPC_ID="$2";                   shift 2 ;;
+            --action)        ACTION_NAME="$2";               shift 2 ;;
+            --action-params) ACTION_PARAMS_JSON="${2:-{}}";  shift 2 ;;
             --physical-network-extension-details|--network-extension-details)
                              shift 2 ;;
             *)               shift ;;
@@ -828,6 +976,18 @@ cmd_custom_action() {
     [ -z "${NETWORK_ID}" ]  && die "custom-action: missing --network-id"
     [ -z "${ACTION_NAME}" ] && die "custom-action: missing --action"
 
+    # Set NAMESPACE/CHOSEN_ID similar to parse_args
+    if [ -z "${NAMESPACE}" ]; then
+        if [ -n "${VPC_ID}" ]; then
+            NAMESPACE="cs-net-${VPC_ID}"
+        else
+            local NS_FROM_DETAILS
+            NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
+            NAMESPACE="${NS_FROM_DETAILS:-cs-net-${NETWORK_ID}}"
+        fi
+    fi
+    CHOSEN_ID="${VPC_ID:-${NETWORK_ID}}"
+
     _load_state
 
     log "custom-action: network=${NETWORK_ID} ns=${NAMESPACE} action=${ACTION_NAME} params=${ACTION_PARAMS_JSON}"
@@ -835,8 +995,8 @@ cmd_custom_action() {
     case "${ACTION_NAME}" in
         reboot-device)
             local veth_h veth_n
-            veth_h=$(veth_host_name "${NETWORK_ID}")
-            veth_n=$(veth_ns_name "${NETWORK_ID}")
+            veth_h=$(veth_host_name "${VLAN}" "${CHOSEN_ID}")
+            veth_n=$(veth_ns_name   "${VLAN}" "${CHOSEN_ID}")
             ip link set "${veth_h}" down 2>/dev/null || true
             ip netns exec "${NAMESPACE}" ip link set "${veth_n}" down 2>/dev/null || true
             sleep 1
@@ -847,6 +1007,8 @@ cmd_custom_action() {
         dump-config)
             echo "=== Namespace: ${NAMESPACE} ==="
             ip netns exec "${NAMESPACE}" ip addr 2>/dev/null || echo "(no namespace)"
+            echo "=== Host bridge: $(host_bridge_name "${GUEST_ETH}" "${VLAN}") ==="
+            ip link show "$(host_bridge_name "${GUEST_ETH}" "${VLAN}")" 2>/dev/null || echo "(not found)"
             echo "=== NAT table ==="
             ip netns exec "${NAMESPACE}" iptables -t nat    -L -n -v 2>/dev/null || echo "(unavailable)"
             echo "=== FILTER table ==="
@@ -857,8 +1019,8 @@ cmd_custom_action() {
         *)
             local hook="${STATE_DIR}/hooks/custom-action-${ACTION_NAME}.sh"
             if [ -x "${hook}" ]; then
-                # Pass the raw JSON to hook scripts via --action-params (hooks should decode it)
-                exec "${hook}" --network-id "${NETWORK_ID}" --action "${ACTION_NAME}" --action-params "${ACTION_PARAMS_JSON}"
+                exec "${hook}" --network-id "${NETWORK_ID}" --action "${ACTION_NAME}" \
+                     --action-params "${ACTION_PARAMS_JSON}"
             else
                 die "Unknown action '${ACTION_NAME}'. Built-ins: reboot-device, dump-config"
             fi
@@ -876,16 +1038,16 @@ COMMAND="${1:-}"
 shift || true
 
 case "${COMMAND}" in
-    implement)           cmd_implement          "$@" ;;
-    shutdown)            cmd_shutdown           "$@" ;;
-    destroy)             cmd_destroy            "$@" ;;
-    assign-ip)           cmd_assign_ip          "$@" ;;
-    release-ip)          cmd_release_ip         "$@" ;;
-    add-static-nat)      cmd_add_static_nat     "$@" ;;
-    delete-static-nat)   cmd_delete_static_nat  "$@" ;;
-    add-port-forward)    cmd_add_port_forward   "$@" ;;
+    implement)           cmd_implement           "$@" ;;
+    shutdown)            cmd_shutdown            "$@" ;;
+    destroy)             cmd_destroy             "$@" ;;
+    assign-ip)           cmd_assign_ip           "$@" ;;
+    release-ip)          cmd_release_ip          "$@" ;;
+    add-static-nat)      cmd_add_static_nat      "$@" ;;
+    delete-static-nat)   cmd_delete_static_nat   "$@" ;;
+    add-port-forward)    cmd_add_port_forward    "$@" ;;
     delete-port-forward) cmd_delete_port_forward "$@" ;;
-    custom-action)       cmd_custom_action      "$@" ;;
+    custom-action)       cmd_custom_action       "$@" ;;
     "")
         echo "Usage: $0 {implement|shutdown|destroy|assign-ip|release-ip|add-static-nat|delete-static-nat|add-port-forward|delete-port-forward|custom-action} [options]" >&2
         exit 1 ;;

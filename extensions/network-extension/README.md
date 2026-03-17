@@ -75,18 +75,59 @@ required**.
                        │ credentials from extension_resource_map_details
                        ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Remote Network Device  (Linux server / appliance)       │
+│  Remote Network Device  (KVM Linux server)               │
 │                                                          │
-│  ip netns exec <namespace>                               │
-│      network-extension-wrapper.sh <command> [args...]    │
+│  network-extension-wrapper.sh <command> [args...]        │
 │                                                          │
-│  Operations performed inside the namespace:              │
-│    • VLAN sub-interface + Linux bridge creation          │
-│    • iptables SNAT  (source NAT / masquerade)            │
-│    • iptables DNAT  (static NAT, port forwarding)        │
-│    • iptables FORWARD rules                              │
+│  Per-network data plane (guest VLAN 1910, network 209):  │
+│                                                          │
+│  HOST side                                               │
+│  ─────────────────────────────────────────────────       │
+│  eth0.1910  ─────────────────────────────────┐           │
+│  (VLAN sub-iface)                            │           │
+│                                    breth0-1910  (bridge) │
+│  veth-host-1910  ────────────────────────────┘           │
+│      │                                                   │
+│  NAMESPACE  cs-net-209  (or  cs-net-<vpcId>)             │
+│  ─────────────────────────────────────────────────       │
+│  veth-ns-1910  ← gateway IP 10.1.1.1/24                  │
+│                                                          │
+│  PUBLIC side (source-NAT IP 10.0.56.4 on VLAN 101):      │
+│                                                          │
+│  HOST side                                               │
+│  eth0.101   ─────────────────────────────────┐           │
+│                                   breth0-101  (bridge)   │
+│  vph-101-209 ────────────────────────────────┘           │
+│      │                                                   │
+│  NAMESPACE  cs-net-209  (or  cs-net-<vpcId>)             │
+│  vpn-101-209  ← source-NAT IP  10.0.56.4/32              │
+│  default route → 10.0.56.1 (upstream gateway)            │
 └──────────────────────────────────────────────────────────┘
 ```
+
+### Naming conventions
+
+| Object | Name pattern | Example (VLAN 1910, net 209, pub-VLAN 101) |
+|--------|--------------|-------------------------------------------|
+| Namespace (standalone network) | `cs-net-<networkId>` | `cs-net-209` |
+| Namespace (VPC network)        | `cs-net-<vpcId>`     | `cs-net-5` |
+| Guest host bridge              | `br<ethX>-<vlan>`    | `breth0-1910` |
+| Guest veth – host side         | `vh-<vlan>-<id>`     | `vh-1910-d1` |
+| Guest veth – namespace side    | `vn-<vlan>-<id>`     | `vn-1910-d1` |
+| Public host bridge             | `br<pub_ethX>-<pvlan>` | `breth0-101` |
+| Public veth – host side        | `vph-<pvlan>-<id>`   | `vph-101-209` |
+| Public veth – namespace side   | `vpn-<pvlan>-<id>`   | `vpn-101-209` |
+
+`ethX` (and `pub_ethX`) is the **physical NIC** resolved from the
+`kvmnetworklabel` (`public_kvmnetworklabel`) stored in the physical-network
+extension details:
+
+* `eth1`     → `eth1`  (not in `/sys/devices/virtual/net/` → already physical)
+* `cloudbr1` → `eth1`  (virtual bridge → first non-virtual
+  `/sys/class/net/cloudbr1/brif/` member)
+
+Both labels are automatically included in `--physical-network-extension-details`
+by `NetworkExtensionElement` — no extra registration step is needed.
 
 **Key design principles:**
 
@@ -94,15 +135,17 @@ required**.
   connection details (`host`, `port`, `username`, `sshkey`, etc.) are passed as
   two named CLI arguments injected by `NetworkExtensionElement` — the script
   itself is completely generic and requires no local configuration.
-* The `network-extension-wrapper.sh` script runs on the **remote device** inside
-  a network namespace.  It performs the actual iptables and bridge operations.
+* The `network-extension-wrapper.sh` script runs on the **remote KVM device**.
+  It creates host-side bridges, veth pairs, and iptables rules.  Bridges and
+  VLAN sub-interfaces live on the **host** (not inside the namespace) so that
+  guest VMs whose NICs are connected to `brethX-<vlan>` reach the namespace
+  gateway without any additional configuration.
+* **VPC networks** share a single namespace per VPC (`cs-net-<vpcId>`).  Multiple
+  guest VLANs are each connected via their own veth pair (`veth-host-<vlan>` /
+  `veth-ns-<vlan>`).
 * The two scripts are intentionally decoupled: you can replace either script
   with a custom implementation (Python, Go, etc.) as long as the interface
-  contract (arguments and exit codes) is maintained.  The script can be any
-  executable — shell script, Python script, compiled binary, etc.
-* The **extension name** is used as the **Network Service Provider (NSP) name**.
-  This means multiple different NetworkExtension extensions can be registered to
-  the same physical network, each appearing as its own named provider.
+  contract (arguments and exit codes) is maintained.
 
 ---
 
@@ -553,14 +596,14 @@ CloudStack resolves which extension to call by:
 
 ## Wrapper script operations reference
 
-The `network-extension-wrapper.sh` script runs on the remote device inside a
-Linux network namespace.  It receives the command as its first positional argument
-followed by named `--option value` pairs.
+The `network-extension-wrapper.sh` script runs on the remote KVM device.
+It receives the command as its first positional argument followed by named
+`--option value` pairs.
 
 All commands:
-* Write timestamped entries to `/var/log/cloudstack/management/network-extension.log`.
-* Use a per-network lock file (`/var/run/cloudstack/extnet-<id>.lock`) to
-  serialise concurrent operations.
+* Write timestamped entries to `/var/log/cloudstack/network-extension.log`.
+* Use a per-network flock file (`/var/lib/cloudstack/network-extension/lock-<id>`)
+  to serialise concurrent operations.
 * Persist state under `/var/lib/cloudstack/network-extension/<network-id>/`.
 
 ### `implement`
@@ -570,88 +613,118 @@ Called when CloudStack activates the network (typically on first VM deploy).
 ```
 network-extension-wrapper.sh implement \
     --network-id <id> \
-    --vlan <vlan-id>        (empty string if no VLAN tagging)
+    --vlan <vlan-id>       \
     --gateway <gateway-ip> \
-    --cidr <cidr>
+    --cidr <cidr>          \
+    [--vpc-id <vpc-id>]
 ```
 
 Actions:
-1. Create VLAN sub-interface `<PHYS_IFACE>.<vlan>` (skipped if `--vlan` is empty).
-2. Create Linux bridge `cs-br-<id>` and bring it up.
-3. Attach VLAN interface to bridge.
-4. Assign `<gateway-ip>/<prefix>` to the bridge.
-5. Enable IPv4 forwarding (`sysctl net.ipv4.ip_forward=1`).
-6. Create iptables chains `CS_EXTNET_<id>` (nat table) and
-   `CS_EXTNET_FWD_<id>` (filter table).
-7. Add jump rules: nat PREROUTING → `CS_EXTNET_<id>`, nat POSTROUTING →
-   `CS_EXTNET_<id>`, filter FORWARD → `CS_EXTNET_FWD_<id>`.
-8. Add FORWARD ACCEPT rules for bridge ingress / ESTABLISHED egress.
-9. Save VLAN, gateway, CIDR, bridge name to state files.
+1. Create namespace `cs-net-<vpc-id>` (VPC) or `cs-net-<network-id>` (standalone).
+2. Resolve `ethX` from `kvmnetworklabel` in `--physical-network-extension-details`.
+3. Create VLAN sub-interface `ethX.<vlan>` on the host.
+4. Create host bridge `brethX-<vlan>` and attach `ethX.<vlan>` to it.
+5. Create veth pair `veth-host-<vlan>` (host) / `veth-ns-<vlan>` (namespace).
+   Attach host end to `brethX-<vlan>`.
+6. Assign `<gateway>/<prefix>` to `veth-ns-<vlan>` inside the namespace.
+7. Enable IP forwarding inside the namespace.
+8. Create iptables chains `CS_EXTNET_<id>_PR` (PREROUTING DNAT),
+   `CS_EXTNET_<id>_POST` (POSTROUTING SNAT), and `CS_EXTNET_FWD_<id>` (FORWARD).
+9. Save VLAN, gateway, CIDR, namespace, network-id or vpc-id to state files.
 
-The physical interface is configured via the `NETWORK_EXTENSION_PHYS_IFACE`
-environment variable (default: `eth0`).
+### `shutdown`
 
-### `shutdown` / `destroy`
-
-Called when a network is shut down or permanently destroyed.  Both commands
-perform identical cleanup.
+Called when a network is shut down (may be restarted later).
 
 ```
-network-extension-wrapper.sh shutdown --network-id <id> [--vlan <vlan-id>]
-network-extension-wrapper.sh destroy  --network-id <id> [--vlan <vlan-id>]
+network-extension-wrapper.sh shutdown \
+    --network-id <id> [--vlan <vlan-id>] [--vpc-id <vpc-id>]
 ```
 
 Actions:
-1. Remove jump rules from nat PREROUTING, nat POSTROUTING, filter FORWARD.
-2. Flush and delete chains `CS_EXTNET_<id>` (nat) and `CS_EXTNET_FWD_<id>` (filter).
-3. Bring down and delete bridge `cs-br-<id>`.
-4. Bring down and delete VLAN interface (VLAN ID read from state if `--vlan` is
-   not supplied).
-5. Remove state directory `/var/lib/cloudstack/network-extension/<id>/`.
+1. Flush and remove iptables chains (PREROUTING, POSTROUTING, FORWARD jumps +
+   chain contents).
+2. Delete public veth pairs (`vph-<pvlan>-<id>`) that were created during
+   `assign-ip` (read from state).
+3. Keep namespace and guest veth (`veth-host-<vlan>` / `veth-ns-<vlan>`) intact —
+   guest VMs can still connect to `brethX-<vlan>`.
+
+### `destroy`
+
+Called when the network is permanently removed.
+
+```
+network-extension-wrapper.sh destroy \
+    --network-id <id> [--vlan <vlan-id>] [--vpc-id <vpc-id>]
+```
+
+Actions (superset of shutdown):
+1. Delete guest veth host-side (`veth-host-<vlan>`).
+2. Delete public veth pairs.
+3. Delete the namespace (removes all interfaces inside it).
+4. Remove state directory.
+
+> The host bridge `brethX-<vlan>` and VLAN sub-interface `ethX.<vlan>` are NOT
+> removed on destroy — they may still be used by other networks or for VM
+> connectivity.
 
 ### `assign-ip`
 
-Called when a public IP is associated with the network.
+Called when a public IP is associated with the network (including source NAT).
 
 ```
 network-extension-wrapper.sh assign-ip \
-    --network-id <id> \
-    --vlan <vlan-id> \
-    --public-ip <ip> \
-    --source-nat true|false \
-    --gateway <gw> \
-    --cidr <cidr> \
-    --public-gateway <pub-gw> \   # OPTIONAL: gateway for the public IP network
-    --public-cidr <pub-cidr>      # OPTIONAL: public network CIDR (e.g. 203.0.113.0/24)
+    --network-id <id>          \
+    --vlan <guest-vlan>        \
+    --public-ip <ip>           \
+    --source-nat true|false    \
+    --gateway <guest-gw>       \
+    --cidr <guest-cidr>        \
+    --public-vlan <pvlan>      \
+    [--public-gateway <pub-gw>] \
+    [--public-cidr <pub-cidr>]  \
+    [--vpc-id <vpc-id>]
 ```
 
 Actions:
-1. Add `<public-ip>/32` (or `<public-ip>/<prefix>` if `--public-cidr` is provided) as a secondary address on the namespace veth endpoint.
-2. If `--public-gateway` is provided, set the namespace default route to use that gateway via the veth device. This makes the public IP's gateway the namespace's default gateway (so replies use the correct next-hop).
-3. If `--source-nat true`:
-   * SNAT rule: traffic from `<cidr>` outbound → source `<public-ip>` (installed in POSTROUTING chain).
-   * FORWARD ACCEPT: traffic from `<cidr>` towards the veth device.
-4. Save IP state to `/var/lib/cloudstack/network-extension/<id>/ips/<public-ip>`.
-
-Notes:
-* `--public-cidr` is used only to pick the address prefix when configuring the IP inside the namespace; internal forwarding and SNAT matching continue to use the guest network CIDR passed via `--cidr`.
-* `--public-gateway` is used to set the namespace default route so that traffic using the public IPs will be routed via the correct next-hop.
+1. Resolve `pub_ethX` from `public_kvmnetworklabel` (falls back to `kvmnetworklabel`).
+2. Create VLAN sub-interface `pub_ethX.<pvlan>` and bridge `brpub_ethX-<pvlan>` on the host.
+3. Create veth pair `vph-<pvlan>-<id>` (host) / `vpn-<pvlan>-<id>` (namespace).
+   Attach host end to `brpub_ethX-<pvlan>`.
+4. Assign `<public-ip>/32` (or `/<prefix>` if `--public-cidr` given) to
+   `vpn-<pvlan>-<id>` inside the namespace.
+5. Add host route `<public-ip>/32 dev vph-<pvlan>-<id>` so the host can reach it.
+6. If `--public-gateway` is given, set/replace namespace default route via
+   `vpn-<pvlan>-<id>`.
+7. If `--source-nat true`:
+   * SNAT rule: `<guest-cidr>` out `vpn-<pvlan>-<id>` → `<public-ip>`
+     (POSTROUTING chain `CS_EXTNET_<id>_POST`).
+   * FORWARD ACCEPT for `<guest-cidr>` towards `vpn-<pvlan>-<id>`.
+8. Save public VLAN to state file `ips/<public-ip>.pvlan` (used by `add-static-nat`,
+   `add-port-forward`, `release-ip`).
 
 ### `release-ip`
 
-Called when a public IP is released / disassociated.
+Called when a public IP is released / disassociated from the namespace.
 
 ```
 network-extension-wrapper.sh release-ip \
-    --network-id <id> \
-    --public-ip <ip>
+    --network-id <id>    \
+    --public-ip <ip>     \
+    [--public-vlan <pvlan>]   \
+    [--public-cidr <pub-cidr>] \
+    [--vpc-id <id>]
 ```
 
 Actions:
-1. Remove SNAT rule for `<cidr>` → `<public-ip>` (CIDR read from state if not set).
-2. Remove any DNAT/SNAT rules referencing `<public-ip>`.
-3. Remove `<public-ip>/32` from `<PHYS_IFACE>`.
-4. Delete IP state file.
+1. Load `public_vlan` from `ips/<public-ip>.pvlan` state file.
+2. Remove SNAT rule for guest CIDR → `<public-ip>`.
+3. Remove any DNAT rules targeting `<public-ip>` from PREROUTING chain.
+4. Remove host route `<public-ip>/32`.
+5. Remove IP address from `vpn-<pvlan>-<id>` inside namespace.
+6. If no other IPs share the same `<pvlan>/<id>` combination, delete
+   `vph-<pvlan>-<id>` (host veth).
+7. Remove state files.
 
 ### `add-static-nat`
 
@@ -659,20 +732,24 @@ Called when Static NAT (one-to-one NAT) is enabled for a public IP.
 
 ```
 network-extension-wrapper.sh add-static-nat \
-    --network-id <id> \
-    --vlan <vlan-id> \
-    --public-ip <public-ip> \
-    --private-ip <private-ip>
+    --network-id <id>          \
+    --vlan <guest-vlan>        \
+    --public-ip <public-ip>    \
+    --private-ip <private-ip>  \
+    [--vpc-id <vpc-id>]
 ```
 
-iptables rules added (all in chain `CS_EXTNET_<id>` / `CS_EXTNET_FWD_<id>`):
+The `public_vlan` for this IP is loaded from `ips/<public-ip>.pvlan` state
+(written during `assign-ip`).
+
+iptables rules added (chains `CS_EXTNET_<id>_PR` / `_POST` / `FWD_<id>`):
 
 | Table | Chain | Rule |
 |-------|-------|------|
-| `nat` | `CS_EXTNET_<id>` | `-d <public-ip> -j DNAT --to-destination <private-ip>` |
-| `nat` | `CS_EXTNET_<id>` | `-s <private-ip> -o <PHYS_IFACE> -j SNAT --to-source <public-ip>` |
-| `filter` | `CS_EXTNET_FWD_<id>` | `-d <private-ip> -o cs-br-<id> -j ACCEPT` |
-| `filter` | `CS_EXTNET_FWD_<id>` | `-s <private-ip> -i cs-br-<id> -j ACCEPT` |
+| `nat` | `CS_EXTNET_<id>_PR`   | `-d <public-ip> -j DNAT --to-destination <private-ip>` |
+| `nat` | `CS_EXTNET_<id>_POST` | `-s <private-ip> -o vpn-<pvlan>-<id> -j SNAT --to-source <public-ip>` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-d <private-ip> -o veth-ns-<vlan> -j ACCEPT` |
+| `filter` | `CS_EXTNET_FWD_<id>` | `-s <private-ip> -i veth-ns-<vlan> -j ACCEPT` |
 
 State saved to `/var/lib/cloudstack/network-extension/<id>/static-nat/<public-ip>`.
 
@@ -753,16 +830,16 @@ fails with a descriptive error.
 
 ## CLI argument reference
 
-### JSON blobs passed as CLI arguments (by `NetworkExtensionElement`)
-
-Both scripts receive these two arguments on every invocation:
+### JSON blobs always forwarded by `network-extension.sh`
 
 | CLI Argument | Description |
 |--------------|-------------|
-| `--physical-network-extension-details <json>` | All `extension_resource_map_details` registered at the physical network level (hosts, port, username, sshkey, phys_iface, …) |
-| `--network-extension-details <json>` | Per-network opaque JSON blob (selected host, namespace, …) |
+| `--physical-network-extension-details <json>` | All `extension_resource_map_details` **plus** physical network metadata automatically added by `NetworkExtensionElement` (see table below). |
+| `--network-extension-details <json>` | Per-network opaque JSON blob (selected host, namespace). |
 
 ### Connection details (keys in `--physical-network-extension-details`)
+
+These keys are explicitly set when calling `registerExtension`:
 
 | JSON key | Description |
 |----------|-------------|
@@ -772,22 +849,37 @@ Both scripts receive these two arguments on every invocation:
 | `username` | SSH user — default: `root` |
 | `password` | SSH password via `sshpass` — sensitive, not logged |
 | `sshkey` | PEM-encoded SSH private key — sensitive, not logged; preferred over password |
-| `phys_iface` | Physical network interface on the remote device for VLAN sub-interfaces (default: `eth0`) |
-| `public_bridge` | Shared bridge for public IP access (default: `cspublic`) |
+
+These keys are **automatically injected** by `NetworkExtensionElement` from the
+physical network record — no manual registration needed:
+
+| JSON key | Description |
+|----------|-------------|
+| `physicalnetworkname` | Physical network name from CloudStack DB |
+| `kvmnetworklabel` | KVM guest traffic label (e.g. `eth0`, `cloudbr0`) |
+| `vmwarenetworklabel` | VMware guest traffic label |
+| `xennetworklabel` | XenServer guest traffic label |
+| `public_kvmnetworklabel` | KVM public traffic label (used for public bridges) |
+| `public_vmwarenetworklabel` | VMware public traffic label |
+
+The wrapper script uses `kvmnetworklabel` (and `public_kvmnetworklabel`) to
+derive the physical NIC `ethX` via `/sys/devices/virtual/net/` inspection, then
+names bridges as `brethX-<vlan>`.
 
 ### Per-network details (keys in `--network-extension-details`)
 
 | JSON key | Description |
 |----------|-------------|
 | `host` | Previously selected host IP (set by `ensure-network-device`) |
-| `namespace` | Linux network namespace name (default: `cs-net-<networkId>`) |
+| `namespace` | Linux network namespace name (e.g. `cs-net-<networkId>`) |
 
-### Physical interface on the remote device
+### Additional per-command arguments
 
-Set `NETWORK_EXTENSION_PHYS_IFACE` in the environment on the remote device to
-override the interface used for VLAN sub-interfaces and public IP secondary
-addresses (default: `eth0`).  This is also overridable via the `phys_iface`
-JSON key in `--physical-network-extension-details`.
+| CLI Argument | Commands | Description |
+|--------------|----------|-------------|
+| `--vpc-id <id>` | all | Inject when network belongs to a VPC; namespace becomes `cs-net-<vpcId>` |
+| `--public-vlan <pvlan>` | `assign-ip`, `release-ip` | Public IP's VLAN tag (e.g. `101`) |
+| `--network-id <id>` | `assign-ip`, `release-ip`, `add-static-nat`, `delete-static-nat`, `add-port-forward`, `delete-port-forward` | VPC ID if VPC network, else network ID — used in public veth names (`vph-<pvlan>-<id>`, `vpn-<pvlan>-<id>`) |
 
 ### Action parameters (custom-action only)
 
@@ -803,12 +895,9 @@ network-extension.sh custom-action \
     --network-extension-details '<json>'
 ```
 
-`network-extension-wrapper.sh` receives the `--action-params` JSON string and
-forwards it to any hook script unchanged as the `--action-params` argument.
-Hook scripts should decode the JSON themselves (for example using `jq` or a
-small shell/awk parser). This avoids exporting potentially large or complex
-parameter sets as individual environment variables and makes the parameters
-available in a single, portable JSON object.
+`network-extension-wrapper.sh` receives `--action-params` and forwards it
+unchanged to hook scripts.  Hook scripts should decode the JSON themselves
+(e.g. using `jq`).
 
 ---
 

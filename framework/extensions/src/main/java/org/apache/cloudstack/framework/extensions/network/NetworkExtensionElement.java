@@ -49,6 +49,11 @@ import com.cloud.network.Network.Provider;
 import com.cloud.network.Network.Service;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.Networks;
+import com.cloud.network.Networks.TrafficType;
+import com.cloud.network.dao.PhysicalNetworkDao;
+import com.cloud.network.dao.PhysicalNetworkTrafficTypeDao;
+import com.cloud.network.dao.PhysicalNetworkVO;
+import com.cloud.network.dao.PhysicalNetworkTrafficTypeVO;
 import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.PublicIpAddress;
 import com.cloud.network.addr.PublicIp;
@@ -164,6 +169,10 @@ public class NetworkExtensionElement extends AdapterBase implements
     private NetworkDetailsDao networkDetailsDao;
     @Inject
     private IpAddressManager ipAddressManager;
+    @Inject
+    private PhysicalNetworkDao physicalNetworkDao;
+    @Inject
+    private PhysicalNetworkTrafficTypeDao physicalNetworkTrafficTypeDao;
 
     // ---- Script argument names ----
 
@@ -196,12 +205,14 @@ public class NetworkExtensionElement extends AdapterBase implements
      */
     public NetworkExtensionElement withProviderName(String providerName) {
         NetworkExtensionElement copy = new NetworkExtensionElement();
-        copy.networkModel      = this.networkModel;
-        copy.ntwkSrvcDao       = this.ntwkSrvcDao;
-        copy.extensionHelper   = this.extensionHelper;
-        copy.networkDetailsDao = this.networkDetailsDao;
-        copy.ipAddressManager  = this.ipAddressManager;
-        copy.providerName      = providerName;
+        copy.networkModel                   = this.networkModel;
+        copy.ntwkSrvcDao                    = this.ntwkSrvcDao;
+        copy.extensionHelper                = this.extensionHelper;
+        copy.networkDetailsDao              = this.networkDetailsDao;
+        copy.ipAddressManager               = this.ipAddressManager;
+        copy.physicalNetworkDao             = this.physicalNetworkDao;
+        copy.physicalNetworkTrafficTypeDao  = this.physicalNetworkTrafficTypeDao;
+        copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
         return copy;
@@ -305,13 +316,18 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         String vlanId = getVlanId(network);
 
+        // Build common vpc/network args
+        List<String> vpcArgs = getVpcIdArgs(network);
+
         // Step 2: Create the network on the device.
-        boolean result = executeScript(network,
-                "implement",
-                "--network-id", String.valueOf(network.getId()),
-                "--vlan",       safeStr(vlanId),
-                "--gateway",    safeStr(network.getGateway()),
-                "--cidr",       safeStr(network.getCidr()));
+        List<String> implArgs = new ArrayList<>();
+        implArgs.add("--network-id"); implArgs.add(String.valueOf(network.getId()));
+        implArgs.add("--vlan");       implArgs.add(safeStr(vlanId));
+        implArgs.add("--gateway");    implArgs.add(safeStr(network.getGateway()));
+        implArgs.add("--cidr");       implArgs.add(safeStr(network.getCidr()));
+        implArgs.addAll(vpcArgs);
+
+        boolean result = executeScript(network, "implement", implArgs.toArray(new String[0]));
 
         if (!result) {
             return false;
@@ -360,20 +376,22 @@ public class NetworkExtensionElement extends AdapterBase implements
     public boolean shutdown(Network network, ReservationContext context, boolean cleanup)
             throws ConcurrentOperationException, ResourceUnavailableException {
         logger.info("Shutting down network extension for network {}", network.getId());
-        return executeScript(network,
-                "shutdown",
-                "--network-id", String.valueOf(network.getId()),
-                "--vlan",       safeStr(getVlanId(network)));
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "shutdown", args.toArray(new String[0]));
     }
 
     @Override
     public boolean destroy(Network network, ReservationContext context)
             throws ConcurrentOperationException, ResourceUnavailableException {
         logger.info("Destroying network extension for network {}", network.getId());
-        boolean result = executeScript(network,
-                "destroy",
-                "--network-id", String.valueOf(network.getId()),
-                "--vlan",       safeStr(getVlanId(network)));
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+        args.addAll(getVpcIdArgs(network));
+        boolean result = executeScript(network, "destroy", args.toArray(new String[0]));
         if (result) {
             networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
         }
@@ -437,6 +455,11 @@ public class NetworkExtensionElement extends AdapterBase implements
         cmdLine.add(safeStr(getVlanId(network)));
         cmdLine.add("--zone-id");
         cmdLine.add(String.valueOf(network.getDataCenterId()));
+        // Pass VPC ID so the script can derive the correct namespace (cs-net-<vpcId>)
+        if (network.getVpcId() != null) {
+            cmdLine.add("--vpc-id");
+            cmdLine.add(String.valueOf(network.getVpcId()));
+        }
         cmdLine.add("--current-details");
         cmdLine.add(currentDetails);
         cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
@@ -492,42 +515,43 @@ public class NetworkExtensionElement extends AdapterBase implements
             boolean isRevoke = ip.getState() == IpAddress.State.Releasing;
             String action = isRevoke ? "release-ip" : "assign-ip";
 
+            // Public VLAN tag (e.g. "101") from the IP's VLAN record.
+            String publicVlanTag = safeStr(ip.getVlanTag());
+
             // Compute public IP gateway and CIDR (from the PublicIpAddress if available)
             String publicGateway;
             String publicCidr;
             try {
                 publicGateway = ip.getGateway();
-                // build public CIDR from public IP + netmask if possible
                 String publicIpStr = ip.getAddress() != null ? ip.getAddress().addr() : null;
                 String publicNetmask = ip.getNetmask();
                 publicCidr = buildCidrFromIpAndNetmask(publicIpStr, publicNetmask);
             } catch (Exception e) {
-                // best-effort — leave values null
                 publicGateway = null;
                 publicCidr = null;
             }
 
             List<String> args = new ArrayList<>();
-            args.add("--network-id"); args.add(String.valueOf(network.getId()));
-            args.add("--vlan"); args.add(safeStr(vlanId));
-            args.add("--public-ip"); args.add(ip.getAddress().addr());
-            args.add("--source-nat"); args.add(String.valueOf(isSourceNat));
-            // pass network gateway/cidr for guest CIDR usage (SNAT matching)
-            args.add("--gateway"); args.add(safeStr(network.getGateway()));
-            args.add("--cidr"); args.add(safeStr(network.getCidr()));
-            // pass public IP network details separately so wrapper can set default route
-            args.add("--public-gateway"); args.add(safeStr(publicGateway));
-            args.add("--public-cidr"); args.add(safeStr(publicCidr));
+            args.add("--network-id");         args.add(String.valueOf(network.getId()));
+            args.add("--vlan");               args.add(safeStr(vlanId));
+            args.add("--public-ip");          args.add(ip.getAddress().addr());
+            args.add("--source-nat");         args.add(String.valueOf(isSourceNat));
+            args.add("--gateway");            args.add(safeStr(network.getGateway()));
+            args.add("--cidr");               args.add(safeStr(network.getCidr()));
+            args.add("--public-gateway");     args.add(safeStr(publicGateway));
+            args.add("--public-cidr");        args.add(safeStr(publicCidr));
+            args.add("--public-vlan");        args.add(publicVlanTag);
+            args.addAll(getVpcIdArgs(network));
 
-            boolean result = executeScript(network, action, args.toArray(new String[0]));
-            if (!result) {
-                throw new ResourceUnavailableException(
-                        "Failed to " + action + " for IP " + ip.getAddress().addr(),
-                        Network.class, network.getId());
-            }
-        }
-        return true;
-    }
+             boolean result = executeScript(network, action, args.toArray(new String[0]));
+             if (!result) {
+                 throw new ResourceUnavailableException(
+                         "Failed to " + action + " for IP " + ip.getAddress().addr(),
+                         Network.class, network.getId());
+             }
+         }
+         return true;
+     }
 
     /**
      * Build a CIDR string from IP address and dotted netmask (or prefix).
@@ -548,11 +572,9 @@ public class NetworkExtensionElement extends AdapterBase implements
             byte[] mb = mask.getAddress();
             int ipInt = ByteBuffer.wrap(ipb).getInt();
             int maskInt = ByteBuffer.wrap(mb).getInt();
-            int network = ipInt & maskInt;
             int prefix = Integer.bitCount(maskInt);
-            byte[] netBytes = ByteBuffer.allocate(4).putInt(network).array();
-            InetAddress netAddr = InetAddress.getByAddress(netBytes);
-            return netAddr.getHostAddress() + "/" + prefix;
+            // Return the provided IP with the calculated prefix so the address retains its host value
+            return ipStr + "/" + prefix;
         } catch (Exception e) {
             logger.debug("Failed to compute CIDR from ip/netmask {} {}: {}", ipStr, netmaskStr, e.getMessage());
             return "";
@@ -572,14 +594,17 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         logger.info("Applying {} static NAT rules for network {}", rules.size(), config.getId());
         String vlanId = getVlanId(config);
+        List<String> vpcArgs = getVpcIdArgs(config);
 
         for (StaticNat rule : rules) {
             String action = rule.isForRevoke() ? "delete-static-nat" : "add-static-nat";
-            boolean result = executeScript(config, action,
-                    "--network-id", String.valueOf(config.getId()),
-                    "--vlan",       safeStr(vlanId),
-                    "--public-ip",  getIpAddress(rule.getSourceIpAddressId()),
-                    "--private-ip", safeStr(rule.getDestIpAddress()));
+            List<String> args = new ArrayList<>();
+            args.add("--network-id");        args.add(String.valueOf(config.getId()));
+            args.add("--vlan");              args.add(safeStr(vlanId));
+            args.add("--public-ip");         args.add(getIpAddress(rule.getSourceIpAddressId()));
+            args.add("--private-ip");        args.add(safeStr(rule.getDestIpAddress()));
+            args.addAll(vpcArgs);
+            boolean result = executeScript(config, action, args.toArray(new String[0]));
             if (!result) {
                 throw new ResourceUnavailableException("Failed to " + action + " for static NAT rule",
                         Network.class, config.getId());
@@ -601,6 +626,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         logger.info("Applying {} port forwarding rules for network {}", rules.size(), network.getId());
         String vlanId = getVlanId(network);
+        List<String> vpcArgs = getVpcIdArgs(network);
 
         for (PortForwardingRule rule : rules) {
             boolean isRevoke = rule.getState() == FirewallRule.State.Revoke;
@@ -608,15 +634,17 @@ public class NetworkExtensionElement extends AdapterBase implements
             String publicPort  = PortForwardingServiceProvider.getPublicPortRange(rule);
             String privatePort = PortForwardingServiceProvider.getPrivatePFPortRange(rule);
 
-            boolean result = executeScript(network, action,
-                    "--network-id",   String.valueOf(network.getId()),
-                    "--vlan",         safeStr(vlanId),
-                    "--public-ip",    getIpAddress(rule.getSourceIpAddressId()),
-                    "--public-port",  safeStr(publicPort),
-                    "--private-ip",   safeStr(rule.getDestinationIpAddress() != null
-                            ? rule.getDestinationIpAddress().addr() : null),
-                    "--private-port", safeStr(privatePort),
-                    "--protocol",     safeStr(rule.getProtocol()));
+            List<String> args = new ArrayList<>();
+            args.add("--network-id");        args.add(String.valueOf(network.getId()));
+            args.add("--vlan");              args.add(safeStr(vlanId));
+            args.add("--public-ip");         args.add(getIpAddress(rule.getSourceIpAddressId()));
+            args.add("--public-port");       args.add(safeStr(publicPort));
+            args.add("--private-ip");        args.add(safeStr(rule.getDestinationIpAddress() != null
+                    ? rule.getDestinationIpAddress().addr() : null));
+            args.add("--private-port");      args.add(safeStr(privatePort));
+            args.add("--protocol");          args.add(safeStr(rule.getProtocol()));
+            args.addAll(vpcArgs);
+            boolean result = executeScript(network, action, args.toArray(new String[0]));
             if (!result) {
                 throw new ResourceUnavailableException("Failed to " + action + " for port forwarding rule",
                         Network.class, network.getId());
@@ -684,15 +712,68 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     /**
      * Returns all {@code extension_resource_map_details} for the given extension
-     * on the physical network as a plain map.
+     * on the physical network as a plain map, enriched with physical-network
+     * metadata (name, kvmnetworklabel, vmwarenetworklabel, xennetworklabel,
+     * public_kvmnetworklabel) so the wrapper script can derive bridge names and
+     * interface names without extra lookups.
      */
     private Map<String, String> buildPhysicalNetworkDetailsMap(Long physicalNetworkId, Extension extension) {
+        Map<String, String> details = new HashMap<>();
         if (physicalNetworkId == null || extension == null) {
-            return new HashMap<>();
+            return details;
         }
-        Map<String, String> details = extensionHelper.getAllResourceMapDetailsForExtensionOnPhysicalNetwork(
+        // Start with registered extension_resource_map_details
+        Map<String, String> mapDetails = extensionHelper.getAllResourceMapDetailsForExtensionOnPhysicalNetwork(
                 physicalNetworkId, extension.getId());
-        return details != null ? details : new HashMap<>();
+        if (mapDetails != null) {
+            details.putAll(mapDetails);
+        }
+
+        // Enrich with physical-network record fields
+        PhysicalNetworkVO pn = physicalNetworkDao.findById(physicalNetworkId);
+        if (pn != null) {
+            if (pn.getName() != null) {
+                details.put("physicalnetworkname", pn.getName());
+            }
+        }
+
+        // Guest traffic-type labels
+        PhysicalNetworkTrafficTypeVO guestTraffic =
+                physicalNetworkTrafficTypeDao.findBy(physicalNetworkId, TrafficType.Guest);
+        if (guestTraffic != null) {
+            putIfNotEmpty(details, "kvmnetworklabel",    guestTraffic.getKvmNetworkLabel());
+            putIfNotEmpty(details, "vmwarenetworklabel", guestTraffic.getVmwareNetworkLabel());
+            putIfNotEmpty(details, "xennetworklabel",    guestTraffic.getXenNetworkLabel());
+        }
+
+        // Public traffic-type labels (KVM label used by the wrapper for public bridges)
+        PhysicalNetworkTrafficTypeVO publicTraffic =
+                physicalNetworkTrafficTypeDao.findBy(physicalNetworkId, TrafficType.Public);
+        if (publicTraffic != null) {
+            putIfNotEmpty(details, "public_kvmnetworklabel",    publicTraffic.getKvmNetworkLabel());
+            putIfNotEmpty(details, "public_vmwarenetworklabel", publicTraffic.getVmwareNetworkLabel());
+        }
+
+        return details;
+    }
+
+    /** Helper: put a key→value only when value is non-null and non-empty. */
+    private static void putIfNotEmpty(Map<String, String> map, String key, String value) {
+        if (value != null && !value.isEmpty()) {
+            map.put(key, value);
+        }
+    }
+
+    /**
+     * Returns {@code ["--vpc-id", "<vpcId>"]} when the network belongs to a VPC,
+     * or an empty list otherwise.  Appended to every script invocation so the
+     * wrapper script can derive the correct namespace (cs-net-&lt;vpcId&gt;).
+     */
+    private List<String> getVpcIdArgs(Network network) {
+        if (network.getVpcId() != null) {
+            return List.of("--vpc-id", String.valueOf(network.getVpcId()));
+        }
+        return List.of();
     }
 
     /**
