@@ -195,7 +195,11 @@ release_lock() {
 # ---------------------------------------------------------------------------
 
 # Host bridge for a VLAN on a given physical NIC:  br<eth>-<vlan>
-host_bridge_name() { echo "br${1}-${2}"; }
+host_bridge_name() {
+    local eth="$1" vlan_raw="$2" vlan
+    vlan=$(normalize_vlan "${vlan_raw}")
+    echo "br${eth}-${vlan}"
+}
 
 # Internal guest veth pair (keyed on VLAN ID and network id):
 #   vh-<vlan>-<id>  (host, in bridge)
@@ -219,9 +223,24 @@ shorten_id() {
     echo "${id}" | awk '{n=length($0); print substr($0, n-5)}'
 }
 
+# normalize_vlan <vlan_raw> -> prints the normalized vlan id (strip vlan:// prefix)
+normalize_vlan() {
+    local vlan_raw="$1"
+    if [ -z "${vlan_raw}" ]; then
+        printf '%s' ""
+        return
+    fi
+    if printf '%s' "${vlan_raw}" | grep -q '^vlan://'; then
+        printf '%s' "${vlan_raw#vlan://}"
+    else
+        printf '%s' "${vlan_raw}"
+    fi
+}
+
 # Generate guest host veth name: vh-<vlan>-<id> (ensure <=15 chars)
 veth_host_name() {
-    local vlan="$1" id="$2" name short
+    local vlan_raw="$1" id="$2" name short
+    vlan=$(normalize_vlan "${vlan_raw}")
     name="vh-${vlan}-${id}"
     if [ ${#name} -le 15 ]; then
         echo "${name}"
@@ -238,7 +257,8 @@ veth_host_name() {
 
 # Generate guest namespace veth name: vn-<vlan>-<id> (ensure <=15 chars)
 veth_ns_name() {
-    local vlan="$1" id="$2" name short
+    local vlan_raw="$1" id="$2" name short
+    vlan=$(normalize_vlan "${vlan_raw}")
     name="vn-${vlan}-${id}"
     if [ ${#name} -le 15 ]; then
         echo "${name}"
@@ -256,8 +276,17 @@ veth_ns_name() {
 # Public veth pair (keyed on public VLAN and network/vpc id):
 #   vph-<pvlan>-<id>  (host, in public bridge)
 #   vpn-<pvlan>-<id>  (namespace, gets public IP)
-pub_veth_host_name() { echo "vph-${1}-${2}"; }
-pub_veth_ns_name()   { echo "vpn-${1}-${2}"; }
+pub_veth_host_name() {
+    local pvlan_raw="$1" id="$2" pvlan
+    pvlan=$(normalize_vlan "${pvlan_raw}")
+    echo "vph-${pvlan}-${id}"
+}
+
+pub_veth_ns_name() {
+    local pvlan_raw="$1" id="$2" pvlan
+    pvlan=$(normalize_vlan "${pvlan_raw}")
+    echo "vpn-${pvlan}-${id}"
+}
 
 nat_chain()    { echo "${CHAIN_PREFIX}_${1}"; }
 filter_chain() { echo "${CHAIN_PREFIX}_FWD_${1}"; }
@@ -270,7 +299,8 @@ filter_chain() { echo "${CHAIN_PREFIX}_FWD_${1}"; }
 
 ensure_host_bridge() {
     local eth="$1"
-    local vlan="$2"
+    local vlan_raw="$2"
+    local vlan=$(normalize_vlan "${vlan_raw}")
     local br vif current_master
 
     br=$(host_bridge_name "${eth}" "${vlan}")
@@ -374,6 +404,15 @@ parse_args() {
 
     # CHOSEN_ID selects vpc-id when present, otherwise network-id
     CHOSEN_ID="${VPC_ID:-${NETWORK_ID}}"
+
+    # Normalize VLAN if provided as 'vlan://<id>' (common in some callers)
+    if [ -n "${VLAN}" ]; then
+      VLAN=$(normalize_vlan "${VLAN}")
+    fi
+    # Normalize PUBLIC_VLAN as well
+    if [ -n "${PUBLIC_VLAN}" ]; then
+      PUBLIC_VLAN=$(normalize_vlan "${PUBLIC_VLAN}")
+    fi
 }
 
 # Load persisted state (shutdown, destroy, IP operations)
