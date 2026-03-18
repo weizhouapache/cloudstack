@@ -30,16 +30,13 @@
 # ---------------------
 # Each CloudStack isolated network has a VLAN.  On the KVM host:
 #
-#   ethX.<vlan>          – VLAN sub-interface on the physical NIC (ethX)
-#   br<ethX>-<vlan>      – Linux bridge:  ethX.<vlan> + veth-host-<vlan>
-#   veth-host-<vlan>     – host end of the veth pair → in the bridge
-#   veth-ns-<vlan>       – namespace end → assigned the network gateway IP
+#   ethX.<vlan>         – VLAN sub-interface on the physical NIC (ethX)
+#   br<ethX>-<vlan>     – Linux bridge: ethX.<vlan> + vh-<vlan>-<id>
+#   vh-<vlan>-<id>      – host end of the veth pair → in the bridge
+#   vn-<vlan>-<id>      – namespace end → assigned the network gateway IP
 #
-# ethX is resolved from the kvmnetworklabel stored in
-# --physical-network-extension-details:
-#   eth1     → eth1  (already a physical NIC)
-#   cloudbr1 → eth1  (find the first non-virtual bridge member)
-# by checking /sys/devices/virtual/net/ and /sys/class/net/<br>/brif/.
+# ethX is read from guest.network.device in the physical-network extension
+# details (defaults to eth1 when absent).
 #
 # Namespace
 # ---------
@@ -54,14 +51,15 @@
 #   vpn-<pvlan>-<id>   – namespace end → assigned the public IP
 #
 # where <pvlan>  = public VLAN tag (from --public-vlan)
-#       <id>     = network or VPC id (from --network-id or vpc-id)
-#       pub_ethX = resolved from public_kvmnetworklabel (falls back to ethX)
+#       <id>     = vpc-id if present, else network-id
+#       pub_ethX = read from public.network.device in extension details
+#                  (defaults to eth1 when absent)
 #
 # Interface name lengths (Linux limit: 15 chars)
-#   veth-host-<vlan>   max 14 (vlan ≤ 4094) ✓
-#   veth-ns-<vlan>     max 12                ✓
-#   vph-<pvlan>-<id>   max 14 (pvlan ≤ 4094, id ≤ 9999) ✓
-#   vpn-<pvlan>-<id>   max 14                             ✓
+#   vh-<vlan>-<id>     max 15 (shorten_id applied when needed) ✓
+#   vn-<vlan>-<id>     max 15 (shorten_id applied when needed) ✓
+#   vph-<pvlan>-<id>   max 15 ✓
+#   vpn-<pvlan>-<id>   max 15 ✓
 #
 # iptables chains (inside namespace)
 # ------------------------------------
@@ -116,45 +114,21 @@ _pre_scan_args() {
 _pre_scan_args "$@"
 
 # ---------------------------------------------------------------------------
-# Resolve physical NIC from a kvmnetworklabel
+# Resolve host network interfaces from physical-network extension details.
 #
-#   eth1     → eth1     (not in /sys/devices/virtual/net/ → already physical)
-#   cloudbr1 → eth1     (virtual bridge → find first non-virtual brif member)
+# Register guest.network.device and public.network.device when attaching the
+# extension to a physical network, e.g.:
+#   details[N].key=guest.network.device  details[N].value=eth1
+#   details[M].key=public.network.device details[M].value=eth1
+#
+# Both default to eth1 when absent.
 # ---------------------------------------------------------------------------
 
-get_eth_from_label() {
-    local label="$1"
-    [ -z "${label}" ] && echo "eth0" && return
+GUEST_ETH=$(_json_get "${PHYS_DETAILS}" "guest.network.device")
+GUEST_ETH="${GUEST_ETH:-eth1}"
 
-    # Already a physical NIC?
-    if [ ! -d "/sys/devices/virtual/net/${label}" ]; then
-        echo "${label}"
-        return
-    fi
-
-    # Virtual device – check if it is a bridge with physical members
-    if [ -d "/sys/class/net/${label}/brif" ]; then
-        local member iface
-        for member in /sys/class/net/${label}/brif/*; do
-            [ -e "${member}" ] || continue
-            iface=$(basename "${member}")
-            if [ ! -d "/sys/devices/virtual/net/${iface}" ]; then
-                echo "${iface}"
-                return
-            fi
-        done
-    fi
-
-    # Fallback: return the label itself
-    echo "${label}"
-}
-
-# Resolve guest-side and public-side physical interfaces
-KVM_LABEL_RAW=$(_json_get "${PHYS_DETAILS}" "kvmnetworklabel")
-PUB_KVM_LABEL_RAW=$(_json_get "${PHYS_DETAILS}" "public_kvmnetworklabel")
-
-GUEST_ETH=$(get_eth_from_label "${KVM_LABEL_RAW:-eth0}")
-PUB_ETH=$(get_eth_from_label "${PUB_KVM_LABEL_RAW:-${KVM_LABEL_RAW:-eth0}}")
+PUB_ETH=$(_json_get "${PHYS_DETAILS}" "public.network.device")
+PUB_ETH="${PUB_ETH:-eth1}"
 
 # iptables chain prefix
 CHAIN_PREFIX="CS_EXTNET"

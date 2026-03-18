@@ -49,11 +49,8 @@ import com.cloud.network.Network.Provider;
 import com.cloud.network.Network.Service;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.Networks;
-import com.cloud.network.Networks.TrafficType;
 import com.cloud.network.dao.PhysicalNetworkDao;
-import com.cloud.network.dao.PhysicalNetworkTrafficTypeDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
-import com.cloud.network.dao.PhysicalNetworkTrafficTypeVO;
 import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.PublicIpAddress;
 import com.cloud.network.addr.PublicIp;
@@ -112,14 +109,25 @@ import com.cloud.vm.VirtualMachineProfile;
  * special treatment is that keys named {@code password} or {@code sshkey} are
  * redacted in log output.
  *
+ * <p>Two well-known optional keys control which host network interfaces the
+ * wrapper script uses to create bridges and veth pairs:</p>
+ * <ul>
+ *   <li>{@code guest.network.device} — host NIC for guest (internal) traffic;
+ *       defaults to {@code eth1} when absent.</li>
+ *   <li>{@code public.network.device} — host NIC for public (NAT/external)
+ *       traffic; defaults to {@code eth1} when absent.</li>
+ * </ul>
+ *
  * <p>Example registration for a KVM-namespace backend:</p>
  * <pre>
  *   cmk registerExtension id=&lt;ext-uuid&gt; resourcetype=PhysicalNetwork \
  *       resourceid=&lt;phys-uuid&gt; \
- *       details[0].key=hosts     details[0].value=192.168.1.10,192.168.1.11 \
- *       details[1].key=port      details[1].value=22 \
- *       details[2].key=username  details[2].value=root \
- *       details[3].key=sshkey    details[3].value="$(cat ~/.ssh/id_rsa)"
+ *       details[0].key=hosts                details[0].value=192.168.1.10,192.168.1.11 \
+ *       details[1].key=port                 details[1].value=22 \
+ *       details[2].key=username             details[2].value=root \
+ *       details[3].key=sshkey               details[3].value="$(cat ~/.ssh/id_rsa)" \
+ *       details[4].key=guest.network.device details[4].value=eth1 \
+ *       details[5].key=public.network.device details[5].value=eth1
  * </pre>
  *
  * <h3>Per-network extension details</h3>
@@ -171,8 +179,6 @@ public class NetworkExtensionElement extends AdapterBase implements
     private IpAddressManager ipAddressManager;
     @Inject
     private PhysicalNetworkDao physicalNetworkDao;
-    @Inject
-    private PhysicalNetworkTrafficTypeDao physicalNetworkTrafficTypeDao;
 
     // ---- Script argument names ----
 
@@ -211,7 +217,6 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.networkDetailsDao              = this.networkDetailsDao;
         copy.ipAddressManager               = this.ipAddressManager;
         copy.physicalNetworkDao             = this.physicalNetworkDao;
-        copy.physicalNetworkTrafficTypeDao  = this.physicalNetworkTrafficTypeDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -568,10 +573,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         try {
             InetAddress ip = InetAddress.getByName(ipStr);
             InetAddress mask = InetAddress.getByName(netmaskStr);
-            byte[] ipb = ip.getAddress();
-            byte[] mb = mask.getAddress();
-            int ipInt = ByteBuffer.wrap(ipb).getInt();
-            int maskInt = ByteBuffer.wrap(mb).getInt();
+            int maskInt = ByteBuffer.wrap(mask.getAddress()).getInt();
             int prefix = Integer.bitCount(maskInt);
             // Return the provided IP with the calculated prefix so the address retains its host value
             return ipStr + "/" + prefix;
@@ -675,6 +677,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
         String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
 
+        // Log the JSON blobs so we can diagnose missing-argument issues in runtime logs
+        logger.debug("Physical network details JSON: {}", physicalNetworkDetailsJson);
+        logger.debug("Network extension details JSON: {}", networkExtensionDetailsJson);
+
         List<String> cmdLine = new ArrayList<>();
         cmdLine.add(scriptFile.getAbsolutePath());
         cmdLine.add(command);
@@ -731,38 +737,13 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         // Enrich with physical-network record fields
         PhysicalNetworkVO pn = physicalNetworkDao.findById(physicalNetworkId);
-        if (pn != null) {
-            if (pn.getName() != null) {
-                details.put("physicalnetworkname", pn.getName());
-            }
-        }
-
-        // Guest traffic-type labels
-        PhysicalNetworkTrafficTypeVO guestTraffic =
-                physicalNetworkTrafficTypeDao.findBy(physicalNetworkId, TrafficType.Guest);
-        if (guestTraffic != null) {
-            putIfNotEmpty(details, "kvmnetworklabel",    guestTraffic.getKvmNetworkLabel());
-            putIfNotEmpty(details, "vmwarenetworklabel", guestTraffic.getVmwareNetworkLabel());
-            putIfNotEmpty(details, "xennetworklabel",    guestTraffic.getXenNetworkLabel());
-        }
-
-        // Public traffic-type labels (KVM label used by the wrapper for public bridges)
-        PhysicalNetworkTrafficTypeVO publicTraffic =
-                physicalNetworkTrafficTypeDao.findBy(physicalNetworkId, TrafficType.Public);
-        if (publicTraffic != null) {
-            putIfNotEmpty(details, "public_kvmnetworklabel",    publicTraffic.getKvmNetworkLabel());
-            putIfNotEmpty(details, "public_vmwarenetworklabel", publicTraffic.getVmwareNetworkLabel());
+        if (pn != null && pn.getName() != null) {
+            details.put("physicalnetworkname", pn.getName());
         }
 
         return details;
     }
 
-    /** Helper: put a key→value only when value is non-null and non-empty. */
-    private static void putIfNotEmpty(Map<String, String> map, String key, String value) {
-        if (value != null && !value.isEmpty()) {
-            map.put(key, value);
-        }
-    }
 
     /**
      * Returns {@code ["--vpc-id", "<vpcId>"]} when the network belongs to a VPC,

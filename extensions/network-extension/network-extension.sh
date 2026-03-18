@@ -77,7 +77,7 @@ set -euo pipefail
 
 DEFAULT_SSH_PORT=22
 DEFAULT_SSH_USER=root
-DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-extension-wrapper.sh
+DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-extension/network-extension-wrapper.sh
 LOG_FILE=/var/log/cloudstack/management/network-extension.log
 TMPDIR_BASE=/tmp
 
