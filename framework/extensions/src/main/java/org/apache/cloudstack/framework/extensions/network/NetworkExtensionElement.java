@@ -237,6 +237,20 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     @Override
     public Map<Service, Map<Capability, String>> getCapabilities() {
+        try {
+            // If this element is scoped to a provider name, prefer capabilities stored
+            // in the extension's "network.capabilities" detail.  The ExtensionHelper
+            // exposes a helper that loads the Service→Capability map from the DB.
+            if (providerName != null && !providerName.isBlank()) {
+                Map<Service, Map<Capability, String>> caps = extensionHelper.getNetworkCapabilitiesForProvider(null, providerName);
+                if (caps != null && !caps.isEmpty()) {
+                    return caps;
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to load network capabilities from extension details for provider '{}': {}", providerName, e.getMessage());
+        }
+
         return DEFAULT_CAPABILITIES;
     }
 
