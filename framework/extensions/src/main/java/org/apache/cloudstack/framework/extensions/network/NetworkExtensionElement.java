@@ -409,7 +409,18 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
         args.addAll(getVpcIdArgs(network));
-        return executeScript(network, "shutdown", args.toArray(new String[0]));
+        boolean result = executeScript(network, "shutdown", args.toArray(new String[0]));
+        if (result) {
+            // Remove stored per-network extension details (e.g. namespace). For VPC-backed networks
+            // the namespace is named cs-vpc-<vpcId>, stored in the extension details. Removing the
+            // stored details ensures the namespace is deleted/forgotten on shutdown.
+            try {
+                networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
+            } catch (Exception e) {
+                logger.warn("Failed to remove network extension details for network {}: {}", network.getId(), e.getMessage());
+            }
+        }
+        return result;
     }
 
     @Override
