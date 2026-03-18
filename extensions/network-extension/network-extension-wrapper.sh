@@ -338,6 +338,18 @@ parse_args() {
     PUBLIC_GATEWAY=""
     PUBLIC_CIDR=""
     PUBLIC_VLAN=""
+    # --- new fields ---
+    MAC=""
+    HOSTNAME=""
+    DNS_SERVER=""
+    NIC_ID=""
+    DHCP_OPTIONS_JSON="{}"
+    VM_IP=""
+    USERDATA=""
+    PASSWORD=""
+    SSH_KEY=""
+    HYPERVISOR_HOSTNAME=""
+    LB_RULES_JSON="[]"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -356,6 +368,17 @@ parse_args() {
             --public-gateway)      PUBLIC_GATEWAY="$2";      shift 2 ;;
             --public-cidr)         PUBLIC_CIDR="$2";         shift 2 ;;
             --public-vlan)         PUBLIC_VLAN="$2";         shift 2 ;;
+            --mac)                 MAC="$2";                 shift 2 ;;
+            --hostname)            HOSTNAME="$2";            shift 2 ;;
+            --dns)                 DNS_SERVER="$2";          shift 2 ;;
+            --nic-id)              NIC_ID="$2";              shift 2 ;;
+            --options)             DHCP_OPTIONS_JSON="$2";   shift 2 ;;
+            --ip)                  VM_IP="$2";               shift 2 ;;
+            --userdata)            USERDATA="$2";            shift 2 ;;
+            --password)            PASSWORD="$2";            shift 2 ;;
+            --sshkey)              SSH_KEY="$2";             shift 2 ;;
+            --hypervisor-hostname) HYPERVISOR_HOSTNAME="$2"; shift 2 ;;
+            --lb-rules)            LB_RULES_JSON="$2";       shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -550,6 +573,11 @@ cmd_shutdown() {
            "${STATE_DIR}/${NETWORK_ID}/static-nat" \
            "${STATE_DIR}/${NETWORK_ID}/port-forward"
 
+    # Stop per-network services (dnsmasq, haproxy, apache2)
+    _svc_stop_dnsmasq
+    _svc_stop_haproxy
+    _svc_stop_apache2
+
     release_lock
     log "shutdown: done network=${NETWORK_ID}"
 }
@@ -587,6 +615,11 @@ cmd_destroy() {
         ip netns del "${NAMESPACE}"
         log "Deleted namespace ${NAMESPACE}"
     fi
+
+    # Stop per-network services before removing state
+    _svc_stop_dnsmasq
+    _svc_stop_haproxy
+    _svc_stop_apache2
 
     rm -rf "${STATE_DIR}/${NETWORK_ID}"
 
@@ -967,8 +1000,753 @@ cmd_delete_port_forward() {
 }
 
 ##############################################################################
-# Command: custom-action
+# Helpers: path accessors  (require NETWORK_ID to be set)
 ##############################################################################
+
+_dnsmasq_dir()        { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq"; }
+_dnsmasq_conf()       { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dnsmasq.conf"; }
+_dnsmasq_pid()        { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dnsmasq.pid"; }
+_dnsmasq_hosts()      { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/hosts"; }
+_dnsmasq_dhcp_hosts() { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dhcp-hosts"; }
+_dnsmasq_dhcp_opts()  { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dhcp-opts"; }
+
+_haproxy_dir()  { echo "${STATE_DIR}/${NETWORK_ID}/haproxy"; }
+_haproxy_conf() { echo "${STATE_DIR}/${NETWORK_ID}/haproxy/haproxy.cfg"; }
+_haproxy_pid()  { echo "${STATE_DIR}/${NETWORK_ID}/haproxy/haproxy.pid"; }
+_haproxy_sock() { echo "${STATE_DIR}/${NETWORK_ID}/haproxy/haproxy.sock"; }
+
+_apache2_dir()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2"; }
+_apache2_conf() { echo "${STATE_DIR}/${NETWORK_ID}/apache2/apache2.conf"; }
+_apache2_pid()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2/apache2.pid"; }
+_metadata_dir() { echo "${STATE_DIR}/${NETWORK_ID}/metadata"; }
+_apache2_cgi()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2/metadata.cgi"; }
+
+##############################################################################
+# Helpers: binary detection
+##############################################################################
+
+_find_apache2_bin() {
+    for bin in apache2 httpd /usr/sbin/apache2 /usr/sbin/httpd; do
+        command -v "${bin}" >/dev/null 2>&1 && echo "${bin}" && return
+    done
+    echo "apache2"
+}
+
+_find_apache2_modules_dir() {
+    for d in /usr/lib/apache2/modules /usr/lib64/apache2/modules \
+              /usr/libexec/apache2   /usr/lib/httpd/modules \
+              /usr/libexec/httpd; do
+        [ -d "${d}" ] && echo "${d}" && return
+    done
+    echo "/usr/lib/apache2/modules"
+}
+
+_apache2_user() {
+    id www-data >/dev/null 2>&1 && echo "www-data" && return
+    id apache    >/dev/null 2>&1 && echo "apache"   && return
+    echo "nobody"
+}
+
+##############################################################################
+# Helpers: dnsmasq  (DHCP + DNS via the same process)
+##############################################################################
+
+# _cidr_dhcp_range <cidr> <gateway>  → "<start>,<end>,<netmask>"
+_cidr_dhcp_range() {
+    python3 - "$1" "$2" 2>/dev/null << 'PYEOF'
+import ipaddress, sys
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=False)
+    gw  = ipaddress.ip_address(sys.argv[2])
+    hosts = [h for h in net.hosts() if h != gw]
+    if hosts:
+        print(f"{hosts[0]},{hosts[-1]},{net.netmask}")
+    else:
+        print(f"{net.network_address+1},{net.broadcast_address-1},{net.netmask}")
+except Exception:
+    print(",,")
+PYEOF
+}
+
+# _write_dnsmasq_conf <dns_enabled: true|false>
+# Requires: NETWORK_ID, VLAN, CHOSEN_ID, CIDR, GATEWAY, DNS_SERVER
+_write_dnsmasq_conf() {
+    local dns_enabled="${1:-false}"
+    local dir; dir=$(_dnsmasq_dir)
+    mkdir -p "${dir}"
+
+    local dhcp_hosts; dhcp_hosts=$(_dnsmasq_dhcp_hosts)
+    local hosts;      hosts=$(_dnsmasq_hosts)
+    local dhcp_opts;  dhcp_opts=$(_dnsmasq_dhcp_opts)
+    touch "${dhcp_hosts}" "${hosts}" "${dhcp_opts}"
+
+    local veth_n; veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
+    local dhcp_range; dhcp_range=$(_cidr_dhcp_range "${CIDR}" "${GATEWAY}")
+    local port_line="port=0"
+    [ "${dns_enabled}" = "true" ] && port_line="port=53"
+
+    cat > "$(_dnsmasq_conf)" << EOF
+# Auto-generated by network-extension-wrapper.sh — do not edit
+${port_line}
+interface=${veth_n}
+no-hosts
+bind-interfaces
+pid-file=$(_dnsmasq_pid)
+dhcp-range=${dhcp_range},12h
+dhcp-option=3,${GATEWAY}
+dhcp-hostsfile=${dhcp_hosts}
+addn-hosts=${hosts}
+dhcp-optsfile=${dhcp_opts}
+log-facility=/var/log/cloudstack/network-extension-dnsmasq-${NETWORK_ID}.log
+EOF
+    [ -n "${DNS_SERVER}" ] && echo "dhcp-option=6,${DNS_SERVER}" >> "$(_dnsmasq_conf)"
+    log "dnsmasq: wrote config $(_dnsmasq_conf) (dns_enabled=${dns_enabled})"
+}
+
+_svc_start_or_reload_dnsmasq() {
+    local pid_f; pid_f=$(_dnsmasq_pid)
+    if [ -f "${pid_f}" ] && kill -0 "$(cat "${pid_f}")" 2>/dev/null; then
+        log "dnsmasq: sending SIGHUP to reload (pid=$(cat "${pid_f}"))"
+        ip netns exec "${NAMESPACE}" kill -HUP "$(cat "${pid_f}")" 2>/dev/null || true
+    else
+        log "dnsmasq: starting in namespace ${NAMESPACE}"
+        if ! ip netns exec "${NAMESPACE}" dnsmasq --conf-file="$(_dnsmasq_conf)"; then
+            log "WARNING: dnsmasq start failed — is dnsmasq installed on this host?"
+        fi
+    fi
+}
+
+_svc_stop_dnsmasq() {
+    local pid_f; pid_f=$(_dnsmasq_pid)
+    if [ -f "${pid_f}" ]; then
+        local pid; pid=$(cat "${pid_f}")
+        kill "${pid}" 2>/dev/null || true
+        rm -f "${pid_f}"
+        log "dnsmasq: stopped (pid=${pid})"
+    fi
+    # Kill any orphaned dnsmasq for this network
+    pkill -f "dnsmasq.*${NETWORK_ID}" 2>/dev/null || true
+}
+
+##############################################################################
+# Helpers: haproxy  (LB via haproxy)
+##############################################################################
+
+# Regenerate haproxy config from all persisted per-rule JSON files.
+# Requires: NETWORK_ID
+_write_haproxy_conf() {
+    local lb_dir; lb_dir=$(_haproxy_dir)
+    local pid_f;  pid_f=$(_haproxy_pid)
+    local sock_f; sock_f=$(_haproxy_sock)
+    mkdir -p "${lb_dir}"
+
+    python3 - "${lb_dir}" "${pid_f}" "${sock_f}" > "$(_haproxy_conf)" 2>/dev/null << 'PYEOF'
+import json, os, sys
+
+lb_dir   = sys.argv[1]
+pid_file = sys.argv[2]
+sock     = sys.argv[3]
+
+rules = []
+if os.path.isdir(lb_dir):
+    for fn in sorted(os.listdir(lb_dir)):
+        if fn.endswith('.json'):
+            try:
+                with open(os.path.join(lb_dir, fn)) as f:
+                    r = json.load(f)
+                if not r.get('revoke', False):
+                    rules.append(r)
+            except Exception:
+                pass
+
+lines = [
+    "global",
+    "    daemon",
+    "    maxconn 4096",
+    "    log /dev/log local0",
+    f"    stats socket {sock} mode 660 level admin",
+    f"    pidfile {pid_file}",
+    "",
+    "defaults",
+    "    mode tcp",
+    "    timeout connect 5s",
+    "    timeout client  50s",
+    "    timeout server  50s",
+    "    log global",
+    "",
+]
+
+ALG_MAP = {
+    'roundrobin': 'roundrobin', 'leastconn': 'leastconn',
+    'source': 'source', 'static-rr': 'static-rr',
+    'least_conn': 'leastconn',
+}
+
+for rule in rules:
+    rid      = rule['id']
+    pub_ip   = rule.get('publicIp', '')
+    pub_port = rule.get('publicPort', 0)
+    alg      = ALG_MAP.get(rule.get('algorithm', '').lower(), 'roundrobin')
+    backends = [b for b in rule.get('backends', []) if not b.get('revoked', False)]
+    if not backends:
+        continue
+    lines += [
+        f"frontend cs_lb_{rid}_front",
+        f"    bind {pub_ip}:{pub_port}",
+        f"    default_backend cs_lb_{rid}_back",
+        "",
+        f"backend cs_lb_{rid}_back",
+        f"    balance {alg}",
+    ]
+    for i, b in enumerate(backends):
+        bip   = b.get('ip', '')
+        bport = b.get('port', pub_port)
+        lines.append(f"    server backend_{rid}_{i} {bip}:{bport} check")
+    lines.append("")
+
+print('\n'.join(lines))
+PYEOF
+    log "haproxy: wrote config $(_haproxy_conf)"
+}
+
+_svc_reload_haproxy() {
+    local conf_f; conf_f=$(_haproxy_conf)
+    local pid_f;  pid_f=$(_haproxy_pid)
+
+    if [ -f "${pid_f}" ] && kill -0 "$(cat "${pid_f}")" 2>/dev/null; then
+        log "haproxy: reloading"
+        if ! ip netns exec "${NAMESPACE}" haproxy -f "${conf_f}" -p "${pid_f}" \
+                -sf "$(cat "${pid_f}")" 2>/dev/null; then
+            log "WARNING: haproxy reload failed"
+        fi
+    else
+        log "haproxy: starting in namespace ${NAMESPACE}"
+        if ! ip netns exec "${NAMESPACE}" haproxy -f "${conf_f}" -p "${pid_f}" 2>/dev/null; then
+            log "WARNING: haproxy start failed — is haproxy installed on this host?"
+        fi
+    fi
+}
+
+_svc_stop_haproxy() {
+    local pid_f; pid_f=$(_haproxy_pid)
+    if [ -f "${pid_f}" ]; then
+        local pid; pid=$(cat "${pid_f}")
+        ip netns exec "${NAMESPACE}" kill "${pid}" 2>/dev/null || kill "${pid}" 2>/dev/null || true
+        rm -f "${pid_f}"
+        log "haproxy: stopped (pid=${pid})"
+    fi
+}
+
+##############################################################################
+# Helpers: apache2  (userdata / metadata HTTP service)
+#
+# apache2 runs inside the namespace, listening on <GATEWAY>:80.
+# An iptables DNAT rule inside the namespace redirects requests destined for
+# 169.254.169.254:80 to <GATEWAY>:80 so VMs can use the standard metadata URL.
+#
+# Files served:
+#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/user-data
+#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/password
+#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/public-keys/0/openssh-key
+#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/hypervisor-hostname
+#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/local-hostname
+#
+# Apache2 uses a CGI script to dispatch requests to the per-IP subtree.
+##############################################################################
+
+_write_apache2_conf() {
+    local dir;  dir=$(_apache2_dir)
+    local www;  www=$(_metadata_dir)
+    local cgi;  cgi=$(_apache2_cgi)
+    local mods; mods=$(_find_apache2_modules_dir)
+    local apuser; apuser=$(_apache2_user)
+    mkdir -p "${dir}" "${www}"
+
+    # ---- CGI dispatcher script ----
+    cat > "${cgi}" << 'CGISCRIPT'
+#!/bin/bash
+CLIENT="${REMOTE_ADDR}"
+BASEDIR="$(dirname "$0")/../metadata"
+REQ="${PATH_INFO:-${REQUEST_URI}}"
+REQ="${REQ#/}"
+FILE="${BASEDIR}/${CLIENT}/${REQ}"
+if [ -f "${FILE}" ]; then
+    printf 'Content-Type: text/plain\r\n\r\n'
+    cat "${FILE}"
+else
+    printf 'Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot found\n'
+fi
+CGISCRIPT
+    chmod +x "${cgi}"
+
+    # ---- Detect MPM module ----
+    local mpm_mod="mpm_event_module"
+    local mpm_so="mod_mpm_event.so"
+    if [ ! -f "${mods}/${mpm_so}" ] && [ -f "${mods}/mod_mpm_prefork.so" ]; then
+        mpm_mod="mpm_prefork_module"; mpm_so="mod_mpm_prefork.so"
+    fi
+
+    # ---- Check for authz_core (required in apache2 >= 2.4) ----
+    local authz_line=""
+    [ -f "${mods}/mod_authz_core.so" ] && \
+        authz_line="LoadModule authz_core_module ${mods}/mod_authz_core.so"
+
+    local unixd_line=""
+    [ -f "${mods}/mod_unixd.so" ] && \
+        unixd_line="LoadModule unixd_module ${mods}/mod_unixd.so"
+
+    local require_line="Allow from all"
+    [ -f "${mods}/mod_authz_core.so" ] && require_line="Require all granted"
+
+    cat > "$(_apache2_conf)" << EOF
+# Auto-generated by network-extension-wrapper.sh — do not edit
+ServerRoot /tmp
+PidFile $(_apache2_pid)
+ServerName metadata-${NETWORK_ID}
+Listen ${GATEWAY}:80
+User ${apuser}
+Group ${apuser}
+
+LoadModule ${mpm_mod} ${mods}/${mpm_so}
+LoadModule cgi_module ${mods}/mod_cgi.so
+LoadModule alias_module ${mods}/mod_alias.so
+${unixd_line}
+${authz_line}
+
+DocumentRoot ${www}
+ErrorLog /var/log/cloudstack/network-extension-apache2-${NETWORK_ID}.log
+
+<VirtualHost ${GATEWAY}:80>
+    ServerName metadata
+    ScriptAlias / ${cgi}/
+    <Directory ${dir}>
+        Options +ExecCGI
+        AllowOverride None
+        ${require_line}
+    </Directory>
+</VirtualHost>
+EOF
+    log "apache2: wrote config $(_apache2_conf)"
+}
+
+_svc_start_or_reload_apache2() {
+    local bin; bin=$(_find_apache2_bin)
+    local pid_f; pid_f=$(_apache2_pid)
+
+    if [ -f "${pid_f}" ] && kill -0 "$(cat "${pid_f}")" 2>/dev/null; then
+        log "apache2: graceful restart (pid=$(cat "${pid_f}"))"
+        ip netns exec "${NAMESPACE}" "${bin}" -f "$(_apache2_conf)" -k graceful 2>/dev/null || \
+            log "WARNING: apache2 graceful restart failed"
+    else
+        log "apache2: starting in namespace ${NAMESPACE}"
+        if ! ip netns exec "${NAMESPACE}" "${bin}" -f "$(_apache2_conf)" -k start 2>/dev/null; then
+            log "WARNING: apache2 start failed — is apache2/httpd installed on this host?"
+        fi
+    fi
+
+    # DNAT 169.254.169.254:80 → GATEWAY:80  (idempotent)
+    ip netns exec "${NAMESPACE}" iptables -t nat \
+        -C PREROUTING -d 169.254.169.254/32 -p tcp --dport 80 \
+        -j DNAT --to-destination "${GATEWAY}:80" 2>/dev/null || \
+    ip netns exec "${NAMESPACE}" iptables -t nat \
+        -A PREROUTING -d 169.254.169.254/32 -p tcp --dport 80 \
+        -j DNAT --to-destination "${GATEWAY}:80"
+
+    # Allow metadata traffic inbound to the namespace (INPUT)
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -A INPUT -p tcp --dport 80 -j ACCEPT
+}
+
+_svc_stop_apache2() {
+    local bin; bin=$(_find_apache2_bin)
+    local pid_f; pid_f=$(_apache2_pid)
+
+    if [ -f "${pid_f}" ] && kill -0 "$(cat "${pid_f}")" 2>/dev/null; then
+        local pid; pid=$(cat "${pid_f}")
+        ip netns exec "${NAMESPACE}" "${bin}" -f "$(_apache2_conf)" -k stop 2>/dev/null || \
+            kill "${pid}" 2>/dev/null || true
+        rm -f "${pid_f}"
+        log "apache2: stopped (pid=${pid})"
+    fi
+}
+
+##############################################################################
+# Command: config-dhcp-subnet
+# Configure dnsmasq for DHCP (DNS disabled at port 53).
+##############################################################################
+
+cmd_config_dhcp_subnet() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "config-dhcp-subnet: network=${NETWORK_ID} ns=${NAMESPACE} gw=${GATEWAY} cidr=${CIDR}"
+    [ -z "${GATEWAY}" ] && die "config-dhcp-subnet: missing --gateway"
+    [ -z "${CIDR}" ]    && die "config-dhcp-subnet: missing --cidr"
+    _write_dnsmasq_conf false
+    _svc_start_or_reload_dnsmasq
+    release_lock
+    log "config-dhcp-subnet: done network=${NETWORK_ID}"
+}
+
+##############################################################################
+# Command: config-dns-subnet
+# Configure dnsmasq for DNS (also enables DHCP; DNS on port 53).
+##############################################################################
+
+cmd_config_dns_subnet() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "config-dns-subnet: network=${NETWORK_ID} ns=${NAMESPACE} gw=${GATEWAY} cidr=${CIDR}"
+    [ -z "${GATEWAY}" ] && die "config-dns-subnet: missing --gateway"
+    [ -z "${CIDR}" ]    && die "config-dns-subnet: missing --cidr"
+    _write_dnsmasq_conf true
+    _svc_start_or_reload_dnsmasq
+    release_lock
+    log "config-dns-subnet: done network=${NETWORK_ID}"
+}
+
+##############################################################################
+# Command: remove-dhcp-subnet
+# Tear down dnsmasq DHCP for this network.
+##############################################################################
+
+cmd_remove_dhcp_subnet() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "remove-dhcp-subnet: network=${NETWORK_ID}"
+    _svc_stop_dnsmasq
+    rm -rf "$(_dnsmasq_dir)"
+    release_lock
+    log "remove-dhcp-subnet: done network=${NETWORK_ID}"
+}
+
+##############################################################################
+# Command: remove-dns-subnet
+# Disable DNS (port 53) but keep DHCP running if configured.
+##############################################################################
+
+cmd_remove_dns_subnet() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "remove-dns-subnet: network=${NETWORK_ID}"
+    if [ -f "$(_dnsmasq_conf)" ]; then
+        _write_dnsmasq_conf false
+        _svc_start_or_reload_dnsmasq
+    fi
+    release_lock
+    log "remove-dns-subnet: done network=${NETWORK_ID}"
+}
+
+##############################################################################
+# Command: add-dhcp-entry
+# Add a static DHCP host entry (mac→ip) to dnsmasq.
+##############################################################################
+
+cmd_add_dhcp_entry() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "add-dhcp-entry: network=${NETWORK_ID} mac=${MAC} ip=${VM_IP} hostname=${HOSTNAME}"
+    [ -z "${MAC}" ]   && die "add-dhcp-entry: missing --mac"
+    [ -z "${VM_IP}" ] && die "add-dhcp-entry: missing --ip"
+
+    local dhcp_hosts; dhcp_hosts=$(_dnsmasq_dhcp_hosts)
+    mkdir -p "$(_dnsmasq_dir)"
+    touch "${dhcp_hosts}"
+
+    # Remove any existing entry for this MAC
+    grep -v "^${MAC}," "${dhcp_hosts}" > "${dhcp_hosts}.tmp" 2>/dev/null || true
+    mv "${dhcp_hosts}.tmp" "${dhcp_hosts}"
+
+    if [ -n "${HOSTNAME}" ]; then
+        echo "${MAC},${VM_IP},${HOSTNAME},infinite" >> "${dhcp_hosts}"
+    else
+        echo "${MAC},${VM_IP},infinite" >> "${dhcp_hosts}"
+    fi
+
+    _svc_start_or_reload_dnsmasq
+    release_lock
+    log "add-dhcp-entry: done mac=${MAC} ip=${VM_IP}"
+}
+
+##############################################################################
+# Command: remove-dhcp-entry
+# Remove a static DHCP host entry from dnsmasq.
+##############################################################################
+
+cmd_remove_dhcp_entry() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "remove-dhcp-entry: network=${NETWORK_ID} mac=${MAC}"
+    [ -z "${MAC}" ] && die "remove-dhcp-entry: missing --mac"
+
+    local dhcp_hosts; dhcp_hosts=$(_dnsmasq_dhcp_hosts)
+    if [ -f "${dhcp_hosts}" ]; then
+        grep -v "^${MAC}," "${dhcp_hosts}" > "${dhcp_hosts}.tmp" 2>/dev/null || true
+        mv "${dhcp_hosts}.tmp" "${dhcp_hosts}"
+        _svc_start_or_reload_dnsmasq
+    fi
+    release_lock
+    log "remove-dhcp-entry: done mac=${MAC}"
+}
+
+##############################################################################
+# Command: set-dhcp-options
+# Set extra DHCP options for a NIC (by NIC ID as dnsmasq tag).
+##############################################################################
+
+cmd_set_dhcp_options() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "set-dhcp-options: network=${NETWORK_ID} nic=${NIC_ID}"
+
+    local dhcp_opts; dhcp_opts=$(_dnsmasq_dhcp_opts)
+    mkdir -p "$(_dnsmasq_dir)"
+    touch "${dhcp_opts}"
+
+    # Parse JSON options with Python3 and write to opts file
+    python3 - "${NIC_ID}" "${DHCP_OPTIONS_JSON}" "${dhcp_opts}" << 'PYEOF'
+import json, sys, os
+
+nic_id   = sys.argv[1]
+opts_str = sys.argv[2]
+optsfile = sys.argv[3]
+
+try:
+    opts = json.loads(opts_str)
+except Exception:
+    opts = {}
+
+# Read existing lines; drop any previously set for this nic
+try:
+    with open(optsfile) as f:
+        lines = f.readlines()
+except FileNotFoundError:
+    lines = []
+
+marker = f"# nic:{nic_id}:"
+lines = [l for l in lines if not l.startswith(marker)]
+
+for code, value in opts.items():
+    lines.append(f"{marker}\ndhcp-option=tag:{nic_id},{code},{value}\n")
+
+with open(optsfile, 'w') as f:
+    f.writelines(lines)
+PYEOF
+
+    _svc_start_or_reload_dnsmasq
+    release_lock
+    log "set-dhcp-options: done nic=${NIC_ID}"
+}
+
+##############################################################################
+# Command: add-dns-entry
+# Add a hostname→IP mapping to dnsmasq.
+##############################################################################
+
+cmd_add_dns_entry() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "add-dns-entry: network=${NETWORK_ID} hostname=${HOSTNAME} ip=${VM_IP}"
+    [ -z "${VM_IP}" ]    && die "add-dns-entry: missing --ip"
+    [ -z "${HOSTNAME}" ] && die "add-dns-entry: missing --hostname"
+
+    local hosts; hosts=$(_dnsmasq_hosts)
+    mkdir -p "$(_dnsmasq_dir)"
+    touch "${hosts}"
+
+    # Remove existing entry for this IP then append fresh
+    grep -v "^${VM_IP}[[:space:]]" "${hosts}" > "${hosts}.tmp" 2>/dev/null || true
+    mv "${hosts}.tmp" "${hosts}"
+    echo "${VM_IP} ${HOSTNAME}" >> "${hosts}"
+
+    _svc_start_or_reload_dnsmasq
+    release_lock
+    log "add-dns-entry: done ${VM_IP} ${HOSTNAME}"
+}
+
+##############################################################################
+# Command: remove-dns-entry
+# Remove a hostname→IP mapping from dnsmasq.
+##############################################################################
+
+cmd_remove_dns_entry() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "remove-dns-entry: network=${NETWORK_ID} ip=${VM_IP}"
+    [ -z "${VM_IP}" ] && die "remove-dns-entry: missing --ip"
+
+    local hosts; hosts=$(_dnsmasq_hosts)
+    if [ -f "${hosts}" ]; then
+        grep -v "^${VM_IP}[[:space:]]" "${hosts}" > "${hosts}.tmp" 2>/dev/null || true
+        mv "${hosts}.tmp" "${hosts}"
+        _svc_start_or_reload_dnsmasq
+    fi
+    release_lock
+    log "remove-dns-entry: done ${VM_IP}"
+}
+
+##############################################################################
+# Command: save-userdata
+# Write base64-decoded user-data for a VM; start/reload apache2.
+##############################################################################
+
+cmd_save_userdata() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "save-userdata: network=${NETWORK_ID} ip=${VM_IP}"
+    [ -z "${VM_IP}" ] && die "save-userdata: missing --ip"
+
+    local vm_dir; vm_dir="$(_metadata_dir)/${VM_IP}/latest"
+    mkdir -p "${vm_dir}"
+
+    if [ -n "${USERDATA}" ]; then
+        printf '%s' "${USERDATA}" | base64 -d > "${vm_dir}/user-data" 2>/dev/null || \
+            printf '%s' "${USERDATA}" > "${vm_dir}/user-data"
+    fi
+
+    _write_apache2_conf
+    _svc_start_or_reload_apache2
+    release_lock
+    log "save-userdata: done ${VM_IP}"
+}
+
+##############################################################################
+# Command: save-password
+# Write a VM password served via the metadata HTTP service.
+##############################################################################
+
+cmd_save_password() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "save-password: network=${NETWORK_ID} ip=${VM_IP}"
+    [ -z "${VM_IP}" ] && die "save-password: missing --ip"
+
+    local vm_dir; vm_dir="$(_metadata_dir)/${VM_IP}/latest"
+    mkdir -p "${vm_dir}"
+    printf '%s' "${PASSWORD}" > "${vm_dir}/password"
+
+    _write_apache2_conf
+    _svc_start_or_reload_apache2
+    release_lock
+    log "save-password: done ${VM_IP}"
+}
+
+##############################################################################
+# Command: save-sshkey
+# Write a base64-encoded SSH public key for a VM.
+##############################################################################
+
+cmd_save_sshkey() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "save-sshkey: network=${NETWORK_ID} ip=${VM_IP}"
+    [ -z "${VM_IP}" ] && die "save-sshkey: missing --ip"
+
+    local key_dir; key_dir="$(_metadata_dir)/${VM_IP}/latest/meta-data/public-keys/0"
+    mkdir -p "${key_dir}"
+    # SSH_KEY is base64-encoded by the Java caller
+    printf '%s' "${SSH_KEY}" | base64 -d > "${key_dir}/openssh-key" 2>/dev/null || \
+        printf '%s' "${SSH_KEY}" > "${key_dir}/openssh-key"
+
+    _write_apache2_conf
+    _svc_start_or_reload_apache2
+    release_lock
+    log "save-sshkey: done ${VM_IP}"
+}
+
+##############################################################################
+# Command: save-hypervisor-hostname
+# Write the hypervisor hostname into the VM's meta-data.
+##############################################################################
+
+cmd_save_hypervisor_hostname() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "save-hypervisor-hostname: network=${NETWORK_ID} ip=${VM_IP} host=${HYPERVISOR_HOSTNAME}"
+    [ -z "${VM_IP}" ] && die "save-hypervisor-hostname: missing --ip"
+
+    local meta_dir; meta_dir="$(_metadata_dir)/${VM_IP}/latest/meta-data"
+    mkdir -p "${meta_dir}"
+    printf '%s' "${HYPERVISOR_HOSTNAME}" > "${meta_dir}/hypervisor-hostname"
+
+    _write_apache2_conf
+    _svc_start_or_reload_apache2
+    release_lock
+    log "save-hypervisor-hostname: done ${VM_IP}"
+}
+
+##############################################################################
+# Command: apply-lb-rules
+# Apply/revoke load balancing rules via haproxy inside the namespace.
+# --lb-rules <json-array>  — array of LB rule objects (see Java side for schema)
+##############################################################################
+
+cmd_apply_lb_rules() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "apply-lb-rules: network=${NETWORK_ID} ns=${NAMESPACE}"
+
+    # Normalise empty input
+    [ -z "${LB_RULES_JSON}" ] && LB_RULES_JSON="[]"
+
+    local lb_dir; lb_dir=$(_haproxy_dir)
+    mkdir -p "${lb_dir}"
+
+    # Persist/remove per-rule state files
+    python3 - "${lb_dir}" "${LB_RULES_JSON}" << 'PYEOF'
+import json, os, sys
+
+lb_dir = sys.argv[1]
+rules  = json.loads(sys.argv[2])
+
+for rule in rules:
+    rid = str(rule['id'])
+    fn  = os.path.join(lb_dir, f"{rid}.json")
+    if rule.get('revoke', False):
+        try:
+            os.remove(fn)
+        except FileNotFoundError:
+            pass
+    else:
+        with open(fn, 'w') as f:
+            json.dump(rule, f)
+PYEOF
+
+    # Regenerate haproxy config
+    _write_haproxy_conf
+
+    # Count active rules (json files in lb_dir, excluding haproxy.cfg / haproxy.pid / etc.)
+    local active_rules
+    active_rules=$(find "${lb_dir}" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
+
+    if [ "${active_rules}" -gt 0 ]; then
+        _svc_reload_haproxy
+    else
+        log "apply-lb-rules: no active rules; stopping haproxy"
+        _svc_stop_haproxy
+    fi
+
+    release_lock
+    log "apply-lb-rules: done network=${NETWORK_ID}"
+}
+
+##############################################################################
+# Command: custom-action
 
 cmd_custom_action() {
     NETWORK_ID=""
@@ -1051,18 +1829,41 @@ COMMAND="${1:-}"
 shift || true
 
 case "${COMMAND}" in
-    implement)           cmd_implement           "$@" ;;
-    shutdown)            cmd_shutdown            "$@" ;;
-    destroy)             cmd_destroy             "$@" ;;
-    assign-ip)           cmd_assign_ip           "$@" ;;
-    release-ip)          cmd_release_ip          "$@" ;;
-    add-static-nat)      cmd_add_static_nat      "$@" ;;
-    delete-static-nat)   cmd_delete_static_nat   "$@" ;;
-    add-port-forward)    cmd_add_port_forward    "$@" ;;
-    delete-port-forward) cmd_delete_port_forward "$@" ;;
-    custom-action)       cmd_custom_action       "$@" ;;
+    implement)                cmd_implement                "$@" ;;
+    shutdown)                 cmd_shutdown                 "$@" ;;
+    destroy)                  cmd_destroy                  "$@" ;;
+    assign-ip)                cmd_assign_ip                "$@" ;;
+    release-ip)               cmd_release_ip               "$@" ;;
+    add-static-nat)           cmd_add_static_nat           "$@" ;;
+    delete-static-nat)        cmd_delete_static_nat        "$@" ;;
+    add-port-forward)         cmd_add_port_forward         "$@" ;;
+    delete-port-forward)      cmd_delete_port_forward      "$@" ;;
+    # DHCP / DNS (dnsmasq)
+    config-dhcp-subnet)       cmd_config_dhcp_subnet       "$@" ;;
+    remove-dhcp-subnet)       cmd_remove_dhcp_subnet       "$@" ;;
+    add-dhcp-entry)           cmd_add_dhcp_entry           "$@" ;;
+    remove-dhcp-entry)        cmd_remove_dhcp_entry        "$@" ;;
+    set-dhcp-options)         cmd_set_dhcp_options         "$@" ;;
+    config-dns-subnet)        cmd_config_dns_subnet        "$@" ;;
+    remove-dns-subnet)        cmd_remove_dns_subnet        "$@" ;;
+    add-dns-entry)            cmd_add_dns_entry            "$@" ;;
+    remove-dns-entry)         cmd_remove_dns_entry         "$@" ;;
+    # UserData / metadata (apache2)
+    save-userdata)            cmd_save_userdata            "$@" ;;
+    save-password)            cmd_save_password            "$@" ;;
+    save-sshkey)              cmd_save_sshkey              "$@" ;;
+    save-hypervisor-hostname) cmd_save_hypervisor_hostname "$@" ;;
+    # Load balancing (haproxy)
+    apply-lb-rules)           cmd_apply_lb_rules           "$@" ;;
+    # Custom actions
+    custom-action)            cmd_custom_action            "$@" ;;
     "")
-        echo "Usage: $0 {implement|shutdown|destroy|assign-ip|release-ip|add-static-nat|delete-static-nat|add-port-forward|delete-port-forward|custom-action} [options]" >&2
+        echo "Usage: $0 {implement|shutdown|destroy|assign-ip|release-ip|" \
+             "add-static-nat|delete-static-nat|add-port-forward|delete-port-forward|" \
+             "config-dhcp-subnet|remove-dhcp-subnet|add-dhcp-entry|remove-dhcp-entry|set-dhcp-options|" \
+             "config-dns-subnet|remove-dns-subnet|add-dns-entry|remove-dns-entry|" \
+             "save-userdata|save-password|save-sshkey|save-hypervisor-hostname|" \
+             "apply-lb-rules|custom-action} [options]" >&2
         exit 1 ;;
     *)
         echo "Unknown command: ${COMMAND}" >&2

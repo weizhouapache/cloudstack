@@ -56,14 +56,20 @@ import com.cloud.network.PublicIpAddress;
 import com.cloud.network.addr.PublicIp;
 import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
+import com.cloud.network.element.DhcpServiceProvider;
+import com.cloud.network.element.DnsServiceProvider;
 import com.cloud.network.element.IpDeployer;
+import com.cloud.network.element.LoadBalancingServiceProvider;
 import com.cloud.network.element.NetworkElement;
 import com.cloud.network.element.PortForwardingServiceProvider;
 import com.cloud.network.element.SourceNatServiceProvider;
 import com.cloud.network.element.StaticNatServiceProvider;
+import com.cloud.network.element.UserDataServiceProvider;
+import com.cloud.network.lb.LoadBalancingRule;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.PortForwardingRule;
 import com.cloud.network.rules.StaticNat;
+import com.cloud.uservm.UserVm;
 import com.cloud.offering.NetworkOffering;
 import com.cloud.user.Account;
 import com.cloud.utils.component.AdapterBase;
@@ -71,6 +77,8 @@ import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.NicProfile;
 import com.cloud.vm.ReservationContext;
 import com.cloud.vm.VirtualMachineProfile;
+
+import java.util.Base64;
 
 /**
  * NetworkExtensionElement is a network plugin that delegates all network
@@ -156,7 +164,9 @@ import com.cloud.vm.VirtualMachineProfile;
  */
 public class NetworkExtensionElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
-        PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider {
+        PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider,
+        DhcpServiceProvider, DnsServiceProvider,
+        UserDataServiceProvider, LoadBalancingServiceProvider {
 
     private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
 
@@ -943,6 +953,358 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     private String safeStr(String value) {
         return value != null ? value : "";
+    }
+
+    // ---- DhcpServiceProvider ----
+
+    @Override
+    public boolean addDhcpEntry(Network network, NicProfile nic, VirtualMachineProfile vm,
+            DeployDestination dest, ReservationContext context)
+            throws ConcurrentOperationException, InsufficientCapacityException, ResourceUnavailableException {
+        if (!canHandle(network, Service.Dhcp)) {
+            return false;
+        }
+        logger.debug("addDhcpEntry: network={} mac={} ip={}", network.getId(),
+                nic.getMacAddress(), nic.getIPv4Address());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--mac");        args.add(safeStr(nic.getMacAddress()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        if (nic.getName() != null && !nic.getName().isEmpty()) {
+            args.add("--hostname"); args.add(nic.getName());
+        }
+        args.add("--gateway");    args.add(safeStr(network.getGateway()));
+        args.add("--cidr");       args.add(safeStr(network.getCidr()));
+        args.add("--dns");        args.add(safeStr(nic.getIPv4Dns1()));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "add-dhcp-entry", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean configDhcpSupportForSubnet(Network network, NicProfile nic, VirtualMachineProfile vm,
+            DeployDestination dest, ReservationContext context)
+            throws ConcurrentOperationException, InsufficientCapacityException, ResourceUnavailableException {
+        if (!canHandle(network, Service.Dhcp)) {
+            return false;
+        }
+        logger.debug("configDhcpSupportForSubnet: network={}", network.getId());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--gateway");    args.add(safeStr(network.getGateway()));
+        args.add("--cidr");       args.add(safeStr(network.getCidr()));
+        args.add("--dns");        args.add(safeStr(nic != null ? nic.getIPv4Dns1() : null));
+        args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "config-dhcp-subnet", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean removeDhcpSupportForSubnet(Network network) throws ResourceUnavailableException {
+        if (!canHandle(network, Service.Dhcp)) {
+            return false;
+        }
+        logger.debug("removeDhcpSupportForSubnet: network={}", network.getId());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "remove-dhcp-subnet", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean setExtraDhcpOptions(Network network, long nicId, Map<Integer, String> dhcpOptions) {
+        if (!canHandle(network, Service.Dhcp)) {
+            return false;
+        }
+        if (dhcpOptions == null || dhcpOptions.isEmpty()) {
+            return true;
+        }
+        logger.debug("setExtraDhcpOptions: network={} nicId={} options={}", network.getId(), nicId, dhcpOptions.size());
+        // Serialise options as a compact JSON object: {"<code>":"<value>", ...}
+        StringBuilder json = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<Integer, String> e : dhcpOptions.entrySet()) {
+            if (!first) json.append(",");
+            json.append("\"").append(e.getKey()).append("\":\"")
+                .append(e.getValue() != null ? e.getValue().replace("\"", "\\\"") : "")
+                .append("\"");
+            first = false;
+        }
+        json.append("}");
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--nic-id");     args.add(String.valueOf(nicId));
+        args.add("--options");    args.add(json.toString());
+        args.addAll(getVpcIdArgs(network));
+        try {
+            return executeScript(network, "set-dhcp-options", args.toArray(new String[0]));
+        } catch (Exception e) {
+            logger.warn("setExtraDhcpOptions failed for network {}: {}", network.getId(), e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean removeDhcpEntry(Network network, NicProfile nic, VirtualMachineProfile vmProfile)
+            throws ResourceUnavailableException {
+        if (!canHandle(network, Service.Dhcp)) {
+            return false;
+        }
+        logger.debug("removeDhcpEntry: network={} mac={} ip={}", network.getId(),
+                nic.getMacAddress(), nic.getIPv4Address());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--mac");        args.add(safeStr(nic.getMacAddress()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "remove-dhcp-entry", args.toArray(new String[0]));
+    }
+
+    // ---- DnsServiceProvider ----
+
+    @Override
+    public boolean addDnsEntry(Network network, NicProfile nic, VirtualMachineProfile vm,
+            DeployDestination dest, ReservationContext context)
+            throws ConcurrentOperationException, InsufficientCapacityException, ResourceUnavailableException {
+        if (!canHandle(network, Service.Dns)) {
+            return false;
+        }
+        String hostname = nic.getName();
+        if (hostname == null || hostname.isEmpty()) {
+            hostname = vm.getHostName();
+        }
+        logger.debug("addDnsEntry: network={} hostname={} ip={}", network.getId(),
+                hostname, nic.getIPv4Address());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--hostname");   args.add(safeStr(hostname));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "add-dns-entry", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean configDnsSupportForSubnet(Network network, NicProfile nic, VirtualMachineProfile vm,
+            DeployDestination dest, ReservationContext context)
+            throws ConcurrentOperationException, InsufficientCapacityException, ResourceUnavailableException {
+        if (!canHandle(network, Service.Dns)) {
+            return false;
+        }
+        logger.debug("configDnsSupportForSubnet: network={}", network.getId());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--gateway");    args.add(safeStr(network.getGateway()));
+        args.add("--cidr");       args.add(safeStr(network.getCidr()));
+        args.add("--dns");        args.add(safeStr(nic != null ? nic.getIPv4Dns1() : null));
+        args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "config-dns-subnet", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean removeDnsSupportForSubnet(Network network) throws ResourceUnavailableException {
+        if (!canHandle(network, Service.Dns)) {
+            return false;
+        }
+        logger.debug("removeDnsSupportForSubnet: network={}", network.getId());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "remove-dns-subnet", args.toArray(new String[0]));
+    }
+
+    // ---- UserDataServiceProvider ----
+
+    @Override
+    public boolean addPasswordAndUserdata(Network network, NicProfile nic, VirtualMachineProfile vm,
+            DeployDestination dest, ReservationContext context)
+            throws ConcurrentOperationException, InsufficientCapacityException, ResourceUnavailableException {
+        if (!canHandle(network, Service.UserData)) {
+            return false;
+        }
+        boolean result = true;
+        if (vm.getVirtualMachine() instanceof UserVm) {
+            UserVm userVm = (UserVm) vm.getVirtualMachine();
+            String userData = userVm.getUserData();
+            if (userData != null && !userData.isEmpty()) {
+                result = saveUserData(network, nic, vm);
+            }
+            String password = userVm.getPassword();
+            if (password != null && !password.isEmpty()) {
+                result = result && savePassword(network, nic, vm);
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public boolean savePassword(Network network, NicProfile nic, VirtualMachineProfile vm)
+            throws ResourceUnavailableException {
+        if (!canHandle(network, Service.UserData)) {
+            return false;
+        }
+        if (!(vm.getVirtualMachine() instanceof UserVm)) {
+            return true;
+        }
+        String password = ((UserVm) vm.getVirtualMachine()).getPassword();
+        if (password == null || password.isEmpty()) {
+            return true;
+        }
+        logger.debug("savePassword: network={} ip={}", network.getId(), nic.getIPv4Address());
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--password");   args.add(password);
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "save-password", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean saveUserData(Network network, NicProfile nic, VirtualMachineProfile vm)
+            throws ResourceUnavailableException {
+        if (!canHandle(network, Service.UserData)) {
+            return false;
+        }
+        String userData = null;
+        if (vm.getVirtualMachine() instanceof UserVm) {
+            userData = ((UserVm) vm.getVirtualMachine()).getUserData();
+        }
+        if (userData == null || userData.isEmpty()) {
+            return true;
+        }
+        logger.debug("saveUserData: network={} ip={}", network.getId(), nic.getIPv4Address());
+        // userData is stored as base64; pass it directly so the script can decode it
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--userdata");   args.add(userData);
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "save-userdata", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean saveSSHKey(Network network, NicProfile nic, VirtualMachineProfile vm,
+            String sshPublicKey) throws ResourceUnavailableException {
+        if (!canHandle(network, Service.UserData)) {
+            return false;
+        }
+        if (sshPublicKey == null || sshPublicKey.isEmpty()) {
+            return true;
+        }
+        logger.debug("saveSSHKey: network={} ip={}", network.getId(), nic.getIPv4Address());
+        // Encode SSH key as base64 to safely pass via CLI
+        String sshKeyBase64 = Base64.getEncoder().encodeToString(sshPublicKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--sshkey");     args.add(sshKeyBase64);
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "save-sshkey", args.toArray(new String[0]));
+    }
+
+    @Override
+    public boolean saveHypervisorHostname(NicProfile nic, Network network, VirtualMachineProfile vm,
+            DeployDestination dest) throws ResourceUnavailableException {
+        if (!canHandle(network, Service.UserData)) {
+            return false;
+        }
+        String hostname = dest != null && dest.getHost() != null ? dest.getHost().getName() : null;
+        if (hostname == null || hostname.isEmpty()) {
+            return true;
+        }
+        logger.debug("saveHypervisorHostname: network={} ip={} host={}", network.getId(),
+                nic.getIPv4Address(), hostname);
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--hypervisor-hostname"); args.add(hostname);
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "save-hypervisor-hostname", args.toArray(new String[0]));
+    }
+
+    // ---- LoadBalancingServiceProvider ----
+
+    @Override
+    public boolean applyLBRules(Network network, List<LoadBalancingRule> rules)
+            throws ResourceUnavailableException {
+        if (rules == null || rules.isEmpty()) {
+            return true;
+        }
+        if (!canHandle(network, Service.Lb)) {
+            return false;
+        }
+        logger.info("Applying {} LB rules for network {}", rules.size(), network.getId());
+        String vlanId = getVlanId(network);
+        List<String> vpcArgs = getVpcIdArgs(network);
+
+        // Serialise all rules as a JSON array and pass as a single --lb-rules argument
+        StringBuilder json = new StringBuilder("[");
+        boolean firstRule = true;
+        for (LoadBalancingRule rule : rules) {
+            if (!firstRule) json.append(",");
+            firstRule = false;
+            boolean revoke = rule.getState() == FirewallRule.State.Revoke;
+            json.append("{");
+            json.append("\"id\":").append(rule.getId()).append(",");
+            json.append("\"name\":\"").append(jsonEscape(rule.getName())).append("\",");
+            json.append("\"publicIp\":\"").append(jsonEscape(rule.getSourceIp() != null ? rule.getSourceIp().addr() : "")).append("\",");
+            json.append("\"publicPort\":").append(rule.getSourcePortStart()).append(",");
+            json.append("\"privatePort\":").append(rule.getDefaultPortStart()).append(",");
+            json.append("\"protocol\":\"").append(jsonEscape(safeStr(rule.getProtocol()))).append("\",");
+            json.append("\"algorithm\":\"").append(jsonEscape(safeStr(rule.getAlgorithm()))).append("\",");
+            json.append("\"revoke\":").append(revoke).append(",");
+            json.append("\"backends\":[");
+            if (rule.getDestinations() != null) {
+                boolean firstDest = true;
+                for (LoadBalancingRule.LbDestination dest : rule.getDestinations()) {
+                    if (!firstDest) json.append(",");
+                    firstDest = false;
+                    json.append("{");
+                    json.append("\"ip\":\"").append(jsonEscape(dest.getIpAddress())).append("\",");
+                    json.append("\"port\":").append(dest.getDestinationPortStart()).append(",");
+                    json.append("\"revoked\":").append(dest.isRevoked());
+                    json.append("}");
+                }
+            }
+            json.append("]");
+            json.append("}");
+        }
+        json.append("]");
+
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--vlan");       args.add(safeStr(vlanId));
+        args.add("--lb-rules");   args.add(json.toString());
+        args.addAll(vpcArgs);
+        boolean result = executeScript(network, "apply-lb-rules", args.toArray(new String[0]));
+        if (!result) {
+            throw new ResourceUnavailableException("Failed to apply LB rules for network " + network.getId(),
+                    Network.class, network.getId());
+        }
+        return true;
+    }
+
+    @Override
+    public boolean validateLBRule(Network network, LoadBalancingRule rule) {
+        // Delegate validation to the external script; accept by default
+        return true;
+    }
+
+    @Override
+    public List<com.cloud.agent.api.to.LoadBalancerTO> updateHealthChecks(Network network,
+            List<LoadBalancingRule> lbrules) {
+        // Health-check state updates are not implemented via this path
+        return new ArrayList<>();
+    }
+
+    @Override
+    public boolean handlesOnlyRulesInTransitionState() {
+        return false;
+    }
+
+    /** Escapes a string for embedding in a JSON string literal. */
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 
     @Override
