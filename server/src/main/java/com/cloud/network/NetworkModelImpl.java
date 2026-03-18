@@ -238,6 +238,8 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
     TungstenGuestNetworkIpAddressDao tungstenGuestNetworkIpAddressDao;
     @Inject
     ExtensionHelper extensionHelper;
+    @Inject
+    private NetworkExtensionElement networkExtensionElement;
 
 
     private final HashMap<String, NetworkOfferingVO> _systemNetworks = new HashMap<String, NetworkOfferingVO>(5);
@@ -268,13 +270,10 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         String elementName = s_providerToNetworkElementMap.get(providerName);
         NetworkElement element = AdapterBase.getAdapterByName(networkElements, elementName);
         if (element == null && extensionHelper.isNetworkExtensionProvider(providerName)) {
-            // Provider is an extension-backed external network provider;
-            // the NetworkExtension element handles all such providers dynamically.
-            // Return a provider-scoped copy so operations are bound to the correct extension.
-            elementName = s_providerToNetworkElementMap.get(Network.Provider.NetworkExtension.getName());
-            element = AdapterBase.getAdapterByName(networkElements, elementName);
-            if (element instanceof NetworkExtensionElement) {
-                element = ((NetworkExtensionElement) element).withProviderName(providerName);
+            // Provider is an extension-backed external network provider.
+            // Initialize a copy of NetworkExtensionElement
+            if (networkExtensionElement != null) {
+                element = networkExtensionElement.withProviderName(providerName);
             }
         }
         return element;
