@@ -30,7 +30,9 @@ import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
 import com.cloud.dc.DataCenter;
+import com.cloud.dc.VlanVO;
 import com.cloud.dc.dao.DataCenterDao;
+import com.cloud.dc.dao.VlanDao;
 import com.cloud.deploy.DeployDestination;
 import com.cloud.exception.ConcurrentOperationException;
 import com.cloud.exception.InsufficientAddressCapacityException;
@@ -53,6 +55,7 @@ import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
 import com.cloud.network.element.DhcpServiceProvider;
 import com.cloud.network.element.DnsServiceProvider;
+import com.cloud.network.element.FirewallServiceProvider;
 import com.cloud.network.element.IpDeployer;
 import com.cloud.network.element.LoadBalancingServiceProvider;
 import com.cloud.network.element.NetworkElement;
@@ -168,7 +171,7 @@ import java.util.Base64;
 public class NetworkExtensionElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
         PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider,
-        DhcpServiceProvider, DnsServiceProvider,
+        DhcpServiceProvider, DnsServiceProvider, FirewallServiceProvider,
         UserDataServiceProvider, LoadBalancingServiceProvider {
 
     private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
@@ -194,6 +197,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     private PhysicalNetworkDao physicalNetworkDao;
     @Inject
     private DataCenterDao dataCenterDao;
+    @Inject
+    private VlanDao vlanDao;
 
     // ---- Script argument names ----
 
@@ -233,6 +238,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.ipAddressManager               = this.ipAddressManager;
         copy.physicalNetworkDao             = this.physicalNetworkDao;
         copy.dataCenterDao                  = this.dataCenterDao;
+        copy.vlanDao                        = this.vlanDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -642,6 +648,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         for (StaticNat rule : rules) {
             String action = rule.isForRevoke() ? "delete-static-nat" : "add-static-nat";
             String publicCidr = getPublicCidr(rule.getSourceIpAddressId());
+
             List<String> args = new ArrayList<>();
             args.add("--network-id");        args.add(String.valueOf(config.getId()));
             args.add("--vlan");              args.add(safeStr(vlanId));
@@ -991,11 +998,11 @@ public class NetworkExtensionElement extends AdapterBase implements
             return "";
         }
         IpAddress ip = networkModel.getIp(ipAddressId);
-        if (!(ip instanceof PublicIpAddress) || ip.getAddress() == null) {
+        if (ip.getAddress() == null) {
             return "";
         }
-        PublicIpAddress publicIp = (PublicIpAddress) ip;
-        return buildCidrFromIpAndNetmask(publicIp.getAddress().addr(), publicIp.getNetmask());
+        VlanVO vlan = vlanDao.findById(ip.getVlanId());
+        return buildCidrFromIpAndNetmask(ip.getAddress().addr(), vlan.getVlanNetmask());
     }
 
     private String safeStr(String value) {
@@ -1369,6 +1376,12 @@ public class NetworkExtensionElement extends AdapterBase implements
     @Override
     public boolean rollingRestartSupported() {
         return false;
+    }
+
+    @Override
+    public boolean applyFWRules(Network network, List<? extends FirewallRule> rules) throws ResourceUnavailableException {
+        // TODO
+        return true;
     }
 }
 
