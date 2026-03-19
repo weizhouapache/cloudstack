@@ -29,13 +29,8 @@ import java.nio.ByteBuffer;
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-
-import org.apache.cloudstack.extension.Extension;
-import org.apache.cloudstack.extension.ExtensionHelper;
-import org.apache.cloudstack.extension.NetworkCustomActionProvider;
-
+import com.cloud.dc.DataCenter;
+import com.cloud.dc.dao.DataCenterDao;
 import com.cloud.deploy.DeployDestination;
 import com.cloud.exception.ConcurrentOperationException;
 import com.cloud.exception.InsufficientAddressCapacityException;
@@ -72,13 +67,21 @@ import com.cloud.network.rules.StaticNat;
 import com.cloud.uservm.UserVm;
 import com.cloud.offering.NetworkOffering;
 import com.cloud.user.Account;
+import com.cloud.utils.Pair;
 import com.cloud.utils.component.AdapterBase;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.NicProfile;
 import com.cloud.vm.ReservationContext;
 import com.cloud.vm.VirtualMachineProfile;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+
+import org.apache.cloudstack.extension.Extension;
+import org.apache.cloudstack.extension.ExtensionHelper;
+import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 
 import java.util.Base64;
+
 
 /**
  * NetworkExtensionElement is a network plugin that delegates all network
@@ -189,6 +192,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     private IpAddressManager ipAddressManager;
     @Inject
     private PhysicalNetworkDao physicalNetworkDao;
+    @Inject
+    private DataCenterDao dataCenterDao;
 
     // ---- Script argument names ----
 
@@ -227,6 +232,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.networkDetailsDao              = this.networkDetailsDao;
         copy.ipAddressManager               = this.ipAddressManager;
         copy.physicalNetworkDao             = this.physicalNetworkDao;
+        copy.dataCenterDao                  = this.dataCenterDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -982,6 +988,12 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     // ---- DhcpServiceProvider ----
 
+    private String getNetworkDns(final Network network) {
+        final DataCenter dc = dataCenterDao.findById(network.getDataCenterId());
+        Pair<String, String> dnsList = networkModel.getNetworkIp4Dns(network, dc);
+        return dnsList.first() + (dnsList.second() != null ? "," + dnsList.second() : "");
+    }
+
     @Override
     public boolean addDhcpEntry(Network network, NicProfile nic, VirtualMachineProfile vm,
             DeployDestination dest, ReservationContext context)
@@ -995,12 +1007,12 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--mac");        args.add(safeStr(nic.getMacAddress()));
         args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        if (nic.getName() != null && !nic.getName().isEmpty()) {
-            args.add("--hostname"); args.add(nic.getName());
+        if (vm.getHostName() != null && !vm.getHostName().isEmpty()) {
+            args.add("--hostname"); args.add(vm.getHostName());
         }
         args.add("--gateway");    args.add(safeStr(network.getGateway()));
         args.add("--cidr");       args.add(safeStr(network.getCidr()));
-        args.add("--dns");        args.add(safeStr(nic.getIPv4Dns1()));
+        args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "add-dhcp-entry", args.toArray(new String[0]));
     }
@@ -1017,7 +1029,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--gateway");    args.add(safeStr(network.getGateway()));
         args.add("--cidr");       args.add(safeStr(network.getCidr()));
-        args.add("--dns");        args.add(safeStr(nic != null ? nic.getIPv4Dns1() : null));
+        args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "config-dhcp-subnet", args.toArray(new String[0]));
@@ -1119,7 +1131,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--gateway");    args.add(safeStr(network.getGateway()));
         args.add("--cidr");       args.add(safeStr(network.getCidr()));
-        args.add("--dns");        args.add(safeStr(nic != null ? nic.getIPv4Dns1() : null));
+        args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "config-dns-subnet", args.toArray(new String[0]));
