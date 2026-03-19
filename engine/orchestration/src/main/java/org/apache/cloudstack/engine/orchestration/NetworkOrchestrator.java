@@ -3837,7 +3837,7 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
      * @throws InsufficientCapacityException
      */
     private boolean rollingRestartRouters(final NetworkVO network, final NetworkOffering offering, final DeployDestination dest, final ReservationContext context) throws ResourceUnavailableException, ConcurrentOperationException, InsufficientCapacityException {
-        if (!NetworkOrchestrationService.RollingRestartEnabled.value()) {
+        if (!isRollingRestartSupport(network)) {
             if (shutdownNetworkElementsAndResources(context, true, network)) {
                 implementNetworkElementsAndResources(dest, context, network, offering);
                 return true;
@@ -3883,6 +3883,20 @@ public class NetworkOrchestrator extends ManagerBase implements NetworkOrchestra
         }
 
         return areRoutersRunning(routerDao.findByNetwork(network.getId()));
+    }
+
+    private boolean isRollingRestartSupport(final NetworkVO network) {
+        if (!NetworkOrchestrator.RollingRestartEnabled.value()) {
+             return false;
+        }
+        List<NetworkServiceMapVO> services = _ntwkSrvcDao.getServicesInNetwork(network.getId());
+        for (NetworkServiceMapVO service : services) {
+            NetworkElement element = _networkModel.getElementImplementingProvider(service.getProvider());
+            if (element == null || !element.rollingRestartSupported()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void setRestartRequired(final NetworkVO network, final boolean restartRequired) {

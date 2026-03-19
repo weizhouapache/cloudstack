@@ -1337,5 +1337,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         // This element itself implements IpDeployer; return this instance.
         return this;
     }
+
+    @Override
+    public boolean rollingRestartSupported() {
+        return false;
+    }
 }
 
