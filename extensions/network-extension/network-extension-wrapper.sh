@@ -265,6 +265,25 @@ pub_veth_ns_name() {
 nat_chain()    { echo "${CHAIN_PREFIX}_${1}"; }
 filter_chain() { echo "${CHAIN_PREFIX}_FWD_${1}"; }
 
+ensure_public_ip_on_namespace() {
+    local public_ip="$1" public_cidr="$2" pveth_n="$3" pveth_h="$4" addr_spec prefix
+
+    if [ -n "${public_cidr}" ] && echo "${public_cidr}" | grep -q '/'; then
+        prefix=$(echo "${public_cidr}" | cut -d'/' -f2)
+        addr_spec="${public_ip}/${prefix}"
+    else
+        addr_spec="${public_ip}/32"
+    fi
+
+    # Do not add a second address when the IP is already present with another prefix.
+    ip netns exec "${NAMESPACE}" ip addr show "${pveth_n}" 2>/dev/null | grep -q "${public_ip}/" || \
+        ip netns exec "${NAMESPACE}" ip addr add "${addr_spec}" dev "${pveth_n}" 2>/dev/null || true
+
+    # Keep the host route in place for inbound traffic.
+    ip route show | grep -q "^${public_ip}" || \
+        ip route add "${public_ip}/32" dev "${pveth_h}" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # ensure_host_bridge <eth> <vlan>
 # Idempotently creates br<eth>-<vlan> with <eth>.<vlan> as a member.
@@ -825,12 +844,7 @@ cmd_add_static_nat() {
     nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Idempotent: ensure public IP is on the namespace veth and host route exists
-    ip netns exec "${NAMESPACE}" ip addr show "${pveth_n}" 2>/dev/null | \
-        grep -q "${PUBLIC_IP}/32" || \
-        ip netns exec "${NAMESPACE}" ip addr add "${PUBLIC_IP}/32" dev "${pveth_n}" 2>/dev/null || true
-    ip route show | grep -q "^${PUBLIC_IP}" || \
-        ip route add "${PUBLIC_IP}/32" dev "${pveth_h}" 2>/dev/null || true
+    ensure_public_ip_on_namespace "${PUBLIC_IP}" "${PUBLIC_CIDR}" "${pveth_n}" "${pveth_h}"
 
     # DNAT: inbound public IP → private IP (PREROUTING)
     ip netns exec "${NAMESPACE}" iptables -t nat \
@@ -933,12 +947,7 @@ cmd_add_port_forward() {
     nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Idempotent: ensure public IP and host route
-    ip netns exec "${NAMESPACE}" ip addr show "${pveth_n}" 2>/dev/null | \
-        grep -q "${PUBLIC_IP}/32" || \
-        ip netns exec "${NAMESPACE}" ip addr add "${PUBLIC_IP}/32" dev "${pveth_n}" 2>/dev/null || true
-    ip route show | grep -q "^${PUBLIC_IP}" || \
-        ip route add "${PUBLIC_IP}/32" dev "${pveth_h}" 2>/dev/null || true
+    ensure_public_ip_on_namespace "${PUBLIC_IP}" "${PUBLIC_CIDR}" "${pveth_n}" "${pveth_h}"
 
     # DNAT
     ip netns exec "${NAMESPACE}" iptables -t nat \
@@ -955,6 +964,12 @@ cmd_add_port_forward() {
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -A "${fchain}" -p "${PROTOCOL}" -d "${PRIVATE_IP}" --dport "${PRIVATE_PORT}" \
         -o "${veth_n}" -j ACCEPT
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -C "${fchain}" -p "${PROTOCOL}" -s "${PRIVATE_IP}" --sport "${PRIVATE_PORT}" \
+        -i "${veth_n}" -j ACCEPT 2>/dev/null || \
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -A "${fchain}" -p "${PROTOCOL}" -s "${PRIVATE_IP}" --sport "${PRIVATE_PORT}" \
+        -i "${veth_n}" -j ACCEPT
 
     local safe_port
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
@@ -993,6 +1008,9 @@ cmd_delete_port_forward() {
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -D "${fchain}" -p "${PROTOCOL}" -d "${PRIVATE_IP}" --dport "${PRIVATE_PORT}" \
         -o "${veth_n}" -j ACCEPT 2>/dev/null || true
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -D "${fchain}" -p "${PROTOCOL}" -s "${PRIVATE_IP}" --sport "${PRIVATE_PORT}" \
+        -i "${veth_n}" -j ACCEPT 2>/dev/null || true
 
     local safe_port
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
@@ -1220,7 +1238,11 @@ _svc_reload_haproxy() {
         log "haproxy: reloading"
         if ! ip netns exec "${NAMESPACE}" haproxy -f "${conf_f}" -p "${pid_f}" \
                 -sf "$(cat "${pid_f}")" 2>/dev/null; then
-            log "WARNING: haproxy reload failed"
+            log "WARNING: haproxy reload failed; attempting fresh start"
+            rm -f "${pid_f}" 2>/dev/null || true
+            if ! ip netns exec "${NAMESPACE}" haproxy -f "${conf_f}" -p "${pid_f}" 2>/dev/null; then
+                log "WARNING: haproxy start failed — is haproxy installed on this host?"
+            fi
         fi
     else
         log "haproxy: starting in namespace ${NAMESPACE}"

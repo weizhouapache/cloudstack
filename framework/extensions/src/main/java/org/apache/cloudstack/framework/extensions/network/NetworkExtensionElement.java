@@ -617,7 +617,7 @@ public class NetworkExtensionElement extends AdapterBase implements
             int maskInt = ByteBuffer.wrap(mask.getAddress()).getInt();
             int prefix = Integer.bitCount(maskInt);
             // Return the provided IP with the calculated prefix so the address retains its host value
-            return ipStr + "/" + prefix;
+            return ip.getHostAddress() + "/" + prefix;
         } catch (Exception e) {
             logger.debug("Failed to compute CIDR from ip/netmask {} {}: {}", ipStr, netmaskStr, e.getMessage());
             return "";
@@ -641,10 +641,12 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         for (StaticNat rule : rules) {
             String action = rule.isForRevoke() ? "delete-static-nat" : "add-static-nat";
+            String publicCidr = getPublicCidr(rule.getSourceIpAddressId());
             List<String> args = new ArrayList<>();
             args.add("--network-id");        args.add(String.valueOf(config.getId()));
             args.add("--vlan");              args.add(safeStr(vlanId));
             args.add("--public-ip");         args.add(getIpAddress(rule.getSourceIpAddressId()));
+            args.add("--public-cidr");       args.add(safeStr(publicCidr));
             args.add("--private-ip");        args.add(safeStr(rule.getDestIpAddress()));
             args.addAll(vpcArgs);
             boolean result = executeScript(config, action, args.toArray(new String[0]));
@@ -676,11 +678,13 @@ public class NetworkExtensionElement extends AdapterBase implements
             String action = isRevoke ? "delete-port-forward" : "add-port-forward";
             String publicPort  = PortForwardingServiceProvider.getPublicPortRange(rule);
             String privatePort = PortForwardingServiceProvider.getPrivatePFPortRange(rule);
+            String publicCidr  = getPublicCidr(rule.getSourceIpAddressId());
 
             List<String> args = new ArrayList<>();
             args.add("--network-id");        args.add(String.valueOf(network.getId()));
             args.add("--vlan");              args.add(safeStr(vlanId));
             args.add("--public-ip");         args.add(getIpAddress(rule.getSourceIpAddressId()));
+            args.add("--public-cidr");       args.add(safeStr(publicCidr));
             args.add("--public-port");       args.add(safeStr(publicPort));
             args.add("--private-ip");        args.add(safeStr(rule.getDestinationIpAddress() != null
                     ? rule.getDestinationIpAddress().addr() : null));
@@ -980,6 +984,18 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         IpAddress ip = networkModel.getIp(ipAddressId);
         return ip != null ? ip.getAddress().addr() : "";
+    }
+
+    private String getPublicCidr(Long ipAddressId) {
+        if (ipAddressId == null) {
+            return "";
+        }
+        IpAddress ip = networkModel.getIp(ipAddressId);
+        if (!(ip instanceof PublicIpAddress) || ip.getAddress() == null) {
+            return "";
+        }
+        PublicIpAddress publicIp = (PublicIpAddress) ip;
+        return buildCidrFromIpAndNetmask(publicIp.getAddress().addr(), publicIp.getNetmask());
     }
 
     private String safeStr(String value) {
