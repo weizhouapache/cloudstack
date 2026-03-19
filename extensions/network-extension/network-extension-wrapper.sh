@@ -41,7 +41,7 @@
 # Namespace
 # ---------
 #   Isolated network : cs-net-<networkId>   (--network-id)
-#   VPC network      : cs-net-<vpcId>       (--vpc-id)
+#   VPC network      : cs-vpc-<vpcId>       (--vpc-id)
 #
 # Public (NAT) side
 # -----------------
@@ -388,10 +388,10 @@ parse_args() {
 
     [ -z "${NETWORK_ID}" ] && die "Missing --network-id"
 
-    # Namespace: VPC → cs-net-<vpcId>; standalone → cs-net-<networkId>
+    # Namespace: VPC → cs-vpc-<vpcId>; standalone → cs-net-<networkId>
     if [ -z "${NAMESPACE}" ]; then
         if [ -n "${VPC_ID}" ]; then
-            NAMESPACE="cs-net-${VPC_ID}"
+            NAMESPACE="cs-vpc-${VPC_ID}"
         else
             local NS_FROM_DETAILS
             NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
@@ -577,6 +577,9 @@ cmd_shutdown() {
     _svc_stop_dnsmasq
     _svc_stop_haproxy
     _svc_stop_apache2
+
+    # remove netns
+    ip netns del "${NAMESPACE}"
 
     release_lock
     log "shutdown: done network=${NETWORK_ID}"
@@ -1770,7 +1773,7 @@ cmd_custom_action() {
     # Set NAMESPACE/CHOSEN_ID similar to parse_args
     if [ -z "${NAMESPACE}" ]; then
         if [ -n "${VPC_ID}" ]; then
-            NAMESPACE="cs-net-${VPC_ID}"
+            NAMESPACE="cs-vpc-${VPC_ID}"
         else
             local NS_FROM_DETAILS
             NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
