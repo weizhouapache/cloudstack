@@ -282,6 +282,10 @@ ensure_public_ip_on_namespace() {
     # Keep the host route in place for inbound traffic.
     ip route show | grep -q "^${public_ip}" || \
         ip route add "${public_ip}/32" dev "${pveth_h}" 2>/dev/null || true
+
+    # Disable IPv6 on the public veth interface inside namespace to prevent
+    # IPv6 autoconf and link-local addresses appearing. Idempotent.
+    ip netns exec "${NAMESPACE}" sysctl -w net.ipv6.conf."${pveth_n}".disable_ipv6=1 >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -481,6 +485,12 @@ cmd_implement() {
     fi
     ip netns exec "${NAMESPACE}" ip link set lo up 2>/dev/null || true
 
+    # Disable IPv6 inside the namespace to avoid IPv6 autoconf/link-local behavior
+    # Apply globally and to the default and loopback interfaces. Idempotent.
+    ip netns exec "${NAMESPACE}" sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true
+    ip netns exec "${NAMESPACE}" sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
+    ip netns exec "${NAMESPACE}" sysctl -w net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
+
     # ---- 2. Host bridge + VLAN sub-interface ----
     if [ -n "${VLAN}" ]; then
         ensure_host_bridge "${GUEST_ETH}" "${VLAN}"
@@ -510,6 +520,10 @@ cmd_implement() {
             ip netns exec "${NAMESPACE}" ip addr add "${GATEWAY}/${prefix}" dev "${veth_n}"
         log "Assigned ${GATEWAY}/${prefix} to ${veth_n} in ${NAMESPACE}"
     fi
+
+    # Disable IPv6 on the guest veth namespace interface to prevent IPv6 addresses
+    # from appearing on the interface (idempotent)
+    ip netns exec "${NAMESPACE}" sysctl -w net.ipv6.conf."${veth_n}".disable_ipv6=1 >/dev/null 2>&1 || true
 
     # ---- 5. IP forwarding ----
     ip netns exec "${NAMESPACE}" sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
