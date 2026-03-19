@@ -612,7 +612,7 @@ cmd_shutdown() {
     _svc_stop_apache2
 
     # remove netns
-    ip netns del "${NAMESPACE}"
+    ip netns del "${NAMESPACE}" || true
 
     release_lock
     log "shutdown: done network=${NETWORK_ID}"

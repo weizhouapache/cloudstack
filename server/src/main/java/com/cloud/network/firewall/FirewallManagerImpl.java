@@ -691,11 +691,13 @@ public class FirewallManagerImpl extends ManagerBase implements FirewallService,
                 if (handled)
                     break;
             }
-            // Get provider name and get the element by provider name (it could be an external provider)
-            String fwProviderName = networkServiceMapDao.getProviderForServiceInNetwork(network.getId(), Service.Firewall);
-            if (fwProviderName != null) {
-                NetworkElement element = _networkModel.getElementImplementingProvider(fwProviderName);
-                handled = ((FirewallServiceProvider) element).applyFWRules(network, rules);
+            if (!handled) {
+                // Get provider name and get the element by provider name (it could be an external provider)
+                String fwProviderName = networkServiceMapDao.getProviderForServiceInNetwork(network.getId(), Service.Firewall);
+                if (fwProviderName != null) {
+                    NetworkElement element = _networkModel.getElementImplementingProvider(fwProviderName);
+                    handled = ((FirewallServiceProvider) element).applyFWRules(network, rules);
+                }
             }
             break;
         case PortForwarding:
@@ -709,11 +711,13 @@ public class FirewallManagerImpl extends ManagerBase implements FirewallService,
                 if (handled)
                     break;
             }
-            // Get provider name and get the element by provider name (it could be an external provider)
-            String pfProviderName = networkServiceMapDao.getProviderForServiceInNetwork(network.getId(), Service.PortForwarding);
-            if (pfProviderName != null) {
-                NetworkElement element = _networkModel.getElementImplementingProvider(pfProviderName);
-                handled = ((PortForwardingServiceProvider) element).applyPFRules(network, (List<PortForwardingRule>)rules);
+            if (!handled) {
+                // Get provider name and get the element by provider name (it could be an external provider)
+                String pfProviderName = networkServiceMapDao.getProviderForServiceInNetwork(network.getId(), Service.PortForwarding);
+                if (pfProviderName != null) {
+                    NetworkElement element = _networkModel.getElementImplementingProvider(pfProviderName);
+                    handled = ((PortForwardingServiceProvider) element).applyPFRules(network, (List<PortForwardingRule>) rules);
+                }
             }
             break;
             /*        case NetworkACL:
