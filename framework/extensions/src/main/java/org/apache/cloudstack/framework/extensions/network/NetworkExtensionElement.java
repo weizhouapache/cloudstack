@@ -1061,6 +1061,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--cidr");        args.add(safeStr(network.getCidr()));
         args.add("--dns");         args.add(safeStr(getNetworkDns(network)));
         args.add("--default-nic"); args.add(String.valueOf(nic.isDefaultNic()));
+        args.add("--domain");      args.add(safeStr(network.getNetworkDomain()));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "add-dhcp-entry", args.toArray(new String[0]));
     }
@@ -1079,6 +1080,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--cidr");       args.add(safeStr(network.getCidr()));
         args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+        args.add("--domain");     args.add(safeStr(network.getNetworkDomain()));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "config-dhcp-subnet", args.toArray(new String[0]));
     }
@@ -1178,6 +1180,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--cidr");       args.add(safeStr(network.getCidr()));
         args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+        args.add("--domain");     args.add(safeStr(network.getNetworkDomain()));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "config-dns-subnet", args.toArray(new String[0]));
     }

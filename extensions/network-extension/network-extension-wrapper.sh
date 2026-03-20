@@ -392,6 +392,7 @@ parse_args() {
     LB_RULES_JSON="[]"
     DEFAULT_NIC="true"
     VM_DATA=""
+    DOMAIN=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -423,6 +424,7 @@ parse_args() {
             --lb-rules)            LB_RULES_JSON="$2";       shift 2 ;;
             --default-nic)         DEFAULT_NIC="$2";         shift 2 ;;
             --vm-data)             VM_DATA="$2";             shift 2 ;;
+            --domain)              DOMAIN="$2";              shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -1162,6 +1164,10 @@ addn-hosts=${hosts}
 dhcp-optsfile=${dhcp_opts}
 log-facility=/var/log/cloudstack/network-extension-dnsmasq-${NETWORK_ID}.log
 EOF
+    # Add DHCP option 15 (domain-search) when provided by the caller
+    if [ -n "${DOMAIN}" ]; then
+        echo "dhcp-option=15,\"${DOMAIN}\"" >> "$(_dnsmasq_conf)"
+    fi
     [ -n "${DNS_SERVER}" ] && echo "dhcp-option=6,${DNS_SERVER}" >> "$(_dnsmasq_conf)"
     log "dnsmasq: wrote config $(_dnsmasq_conf) (dns_enabled=${dns_enabled})"
 }
