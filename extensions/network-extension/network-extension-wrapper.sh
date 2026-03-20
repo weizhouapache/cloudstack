@@ -1098,7 +1098,7 @@ _find_apache2_bin() {
 _find_apache2_modules_dir() {
     for d in /usr/lib/apache2/modules /usr/lib64/apache2/modules \
               /usr/libexec/apache2   /usr/lib/httpd/modules \
-              /usr/libexec/httpd; do
+              /usr/libexec/httpd  /usr/lib64/httpd/modules/; do
         [ -d "${d}" ] && echo "${d}" && return
     done
     echo "/usr/lib/apache2/modules"
@@ -1332,14 +1332,35 @@ _write_apache2_conf() {
     # ---- CGI dispatcher script ----
     cat > "${cgi}" << 'CGISCRIPT'
 #!/bin/bash
+# Metadata/userdata CGI dispatcher – EC2-compatible directory listing support.
+# Requests are identified by REMOTE_ADDR (the VM's IP on this network).
 CLIENT="${REMOTE_ADDR}"
 BASEDIR="$(dirname "$0")/../metadata"
 REQ="${PATH_INFO:-${REQUEST_URI}}"
+# Strip query string if present
+REQ="${REQ%%\?*}"
+# Remove leading slash
 REQ="${REQ#/}"
-FILE="${BASEDIR}/${CLIENT}/${REQ}"
-if [ -f "${FILE}" ]; then
+# Resolve path, stripping any trailing slash for filesystem lookup
+TARGET="${BASEDIR}/${CLIENT}/${REQ%/}"
+
+if [ -f "${TARGET}" ]; then
+    # Regular file – serve contents
     printf 'Content-Type: text/plain\r\n\r\n'
-    cat "${FILE}"
+    cat "${TARGET}"
+elif [ -d "${TARGET}" ]; then
+    # Directory – return a newline-delimited list of entries (EC2 API style).
+    # Sub-directories are listed with a trailing '/'.
+    printf 'Content-Type: text/plain\r\n\r\n'
+    for item in "${TARGET}/"*; do
+        [ -e "${item}" ] || continue          # skip empty glob
+        name=$(basename "${item}")
+        if [ -d "${item}" ]; then
+            printf '%s/\n' "${name}"
+        else
+            printf '%s\n' "${name}"
+        fi
+    done
 else
     printf 'Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot found\n'
 fi
@@ -1371,8 +1392,8 @@ ServerRoot /tmp
 PidFile $(_apache2_pid)
 ServerName metadata-${NETWORK_ID}
 Listen ${GATEWAY}:80
-User ${apuser}
-Group ${apuser}
+#User ${apuser}
+#Group ${apuser}
 
 LoadModule ${mpm_mod} ${mods}/${mpm_so}
 LoadModule cgi_module ${mods}/mod_cgi.so
@@ -1842,6 +1863,9 @@ cmd_save_userdata() {
     if [ -n "${USERDATA}" ]; then
         printf '%s' "${USERDATA}" | base64 -d > "${vm_dir}/user-data" 2>/dev/null || \
             printf '%s' "${USERDATA}" > "${vm_dir}/user-data"
+    else
+        # Create empty user-data file if USERDATA is empty
+        rm -rf "${vm_dir}/user-data" && touch "${vm_dir}/user-data"
     fi
 
     _write_apache2_conf
@@ -1864,7 +1888,6 @@ cmd_save_password() {
 
     local vm_dir; vm_dir="$(_metadata_dir)/${VM_IP}/latest"
     mkdir -p "${vm_dir}"
-    printf '%s' "${PASSWORD}" > "${vm_dir}/password"
 
     # Also write to the passwords file for the VR-compatible password server
     # Format: ip=password  (same as /var/cache/cloud/passwords-<gw> on VR)

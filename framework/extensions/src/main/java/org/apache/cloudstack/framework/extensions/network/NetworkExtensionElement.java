@@ -1329,6 +1329,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         List<String> args = new ArrayList<>();
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--ip");         args.add(safeStr(nicIpAddress));
+        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
         args.add("--vm-data");    args.add(vmDataArg);
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-vm-data", args.toArray(new String[0]));
@@ -1348,6 +1349,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         List<String> args = new ArrayList<>();
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
         args.add("--password");   args.add(password);
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-password", args.toArray(new String[0]));
@@ -1371,6 +1373,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         List<String> args = new ArrayList<>();
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
         args.add("--userdata");   args.add(userData);
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-userdata", args.toArray(new String[0]));
@@ -1391,6 +1394,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         List<String> args = new ArrayList<>();
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
         args.add("--sshkey");     args.add(sshKeyBase64);
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-sshkey", args.toArray(new String[0]));
@@ -1411,6 +1415,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         List<String> args = new ArrayList<>();
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
         args.add("--hypervisor-hostname"); args.add(hostname);
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-hypervisor-hostname", args.toArray(new String[0]));
