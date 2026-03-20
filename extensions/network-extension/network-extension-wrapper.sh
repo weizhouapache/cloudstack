@@ -145,6 +145,7 @@ log() {
 
 die() {
     log "ERROR: $*"
+    release_lock
     exit 1
 }
 
@@ -156,13 +157,29 @@ acquire_lock() {
     local network_id="$1"
     local lockfile="${STATE_DIR}/lock-${network_id}"
     mkdir -p "${STATE_DIR}"
+    # Record the current lockfile path so release_lock can remove it later
+    GLOBAL_LOCKFILE="${lockfile}"
+    log "acquire_lock: attempting to acquire lock ${GLOBAL_LOCKFILE}"
     exec 200>"${lockfile}"
     flock -w 30 200 || die "Failed to acquire lock for network ${network_id}"
 }
 
 release_lock() {
+    # Close the fd holding the flock (releases the lock) then remove the
+    # lockfile path if we have it recorded. It's OK if the file no longer
+    # exists; we ignore errors.
     exec 200>&- 2>/dev/null || true
+    if [ -n "${GLOBAL_LOCKFILE:-}" ]; then
+        log "release_lock: releasing and removing ${GLOBAL_LOCKFILE}"
+        rm -f "${GLOBAL_LOCKFILE}" 2>/dev/null || true
+        GLOBAL_LOCKFILE=""
+    else
+        log "release_lock: no GLOBAL_LOCKFILE recorded"
+    fi
 }
+
+# Ensure we attempt to release any held lock on exit (safe no-op if none).
+trap 'release_lock' EXIT
 
 # ---------------------------------------------------------------------------
 # Interface / bridge name helpers
