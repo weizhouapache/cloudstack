@@ -38,6 +38,7 @@ import com.cloud.exception.ConcurrentOperationException;
 import com.cloud.exception.InsufficientAddressCapacityException;
 import com.cloud.exception.InsufficientCapacityException;
 import com.cloud.exception.ResourceUnavailableException;
+import com.cloud.host.dao.HostDao;
 import com.cloud.network.IpAddressManager;
 import com.cloud.network.IpAddress;
 import com.cloud.network.Network;
@@ -67,6 +68,8 @@ import com.cloud.network.lb.LoadBalancingRule;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.PortForwardingRule;
 import com.cloud.network.rules.StaticNat;
+import com.cloud.storage.dao.GuestOSCategoryDao;
+import com.cloud.storage.dao.GuestOSDao;
 import com.cloud.uservm.UserVm;
 import com.cloud.offering.NetworkOffering;
 import com.cloud.user.Account;
@@ -75,7 +78,14 @@ import com.cloud.utils.component.AdapterBase;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.NicProfile;
 import com.cloud.vm.ReservationContext;
+import com.cloud.vm.UserVmVO;
+import com.cloud.vm.VirtualMachine;
+import com.cloud.vm.VirtualMachineManager;
 import com.cloud.vm.VirtualMachineProfile;
+import com.cloud.vm.VMInstanceDetailVO;
+import com.cloud.vm.VmDetailConstants;
+import com.cloud.vm.dao.UserVmDao;
+import com.cloud.vm.dao.VMInstanceDetailsDao;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
@@ -83,6 +93,7 @@ import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 
@@ -199,6 +210,16 @@ public class NetworkExtensionElement extends AdapterBase implements
     private DataCenterDao dataCenterDao;
     @Inject
     private VlanDao vlanDao;
+    @Inject
+    private GuestOSCategoryDao guestOSCategoryDao;
+    @Inject
+    private GuestOSDao guestOSDao;
+    @Inject
+    private HostDao hostDao;
+    @Inject
+    private VMInstanceDetailsDao vmInstanceDetailsDao;
+    @Inject
+    private UserVmDao userVmDao;
 
     // ---- Script argument names ----
 
@@ -239,6 +260,11 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.physicalNetworkDao             = this.physicalNetworkDao;
         copy.dataCenterDao                  = this.dataCenterDao;
         copy.vlanDao                        = this.vlanDao;
+        copy.guestOSCategoryDao             = this.guestOSCategoryDao;
+        copy.guestOSDao                     = this.guestOSDao;
+        copy.hostDao                        = this.hostDao;
+        copy.vmInstanceDetailsDao           = this.vmInstanceDetailsDao;
+        copy.userVmDao                      = this.userVmDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -1027,15 +1053,14 @@ public class NetworkExtensionElement extends AdapterBase implements
         logger.debug("addDhcpEntry: network={} mac={} ip={}", network.getId(),
                 nic.getMacAddress(), nic.getIPv4Address());
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--mac");        args.add(safeStr(nic.getMacAddress()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        if (vm.getHostName() != null && !vm.getHostName().isEmpty()) {
-            args.add("--hostname"); args.add(vm.getHostName());
-        }
-        args.add("--gateway");    args.add(safeStr(network.getGateway()));
-        args.add("--cidr");       args.add(safeStr(network.getCidr()));
-        args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
+        args.add("--network-id");  args.add(String.valueOf(network.getId()));
+        args.add("--mac");         args.add(safeStr(nic.getMacAddress()));
+        args.add("--ip");          args.add(safeStr(nic.getIPv4Address()));
+        args.add("--hostname");    args.add(safeStr(vm.getHostName()));
+        args.add("--gateway");     args.add(safeStr(network.getGateway()));
+        args.add("--cidr");        args.add(safeStr(network.getCidr()));
+        args.add("--dns");         args.add(safeStr(getNetworkDns(network)));
+        args.add("--default-nic"); args.add(String.valueOf(nic.isDefaultNic()));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "add-dhcp-entry", args.toArray(new String[0]));
     }
@@ -1128,10 +1153,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         if (!canHandle(network, Service.Dns)) {
             return false;
         }
-        String hostname = nic.getName();
-        if (hostname == null || hostname.isEmpty()) {
-            hostname = vm.getHostName();
-        }
+        String hostname = vm.getHostName();
         logger.debug("addDnsEntry: network={} hostname={} ip={}", network.getId(),
                 hostname, nic.getIPv4Address());
         List<String> args = new ArrayList<>();
@@ -1175,25 +1197,141 @@ public class NetworkExtensionElement extends AdapterBase implements
     // ---- UserDataServiceProvider ----
 
     @Override
-    public boolean addPasswordAndUserdata(Network network, NicProfile nic, VirtualMachineProfile vm,
+    public boolean addPasswordAndUserdata(Network network, NicProfile nic, VirtualMachineProfile profile,
             DeployDestination dest, ReservationContext context)
             throws ConcurrentOperationException, InsufficientCapacityException, ResourceUnavailableException {
         if (!canHandle(network, Service.UserData)) {
             return false;
         }
-        boolean result = true;
-        if (vm.getVirtualMachine() instanceof UserVm) {
-            UserVm userVm = (UserVm) vm.getVirtualMachine();
-            String userData = userVm.getUserData();
-            if (userData != null && !userData.isEmpty()) {
-                result = saveUserData(network, nic, vm);
+
+        VirtualMachine vm = profile.getVirtualMachine();
+
+        // SSH public key from VM instance details
+        String sshPublicKey = null;
+        try {
+            VMInstanceDetailVO sshKeyDetail = vmInstanceDetailsDao.findDetail(profile.getId(), VmDetailConstants.SSH_PUBLIC_KEY);
+            if (sshKeyDetail != null) {
+                sshPublicKey = sshKeyDetail.getValue();
             }
-            String password = userVm.getPassword();
-            if (password != null && !password.isEmpty()) {
-                result = result && savePassword(network, nic, vm);
-            }
+        } catch (Exception e) {
+            logger.debug("Could not fetch SSH public key for VM {}: {}", profile.getId(), e.getMessage());
         }
-        return result;
+
+        // Service offering display name
+        String serviceOfferingName = "";
+        try {
+            serviceOfferingName = profile.getServiceOffering().getDisplayText();
+        } catch (Exception e) {
+            logger.debug("Could not fetch service offering for VM {}: {}", profile.getId(), e.getMessage());
+        }
+
+        // Is Windows guest?
+        boolean isWindows = false;
+        try {
+            isWindows = guestOSCategoryDao
+                    .findById(guestOSDao.findById(vm.getGuestOSId()).getCategoryId())
+                    .getName().equalsIgnoreCase("Windows");
+        } catch (Exception e) {
+            logger.debug("Could not determine OS type for VM {}: {}", profile.getId(), e.getMessage());
+        }
+
+        // Hypervisor hostname – prefer dest host, fall back to current host
+        String destHostname = null;
+        try {
+            if (dest != null && dest.getHost() != null) {
+                destHostname = VirtualMachineManager.getHypervisorHostname(dest.getHost().getName());
+            } else if (vm.getHostId() != null) {
+                destHostname = VirtualMachineManager.getHypervisorHostname(
+                        hostDao.findById(vm.getHostId()).getName());
+            }
+        } catch (Exception e) {
+            logger.debug("Could not resolve hypervisor hostname for VM {}: {}", profile.getId(), e.getMessage());
+        }
+
+        // Password from the VM profile parameter (set by UserVmManager before deployment)
+        String password = (String) profile.getParameter(VirtualMachineProfile.Param.VmPassword);
+
+        // Use this NIC's IP — the metadata server in each namespace identifies requesters
+        // by REMOTE_ADDR, which will be the VM's IP on THIS network (not necessarily the
+        // default NIC IP), so we always key metadata by the NIC's IP on this network.
+        String nicIpAddress = nic.getIPv4Address();
+
+        logger.debug("addPasswordAndUserdata: network={} ip={} hasPassword={} hasSshKey={}",
+                network.getId(), nicIpAddress,
+                password != null && !password.isEmpty(),
+                sshPublicKey != null && !sshPublicKey.isEmpty());
+
+        final UserVmVO userVm = userVmDao.findById(vm.getId());
+        if (userVm == null) {
+            throw new CloudRuntimeException("Could not find UserVmVO for VM " + vm.getId());
+        }
+
+        // Generate the full metadata set (userdata, meta-data/*, password) in one go
+        List<String[]> vmData = networkModel.generateVmData(
+                userVm.getUserData(),
+                userVm.getUserDataDetails(),
+                serviceOfferingName,
+                vm.getDataCenterId(),
+                profile.getInstanceName(),
+                profile.getHostName(),
+                profile.getId(),
+                profile.getUuid(),
+                nicIpAddress,
+                sshPublicKey,
+                password,
+                isWindows,
+                destHostname);
+
+        if (vmData == null || vmData.isEmpty()) {
+            logger.debug("addPasswordAndUserdata: no VM data generated for network={} ip={}", network.getId(), nicIpAddress);
+            return true;
+        }
+
+        // Serialise vmData as JSON array.
+        // For the userdata entry CloudStack stores user-data base64-encoded; decode it so the
+        // wrapper writes the actual bytes. All other fields are plain strings. In both cases we
+        // then re-encode with Base64 so the single --vm-data argument is shell-safe.
+        StringBuilder json = new StringBuilder("[");
+        boolean first = true;
+        for (String[] entry : vmData) {
+            String dir     = entry[NetworkModel.CONFIGDATA_DIR];
+            String file    = entry[NetworkModel.CONFIGDATA_FILE];
+            String content = entry.length > NetworkModel.CONFIGDATA_CONTENT
+                    ? entry[NetworkModel.CONFIGDATA_CONTENT] : null;
+            if (content == null) content = "";
+
+            byte[] contentBytes;
+            if (NetworkModel.USERDATA_DIR.equals(dir) && NetworkModel.USERDATA_FILE.equals(file)) {
+                // user-data is stored as base64 in CloudStack DB; decode it for the wrapper
+                try {
+                    contentBytes = Base64.getDecoder().decode(content);
+                } catch (Exception e) {
+                    contentBytes = content.getBytes(StandardCharsets.UTF_8);
+                }
+            } else {
+                contentBytes = content.getBytes(StandardCharsets.UTF_8);
+            }
+
+            if (!first) json.append(",");
+            first = false;
+            json.append("{\"dir\":\"").append(jsonEscape(dir))
+                .append("\",\"file\":\"").append(jsonEscape(file))
+                .append("\",\"content\":\"")
+                .append(Base64.getEncoder().encodeToString(contentBytes))
+                .append("\"}");
+        }
+        json.append("]");
+
+        // Wrap the entire JSON as base64 to avoid any shell quoting / escaping issues
+        String vmDataArg = Base64.getEncoder().encodeToString(
+                json.toString().getBytes(StandardCharsets.UTF_8));
+
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--ip");         args.add(safeStr(nicIpAddress));
+        args.add("--vm-data");    args.add(vmDataArg);
+        args.addAll(getVpcIdArgs(network));
+        return executeScript(network, "save-vm-data", args.toArray(new String[0]));
     }
 
     @Override
@@ -1202,10 +1340,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         if (!canHandle(network, Service.UserData)) {
             return false;
         }
-        if (!(vm.getVirtualMachine() instanceof UserVm)) {
-            return true;
-        }
-        String password = ((UserVm) vm.getVirtualMachine()).getPassword();
+        String password = (String) vm.getParameter(VirtualMachineProfile.Param.VmPassword);
         if (password == null || password.isEmpty()) {
             return true;
         }

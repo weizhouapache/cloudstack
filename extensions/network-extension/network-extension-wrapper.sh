@@ -390,6 +390,8 @@ parse_args() {
     SSH_KEY=""
     HYPERVISOR_HOSTNAME=""
     LB_RULES_JSON="[]"
+    DEFAULT_NIC="true"
+    VM_DATA=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -419,6 +421,8 @@ parse_args() {
             --sshkey)              SSH_KEY="$2";             shift 2 ;;
             --hypervisor-hostname) HYPERVISOR_HOSTNAME="$2"; shift 2 ;;
             --lb-rules)            LB_RULES_JSON="$2";       shift 2 ;;
+            --default-nic)         DEFAULT_NIC="$2";         shift 2 ;;
+            --vm-data)             VM_DATA="$2";             shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -623,10 +627,11 @@ cmd_shutdown() {
            "${STATE_DIR}/${NETWORK_ID}/static-nat" \
            "${STATE_DIR}/${NETWORK_ID}/port-forward"
 
-    # Stop per-network services (dnsmasq, haproxy, apache2)
+    # Stop per-network services (dnsmasq, haproxy, apache2, passwd-server)
     _svc_stop_dnsmasq
     _svc_stop_haproxy
     _svc_stop_apache2
+    _svc_stop_passwd_server
 
     # remove netns
     ip netns del "${NAMESPACE}" || true
@@ -673,6 +678,7 @@ cmd_destroy() {
     _svc_stop_dnsmasq
     _svc_stop_haproxy
     _svc_stop_apache2
+    _svc_stop_passwd_server
 
     rm -rf "${STATE_DIR}/${NETWORK_ID}"
 
@@ -1073,6 +1079,11 @@ _apache2_pid()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2/apache2.pid"; }
 _metadata_dir() { echo "${STATE_DIR}/${NETWORK_ID}/metadata"; }
 _apache2_cgi()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2/metadata.cgi"; }
 
+# Password server (VR-compatible, port 8080, DomU_Request protocol)
+_passwd_file()          { echo "${STATE_DIR}/${NETWORK_ID}/passwords"; }
+_passwd_server_pid()    { echo "${STATE_DIR}/${NETWORK_ID}/passwd-server.pid"; }
+_passwd_server_script() { echo "${STATE_DIR}/${NETWORK_ID}/passwd-server.py"; }
+
 ##############################################################################
 # Helpers: binary detection
 ##############################################################################
@@ -1429,6 +1440,140 @@ _svc_stop_apache2() {
 }
 
 ##############################################################################
+# Helpers: passwd-server  (CloudStack VR-compatible password service)
+#
+# Listens on <GATEWAY>:8080 inside the namespace.
+# Protocol (identical to VR passwd_server_ip.py):
+#   GET DomU_Request: send_my_password  → return password for REMOTE_ADDR
+#   GET DomU_Request: saved_password    → remove password + ack
+#
+# Passwords are stored in ${STATE_DIR}/<NETWORK_ID>/passwords as ip=password lines.
+##############################################################################
+
+_svc_start_or_reload_passwd_server() {
+    local script_f; script_f=$(_passwd_server_script)
+    local pid_f;    pid_f=$(_passwd_server_pid)
+    local passwd_f; passwd_f=$(_passwd_file)
+    local log_f;    log_f="/var/log/cloudstack/network-extension-passwd-${NETWORK_ID}.log"
+
+    mkdir -p "$(dirname "${script_f}")"
+    touch "${passwd_f}"
+
+    # Write the embedded Python password server (same protocol as VR passwd_server_ip.py)
+    cat > "${script_f}" << 'PYEOF'
+#!/usr/bin/env python3
+import os, sys, threading, syslog
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+
+gateway     = sys.argv[1] if len(sys.argv) > 1 else '0.0.0.0'
+passwd_file = sys.argv[2] if len(sys.argv) > 2 else '/tmp/passwords'
+pid_file    = sys.argv[3] if len(sys.argv) > 3 else '/tmp/passwd-server.pid'
+
+lock = threading.RLock()
+
+# Write PID so the shell wrapper can manage us
+with open(pid_file, 'w') as _f:
+    _f.write(str(os.getpid()))
+
+def get_password(ip):
+    """Read password for ip from the passwords file (re-read on every call)."""
+    try:
+        with open(passwd_file) as f:
+            for line in f:
+                line = line.strip()
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    if k == ip:
+                        return v
+    except Exception:
+        pass
+    return None
+
+def remove_password(ip):
+    """Remove the password entry for ip from the passwords file."""
+    with lock:
+        try:
+            lines = []
+            with open(passwd_file) as f:
+                for line in f:
+                    if '=' not in line or line.strip().split('=', 1)[0] != ip:
+                        lines.append(line)
+            with open(passwd_file, 'w') as f:
+                f.writelines(lines)
+        except Exception:
+            pass
+
+class PasswordRequestHandler(BaseHTTPRequestHandler):
+    server_version = 'CloudStack Password Server'
+    sys_version    = '4.x'
+
+    def do_GET(self):
+        req_type = self.headers.get('DomU_Request', '')
+        client_ip = self.client_address[0]
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        if req_type == 'send_my_password':
+            pw = get_password(client_ip)
+            if pw:
+                self.wfile.write(pw.encode())
+                syslog.syslog(f'passwd-server: password sent to {client_ip}')
+            else:
+                self.wfile.write(b'saved_password')
+                syslog.syslog(f'passwd-server: no password for {client_ip}')
+        elif req_type == 'saved_password':
+            remove_password(client_ip)
+            self.wfile.write(b'saved_password')
+            syslog.syslog(f'passwd-server: saved_password ack from {client_ip}')
+        else:
+            self.wfile.write(b'bad_request')
+
+    def log_message(self, fmt, *args):
+        pass  # silence access log; syslog used above
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+
+server = ThreadedHTTPServer((gateway, 8080), PasswordRequestHandler)
+syslog.syslog(f'passwd-server: listening on {gateway}:8080 (pid={os.getpid()})')
+server.serve_forever()
+PYEOF
+    chmod +x "${script_f}"
+
+    # Skip restart if already running
+    if [ -f "${pid_f}" ] && kill -0 "$(cat "${pid_f}")" 2>/dev/null; then
+        log "passwd-server: already running (pid=$(cat "${pid_f}"))"
+        return 0
+    fi
+
+    log "passwd-server: starting in namespace ${NAMESPACE} on ${GATEWAY}:8080"
+    ip netns exec "${NAMESPACE}" python3 "${script_f}" \
+        "${GATEWAY}" "${passwd_f}" "${pid_f}" \
+        >> "${log_f}" 2>&1 &
+    # Brief pause to let the server write its PID
+    sleep 0.3
+
+    # Allow inbound connections to port 8080 inside the namespace
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null || \
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -A INPUT -p tcp --dport 8080 -j ACCEPT
+}
+
+_svc_stop_passwd_server() {
+    local pid_f; pid_f=$(_passwd_server_pid)
+    if [ -f "${pid_f}" ]; then
+        local pid; pid=$(cat "${pid_f}")
+        kill "${pid}" 2>/dev/null || true
+        rm -f "${pid_f}"
+        log "passwd-server: stopped (pid=${pid})"
+    fi
+    # Kill any orphaned instance for this network
+    pkill -f "python3.*passwd-server.*${NETWORK_ID}" 2>/dev/null || true
+}
+
+##############################################################################
 # Command: config-dhcp-subnet
 # Configure dnsmasq for DHCP (DNS disabled at port 53).
 ##############################################################################
@@ -1515,14 +1660,35 @@ cmd_add_dhcp_entry() {
     mkdir -p "$(_dnsmasq_dir)"
     touch "${dhcp_hosts}"
 
-    # Remove any existing entry for this MAC
-    grep -v "^${MAC}," "${dhcp_hosts}" > "${dhcp_hosts}.tmp" 2>/dev/null || true
+    # Normalize MAC for use as a dnsmasq tag (colons → underscores, lowercase)
+    local mac_tag; mac_tag=$(echo "${MAC}" | tr ':' '_' | tr '[:upper:]' '[:lower:]')
+
+    # Remove any existing entry for this MAC (with or without a tag prefix)
+    grep -v "${MAC}" "${dhcp_hosts}" > "${dhcp_hosts}.tmp" 2>/dev/null || true
     mv "${dhcp_hosts}.tmp" "${dhcp_hosts}"
 
-    if [ -n "${HOSTNAME}" ]; then
-        echo "${MAC},${VM_IP},${HOSTNAME},infinite" >> "${dhcp_hosts}"
+    if [ "${DEFAULT_NIC}" = "false" ]; then
+        # Non-default NIC: tag the host so we can suppress the gateway option.
+        # dnsmasq set:<tag> in dhcp-hosts assigns the tag for this MAC.
+        if [ -n "${HOSTNAME}" ]; then
+            echo "set:norouter_${mac_tag},${MAC},${VM_IP},${HOSTNAME},infinite" >> "${dhcp_hosts}"
+        else
+            echo "set:norouter_${mac_tag},${MAC},${VM_IP},infinite" >> "${dhcp_hosts}"
+        fi
+        # Suppress option 3 (default gateway) for this specific MAC so the VM
+        # does not get a competing default route via this secondary NIC.
+        local dhcp_opts; dhcp_opts=$(_dnsmasq_dhcp_opts)
+        touch "${dhcp_opts}"
+        grep -v "tag:norouter_${mac_tag}" "${dhcp_opts}" > "${dhcp_opts}.tmp" 2>/dev/null || true
+        mv "${dhcp_opts}.tmp" "${dhcp_opts}"
+        echo "dhcp-option=tag:norouter_${mac_tag},option:router,0.0.0.0" >> "${dhcp_opts}"
+        log "add-dhcp-entry: non-default NIC ${MAC} (${VM_IP}) — gateway suppressed for this NIC"
     else
-        echo "${MAC},${VM_IP},infinite" >> "${dhcp_hosts}"
+        if [ -n "${HOSTNAME}" ]; then
+            echo "${MAC},${VM_IP},${HOSTNAME},infinite" >> "${dhcp_hosts}"
+        else
+            echo "${MAC},${VM_IP},infinite" >> "${dhcp_hosts}"
+        fi
     fi
 
     _svc_start_or_reload_dnsmasq
@@ -1544,8 +1710,15 @@ cmd_remove_dhcp_entry() {
 
     local dhcp_hosts; dhcp_hosts=$(_dnsmasq_dhcp_hosts)
     if [ -f "${dhcp_hosts}" ]; then
-        grep -v "^${MAC}," "${dhcp_hosts}" > "${dhcp_hosts}.tmp" 2>/dev/null || true
+        grep -v "${MAC}" "${dhcp_hosts}" > "${dhcp_hosts}.tmp" 2>/dev/null || true
         mv "${dhcp_hosts}.tmp" "${dhcp_hosts}"
+        # Also remove any per-MAC gateway-suppression option
+        local mac_tag; mac_tag=$(echo "${MAC}" | tr ':' '_' | tr '[:upper:]' '[:lower:]')
+        local dhcp_opts; dhcp_opts=$(_dnsmasq_dhcp_opts)
+        if [ -f "${dhcp_opts}" ]; then
+            grep -v "tag:norouter_${mac_tag}" "${dhcp_opts}" > "${dhcp_opts}.tmp" 2>/dev/null || true
+            mv "${dhcp_opts}.tmp" "${dhcp_opts}"
+        fi
         _svc_start_or_reload_dnsmasq
     fi
     release_lock
@@ -1693,8 +1866,19 @@ cmd_save_password() {
     mkdir -p "${vm_dir}"
     printf '%s' "${PASSWORD}" > "${vm_dir}/password"
 
+    # Also write to the passwords file for the VR-compatible password server
+    # Format: ip=password  (same as /var/cache/cloud/passwords-<gw> on VR)
+    local passwd_f; passwd_f=$(_passwd_file)
+    if [ -n "${PASSWORD}" ]; then
+        touch "${passwd_f}"
+        grep -v "^${VM_IP}=" "${passwd_f}" > "${passwd_f}.tmp" 2>/dev/null || true
+        mv "${passwd_f}.tmp" "${passwd_f}"
+        echo "${VM_IP}=${PASSWORD}" >> "${passwd_f}"
+    fi
+
     _write_apache2_conf
     _svc_start_or_reload_apache2
+    _svc_start_or_reload_passwd_server
     release_lock
     log "save-password: done ${VM_IP}"
 }
@@ -1743,6 +1927,117 @@ cmd_save_hypervisor_hostname() {
     _svc_start_or_reload_apache2
     release_lock
     log "save-hypervisor-hostname: done ${VM_IP}"
+}
+
+##############################################################################
+# Command: save-vm-data
+# Write the full VM metadata/userdata/password set in one call.
+# --ip      <vm_ip>      IP address of the VM on this network
+# --vm-data <base64>     Base64-encoded JSON array of {dir,file,content} entries.
+#                        Each 'content' value is itself Base64-encoded bytes.
+#
+# Path mapping from generateVmData() output:
+#   [userdata, user_data,   <bytes>]  → latest/user-data
+#   [metadata, public-keys, <bytes>]  → latest/meta-data/public-keys/0/openssh-key
+#   [metadata, <file>,      <bytes>]  → latest/meta-data/<file>
+#   [password, vm_password, <bytes>]  → latest/password
+#                                       + passwords file for VR-compat password server
+#   [password, vm-password-md5checksum, <bytes>] → latest/meta-data/password-checksum
+#
+# After writing all files the apache2 metadata server and the VR-compatible
+# password server on port 8080 are both started / reloaded.
+##############################################################################
+
+cmd_save_vm_data() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "save-vm-data: network=${NETWORK_ID} ip=${VM_IP}"
+    [ -z "${VM_IP}" ]   && die "save-vm-data: missing --ip"
+    [ -z "${VM_DATA}" ] && die "save-vm-data: missing --vm-data"
+
+    local meta_dir; meta_dir=$(_metadata_dir)
+    local passwd_f; passwd_f=$(_passwd_file)
+    mkdir -p "${meta_dir}" "$(dirname "${passwd_f}")"
+    touch "${passwd_f}"
+
+    python3 - "${VM_IP}" "${meta_dir}" "${passwd_f}" "${VM_DATA}" << 'PYEOF'
+import base64, json, os, sys
+
+vm_ip      = sys.argv[1]
+meta_dir   = sys.argv[2]
+passwd_f   = sys.argv[3]
+data_b64   = sys.argv[4]
+
+# Decode the outer base64 wrapper, then parse the JSON array
+try:
+    entries = json.loads(base64.b64decode(data_b64).decode('utf-8'))
+except Exception as e:
+    print(f"save-vm-data: failed to decode vm-data: {e}", file=sys.stderr)
+    sys.exit(1)
+
+password_written = None
+
+for entry in entries:
+    d    = entry.get('dir', '')
+    f    = entry.get('file', '')
+    c_b64 = entry.get('content', '')
+    if not c_b64:
+        continue
+    # Each content value is base64-encoded actual bytes
+    try:
+        content = base64.b64decode(c_b64)
+    except Exception:
+        content = c_b64.encode('utf-8') if isinstance(c_b64, str) else b''
+
+    if not content:
+        continue
+
+    # ---- path mapping ----
+    if d == 'userdata' and f == 'user_data':
+        path = os.path.join(meta_dir, vm_ip, 'latest', 'user-data')
+    elif d == 'metadata' and f == 'public-keys':
+        # SSH public key → EC2-compatible path
+        path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'public-keys', '0', 'openssh-key')
+    elif d == 'metadata':
+        path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', f)
+    elif d == 'password' and f == 'vm_password':
+        path = os.path.join(meta_dir, vm_ip, 'latest', 'password')
+        # Also update the passwords file for the VR-compatible password server
+        password_written = content.decode('utf-8', errors='replace').strip()
+    elif d == 'password' and f == 'vm-password-md5checksum':
+        path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'password-checksum')
+    else:
+        # Fallback: store under latest/<dir>/<file>
+        path = os.path.join(meta_dir, vm_ip, 'latest', d, f)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as fp:
+        fp.write(content if isinstance(content, bytes) else content.encode('utf-8'))
+
+# Update the passwords file (ip=password format, same as VR)
+if password_written:
+    try:
+        lines = []
+        try:
+            with open(passwd_f) as pf:
+                lines = [l for l in pf if l.strip() and not l.startswith(vm_ip + '=')]
+        except FileNotFoundError:
+            pass
+        lines.append(f'{vm_ip}={password_written}\n')
+        with open(passwd_f, 'w') as pf:
+            pf.writelines(lines)
+    except Exception as e:
+        print(f"save-vm-data: could not update passwords file: {e}", file=sys.stderr)
+
+print(f"save-vm-data: wrote {len(entries)} entries for {vm_ip}")
+PYEOF
+
+    _write_apache2_conf
+    _svc_start_or_reload_apache2
+    _svc_start_or_reload_passwd_server
+    release_lock
+    log "save-vm-data: done network=${NETWORK_ID} ip=${VM_IP}"
 }
 
 ##############################################################################
@@ -1909,6 +2204,7 @@ case "${COMMAND}" in
     save-password)            cmd_save_password            "$@" ;;
     save-sshkey)              cmd_save_sshkey              "$@" ;;
     save-hypervisor-hostname) cmd_save_hypervisor_hostname "$@" ;;
+    save-vm-data)             cmd_save_vm_data             "$@" ;;
     # Load balancing (haproxy)
     apply-lb-rules)           cmd_apply_lb_rules           "$@" ;;
     # Custom actions
@@ -1918,7 +2214,7 @@ case "${COMMAND}" in
              "add-static-nat|delete-static-nat|add-port-forward|delete-port-forward|" \
              "config-dhcp-subnet|remove-dhcp-subnet|add-dhcp-entry|remove-dhcp-entry|set-dhcp-options|" \
              "config-dns-subnet|remove-dns-subnet|add-dns-entry|remove-dns-entry|" \
-             "save-userdata|save-password|save-sshkey|save-hypervisor-hostname|" \
+             "save-userdata|save-password|save-sshkey|save-hypervisor-hostname|save-vm-data|" \
              "apply-lb-rules|custom-action} [options]" >&2
         exit 1 ;;
     *)
