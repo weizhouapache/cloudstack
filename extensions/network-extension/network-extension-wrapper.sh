@@ -1630,6 +1630,17 @@ cmd_config_dns_subnet() {
     log "config-dns-subnet: network=${NETWORK_ID} ns=${NAMESPACE} gw=${GATEWAY} cidr=${CIDR}"
     [ -z "${GATEWAY}" ] && die "config-dns-subnet: missing --gateway"
     [ -z "${CIDR}" ]    && die "config-dns-subnet: missing --cidr"
+    # Ensure the per-network hosts file contains an entry for the namespace
+    # gateway named 'data-server' (idempotent).
+    local hosts_f; hosts_f=$(_dnsmasq_hosts)
+    mkdir -p "$(dirname "${hosts_f}")"
+    touch "${hosts_f}"
+    # Remove any existing data-server lines, then append the desired mapping
+    grep -v -E "\sdata-server(\s|$)" "${hosts_f}" > "${hosts_f}.tmp" 2>/dev/null || true
+    mv "${hosts_f}.tmp" "${hosts_f}"
+    # Add the mapping: <gateway>  data-server
+    echo "${GATEWAY} data-server" >> "${hosts_f}"
+
     _write_dnsmasq_conf true
     _svc_start_or_reload_dnsmasq
     release_lock
