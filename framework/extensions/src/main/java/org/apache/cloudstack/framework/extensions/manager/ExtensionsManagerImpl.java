@@ -1876,6 +1876,9 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
         NetworkCustomActionProvider provider = (NetworkCustomActionProvider) element;
         try {
+            if (!provider.canHandleCustomAction(network)) {
+                throw new CloudRuntimeException("Provider '" + providerName + "' cannot handle custom action for this network");
+            }
             logger.info("Running network custom action '{}' on network {} via {} (provider: {})",
                     actionName, network.getId(), element.getClass().getSimpleName(), providerName);
             String output = provider.runCustomAction(network, actionName, parameters);

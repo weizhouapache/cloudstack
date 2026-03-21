@@ -2088,6 +2088,7 @@ public class ExtensionsManagerImplTest {
 
         // element implements both NetworkElement and NetworkCustomActionProvider
         MockNetworkElement element = mock(MockNetworkElement.class);
+        when(element.canHandleCustomAction(eq(network))).thenReturn(true);
         when(element.runCustomAction(eq(network), eq("reboot-device"), any())).thenReturn("OK: bridge bounced");
         when(networkModel.getElementImplementingProvider("my-extnet")).thenReturn(element);
 
