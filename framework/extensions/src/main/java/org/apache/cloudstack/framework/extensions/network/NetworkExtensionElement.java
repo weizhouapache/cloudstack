@@ -29,6 +29,7 @@ import java.nio.ByteBuffer;
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
 
+import com.cloud.agent.api.to.LoadBalancerTO;
 import com.cloud.dc.DataCenter;
 import com.cloud.dc.VlanVO;
 import com.cloud.dc.dao.DataCenterDao;
@@ -39,6 +40,7 @@ import com.cloud.exception.InsufficientAddressCapacityException;
 import com.cloud.exception.InsufficientCapacityException;
 import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.host.dao.HostDao;
+import com.cloud.hypervisor.Hypervisor;
 import com.cloud.network.IpAddressManager;
 import com.cloud.network.IpAddress;
 import com.cloud.network.Network;
@@ -47,6 +49,7 @@ import com.cloud.network.Network.Provider;
 import com.cloud.network.Network.Service;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.Networks;
+import com.cloud.network.dao.NetworkDetailVO;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.network.PhysicalNetworkServiceProvider;
@@ -68,6 +71,8 @@ import com.cloud.network.lb.LoadBalancingRule;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.PortForwardingRule;
 import com.cloud.network.rules.StaticNat;
+import com.cloud.offerings.NetworkOfferingVO;
+import com.cloud.offerings.dao.NetworkOfferingDao;
 import com.cloud.storage.dao.GuestOSCategoryDao;
 import com.cloud.storage.dao.GuestOSDao;
 import com.cloud.uservm.UserVm;
@@ -76,6 +81,7 @@ import com.cloud.user.Account;
 import com.cloud.utils.Pair;
 import com.cloud.utils.component.AdapterBase;
 import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.vm.Nic;
 import com.cloud.vm.NicProfile;
 import com.cloud.vm.ReservationContext;
 import com.cloud.vm.UserVmVO;
@@ -89,6 +95,8 @@ import com.cloud.vm.dao.VMInstanceDetailsDao;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
+import org.apache.cloudstack.api.ApiConstants;
+import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.extension.NetworkCustomActionProvider;
@@ -205,6 +213,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     @Inject
     private IpAddressManager ipAddressManager;
     @Inject
+    private NetworkOrchestrationService networkManager;
+    @Inject
     private PhysicalNetworkDao physicalNetworkDao;
     @Inject
     private DataCenterDao dataCenterDao;
@@ -220,6 +230,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     private VMInstanceDetailsDao vmInstanceDetailsDao;
     @Inject
     private UserVmDao userVmDao;
+    @Inject
+    private NetworkOfferingDao networkOfferingDao;
 
     // ---- Script argument names ----
 
@@ -265,6 +277,8 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.hostDao                        = this.hostDao;
         copy.vmInstanceDetailsDao           = this.vmInstanceDetailsDao;
         copy.userVmDao                      = this.userVmDao;
+        copy.networkManager                 = this.networkManager;
+        copy.networkOfferingDao             = this.networkOfferingDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -381,6 +395,9 @@ public class NetworkExtensionElement extends AdapterBase implements
         // Step 1: Ensure a network device is selected and its details stored.
         ensureExtensionDetails(network);
 
+        // Step 2: Allocate the IPs for DHCP/DNS/UserData service if needed
+        String extensionIp = ensureExtensionIp(network);
+
         String vlanId = getVlanId(network);
 
         // Build common vpc/network args
@@ -388,10 +405,11 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         // Step 2: Create the network on the device.
         List<String> implArgs = new ArrayList<>();
-        implArgs.add("--network-id"); implArgs.add(String.valueOf(network.getId()));
-        implArgs.add("--vlan");       implArgs.add(safeStr(vlanId));
-        implArgs.add("--gateway");    implArgs.add(safeStr(network.getGateway()));
-        implArgs.add("--cidr");       implArgs.add(safeStr(network.getCidr()));
+        implArgs.add("--network-id");   implArgs.add(String.valueOf(network.getId()));
+        implArgs.add("--vlan");         implArgs.add(safeStr(vlanId));
+        implArgs.add("--gateway");      implArgs.add(safeStr(network.getGateway()));
+        implArgs.add("--cidr");         implArgs.add(safeStr(network.getCidr()));
+        implArgs.add("--extension-ip"); implArgs.add(safeStr(extensionIp));
         implArgs.addAll(vpcArgs);
 
         boolean result = executeScript(network, "implement", implArgs.toArray(new String[0]));
@@ -430,6 +448,22 @@ public class NetworkExtensionElement extends AdapterBase implements
     public boolean prepare(Network network, NicProfile nic, VirtualMachineProfile vm,
             DeployDestination dest, ReservationContext context)
             throws ConcurrentOperationException, ResourceUnavailableException, InsufficientCapacityException {
+        // Copy from VirtualRouterElement.java
+        if (vm.getType() != VirtualMachine.Type.User || vm.getHypervisorType() == Hypervisor.HypervisorType.BareMetal) {
+            return false;
+        }
+
+        if (!canHandle(network, null)) {
+            return false;
+        }
+
+        if (!networkModel.isProviderEnabledInPhysicalNetwork(networkModel.getPhysicalNetworkId(network), getProvider().getName())) {
+            return false;
+        }
+
+        final NetworkOfferingVO offering = networkOfferingDao.findById(network.getNetworkOfferingId());
+        implement(network, offering, dest, context);
+
         return true;
     }
 
@@ -575,6 +609,35 @@ public class NetworkExtensionElement extends AdapterBase implements
                 networkDetailsDao.addDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS, "{}", false);
             }
         }
+    }
+
+    /*
+    * If the network supports DHCP/DNS/UserData but not SourceNat/Gateway,
+    * an additional IP is needed on the external network to host these services.
+    * This method ensures that IP is allocated and configured on the external network and returns its address.
+     */
+    protected String ensureExtensionIp(Network network) {
+        if (networkModel.isAnyServiceSupportedInNetwork(network.getId(), this.getProvider(),
+                Service.SourceNat, Service.Gateway)) {
+            // Gateway or Source NAT will be configured on the external network
+            return network.getGateway();
+        }
+
+        if (networkModel.isAnyServiceSupportedInNetwork(network.getId(), this.getProvider(),
+                Service.Dhcp, Service.Dns, Service.UserData)) {
+            // An extra IP will be allocated and configured on the external network
+            Nic placeholderNic = networkModel.getPlaceholderNicForRouter(network, null);
+            if (placeholderNic == null) {
+                NetworkDetailVO routerIpDetail = networkDetailsDao.findDetail(network.getId(), ApiConstants.ROUTER_IP);
+                String routerIp = routerIpDetail != null ? routerIpDetail.getValue() : null;
+                String extensionIp = ipAddressManager.acquireGuestIpAddress(network, routerIp);
+                logger.debug("Saving placeholder nic with ip4 address {} for the network", extensionIp, network);
+                networkManager.savePlaceholderNic(network, null, extensionIp, null);
+                return extensionIp;
+            }
+            return placeholderNic.getIPv4Address();
+        }
+        return null;
     }
 
     // ---- IpDeployer ----
@@ -751,6 +814,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     protected boolean executeScript(Network network, String command, String... args) {
         Extension extension = resolveExtension(network);
         File scriptFile = resolveScriptFile(network, extension);
+
+        ensureExtensionDetails(network);
 
         String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
         String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
@@ -1050,18 +1115,20 @@ public class NetworkExtensionElement extends AdapterBase implements
         if (!canHandle(network, Service.Dhcp)) {
             return false;
         }
+        String extensionIp = ensureExtensionIp(network);
         logger.debug("addDhcpEntry: network={} mac={} ip={}", network.getId(),
                 nic.getMacAddress(), nic.getIPv4Address());
         List<String> args = new ArrayList<>();
-        args.add("--network-id");  args.add(String.valueOf(network.getId()));
-        args.add("--mac");         args.add(safeStr(nic.getMacAddress()));
-        args.add("--ip");          args.add(safeStr(nic.getIPv4Address()));
-        args.add("--hostname");    args.add(safeStr(vm.getHostName()));
-        args.add("--gateway");     args.add(safeStr(network.getGateway()));
-        args.add("--cidr");        args.add(safeStr(network.getCidr()));
-        args.add("--dns");         args.add(safeStr(getNetworkDns(network)));
-        args.add("--default-nic"); args.add(String.valueOf(nic.isDefaultNic()));
-        args.add("--domain");      args.add(safeStr(network.getNetworkDomain()));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--mac");          args.add(safeStr(nic.getMacAddress()));
+        args.add("--ip");           args.add(safeStr(nic.getIPv4Address()));
+        args.add("--hostname");     args.add(safeStr(vm.getHostName()));
+        args.add("--gateway");      args.add(safeStr(network.getGateway()));
+        args.add("--cidr");         args.add(safeStr(network.getCidr()));
+        args.add("--dns");          args.add(safeStr(getNetworkDns(network)));
+        args.add("--default-nic");  args.add(String.valueOf(nic.isDefaultNic()));
+        args.add("--domain");       args.add(safeStr(network.getNetworkDomain()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "add-dhcp-entry", args.toArray(new String[0]));
     }
@@ -1074,13 +1141,15 @@ public class NetworkExtensionElement extends AdapterBase implements
             return false;
         }
         logger.debug("configDhcpSupportForSubnet: network={}", network.getId());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--gateway");    args.add(safeStr(network.getGateway()));
-        args.add("--cidr");       args.add(safeStr(network.getCidr()));
-        args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
-        args.add("--vlan");       args.add(safeStr(getVlanId(network)));
-        args.add("--domain");     args.add(safeStr(network.getNetworkDomain()));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--gateway");      args.add(safeStr(network.getGateway()));
+        args.add("--cidr");         args.add(safeStr(network.getCidr()));
+        args.add("--dns");          args.add(safeStr(getNetworkDns(network)));
+        args.add("--vlan");         args.add(safeStr(getVlanId(network)));
+        args.add("--domain");       args.add(safeStr(network.getNetworkDomain()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "config-dhcp-subnet", args.toArray(new String[0]));
     }
@@ -1091,8 +1160,10 @@ public class NetworkExtensionElement extends AdapterBase implements
             return false;
         }
         logger.debug("removeDhcpSupportForSubnet: network={}", network.getId());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "remove-dhcp-subnet", args.toArray(new String[0]));
     }
@@ -1117,10 +1188,12 @@ public class NetworkExtensionElement extends AdapterBase implements
             first = false;
         }
         json.append("}");
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--nic-id");     args.add(String.valueOf(nicId));
-        args.add("--options");    args.add(json.toString());
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--nic-id");       args.add(String.valueOf(nicId));
+        args.add("--options");      args.add(json.toString());
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         try {
             return executeScript(network, "set-dhcp-options", args.toArray(new String[0]));
@@ -1138,10 +1211,12 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         logger.debug("removeDhcpEntry: network={} mac={} ip={}", network.getId(),
                 nic.getMacAddress(), nic.getIPv4Address());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--mac");        args.add(safeStr(nic.getMacAddress()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--mac");          args.add(safeStr(nic.getMacAddress()));
+        args.add("--ip");           args.add(safeStr(nic.getIPv4Address()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "remove-dhcp-entry", args.toArray(new String[0]));
     }
@@ -1158,10 +1233,12 @@ public class NetworkExtensionElement extends AdapterBase implements
         String hostname = vm.getHostName();
         logger.debug("addDnsEntry: network={} hostname={} ip={}", network.getId(),
                 hostname, nic.getIPv4Address());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        args.add("--hostname");   args.add(safeStr(hostname));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--ip");           args.add(safeStr(nic.getIPv4Address()));
+        args.add("--hostname");     args.add(safeStr(hostname));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "add-dns-entry", args.toArray(new String[0]));
     }
@@ -1174,13 +1251,15 @@ public class NetworkExtensionElement extends AdapterBase implements
             return false;
         }
         logger.debug("configDnsSupportForSubnet: network={}", network.getId());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--gateway");    args.add(safeStr(network.getGateway()));
-        args.add("--cidr");       args.add(safeStr(network.getCidr()));
-        args.add("--dns");        args.add(safeStr(getNetworkDns(network)));
-        args.add("--vlan");       args.add(safeStr(getVlanId(network)));
-        args.add("--domain");     args.add(safeStr(network.getNetworkDomain()));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--gateway");      args.add(safeStr(network.getGateway()));
+        args.add("--cidr");         args.add(safeStr(network.getCidr()));
+        args.add("--dns");          args.add(safeStr(getNetworkDns(network)));
+        args.add("--vlan");         args.add(safeStr(getVlanId(network)));
+        args.add("--domain");       args.add(safeStr(network.getNetworkDomain()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "config-dns-subnet", args.toArray(new String[0]));
     }
@@ -1191,8 +1270,10 @@ public class NetworkExtensionElement extends AdapterBase implements
             return false;
         }
         logger.debug("removeDnsSupportForSubnet: network={}", network.getId());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "remove-dns-subnet", args.toArray(new String[0]));
     }
@@ -1330,10 +1411,11 @@ public class NetworkExtensionElement extends AdapterBase implements
                 json.toString().getBytes(StandardCharsets.UTF_8));
 
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--ip");         args.add(safeStr(nicIpAddress));
-        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
-        args.add("--vm-data");    args.add(vmDataArg);
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--ip");           args.add(safeStr(nicIpAddress));
+        args.add("--gateway");      args.add(safeStr(nic.getIPv4Gateway()));
+        args.add("--vm-data");      args.add(vmDataArg);
+        args.add("--extension-ip"); args.add(safeStr(ensureExtensionIp(network)));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-vm-data", args.toArray(new String[0]));
     }
@@ -1349,11 +1431,13 @@ public class NetworkExtensionElement extends AdapterBase implements
             return true;
         }
         logger.debug("savePassword: network={} ip={}", network.getId(), nic.getIPv4Address());
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
-        args.add("--password");   args.add(password);
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--ip");           args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");      args.add(safeStr(nic.getIPv4Gateway()));
+        args.add("--password");     args.add(password);
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-password", args.toArray(new String[0]));
     }
@@ -1373,11 +1457,13 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         logger.debug("saveUserData: network={} ip={}", network.getId(), nic.getIPv4Address());
         // userData is stored as base64; pass it directly so the script can decode it
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
-        args.add("--userdata");   args.add(userData);
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--ip");           args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");      args.add(safeStr(nic.getIPv4Gateway()));
+        args.add("--userdata");     args.add(userData);
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-userdata", args.toArray(new String[0]));
     }
@@ -1394,11 +1480,13 @@ public class NetworkExtensionElement extends AdapterBase implements
         logger.debug("saveSSHKey: network={} ip={}", network.getId(), nic.getIPv4Address());
         // Encode SSH key as base64 to safely pass via CLI
         String sshKeyBase64 = Base64.getEncoder().encodeToString(sshPublicKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
-        args.add("--sshkey");     args.add(sshKeyBase64);
+        args.add("--network-id");   args.add(String.valueOf(network.getId()));
+        args.add("--ip");           args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");      args.add(safeStr(nic.getIPv4Gateway()));
+        args.add("--sshkey");       args.add(sshKeyBase64);
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-sshkey", args.toArray(new String[0]));
     }
@@ -1415,11 +1503,13 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         logger.debug("saveHypervisorHostname: network={} ip={} host={}", network.getId(),
                 nic.getIPv4Address(), hostname);
+        String extensionIp = ensureExtensionIp(network);
         List<String> args = new ArrayList<>();
-        args.add("--network-id"); args.add(String.valueOf(network.getId()));
-        args.add("--ip");         args.add(safeStr(nic.getIPv4Address()));
-        args.add("--gateway");    args.add(safeStr(nic.getIPv4Gateway()));
+        args.add("--network-id");          args.add(String.valueOf(network.getId()));
+        args.add("--ip");                  args.add(safeStr(nic.getIPv4Address()));
+        args.add("--gateway");             args.add(safeStr(nic.getIPv4Gateway()));
         args.add("--hypervisor-hostname"); args.add(hostname);
+        args.add("--extension-ip");        args.add(safeStr(extensionIp));
         args.addAll(getVpcIdArgs(network));
         return executeScript(network, "save-hypervisor-hostname", args.toArray(new String[0]));
     }
@@ -1493,8 +1583,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     }
 
     @Override
-    public List<com.cloud.agent.api.to.LoadBalancerTO> updateHealthChecks(Network network,
-            List<LoadBalancingRule> lbrules) {
+    public List<LoadBalancerTO> updateHealthChecks(Network network,
+                                                   List<LoadBalancingRule> lbrules) {
         // Health-check state updates are not implemented via this path
         return new ArrayList<>();
     }

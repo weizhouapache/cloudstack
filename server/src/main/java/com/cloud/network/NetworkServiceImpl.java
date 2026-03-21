@@ -4414,7 +4414,7 @@ public class NetworkServiceImpl extends ManagerBase implements NetworkService, C
             if (externalDetails != null && !externalDetails.isEmpty()) {
                 Pair<Boolean, ExtensionResourceMap> needDetailsUpdateMapPair =
                         extensionsManager.extensionResourceMapDetailsNeedUpdate(id,
-                                org.apache.cloudstack.extension.ExtensionResourceMap.ResourceType.PhysicalNetwork, externalDetails);
+                                ExtensionResourceMap.ResourceType.PhysicalNetwork, externalDetails);
                 if (Boolean.TRUE.equals(needDetailsUpdateMapPair.first())) {
                     ExtensionResourceMap extensionResourceMap = needDetailsUpdateMapPair.second();
                     if (extensionResourceMap == null) {

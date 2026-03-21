@@ -33,7 +33,9 @@
 #   ethX.<vlan>         – VLAN sub-interface on the physical NIC (ethX)
 #   br<ethX>-<vlan>     – Linux bridge: ethX.<vlan> + vh-<vlan>-<id>
 #   vh-<vlan>-<id>      – host end of the veth pair → in the bridge
-#   vn-<vlan>-<id>      – namespace end → assigned the network gateway IP
+#   vn-<vlan>-<id>      – namespace end → assigned the extension IP
+#                         (= gateway when SourceNat/Gateway is enabled;
+#                          = allocated placeholder IP otherwise)
 #
 # ethX is read from guest.network.device in the physical-network extension
 # details (defaults to eth1 when absent).
@@ -393,6 +395,7 @@ parse_args() {
     DEFAULT_NIC="true"
     VM_DATA=""
     DOMAIN=""
+    EXTENSION_IP=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -425,6 +428,7 @@ parse_args() {
             --default-nic)         DEFAULT_NIC="$2";         shift 2 ;;
             --vm-data)             VM_DATA="$2";             shift 2 ;;
             --domain)              DOMAIN="$2";              shift 2 ;;
+            --extension-ip)        EXTENSION_IP="$2";        shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -465,6 +469,9 @@ _load_state() {
     fi
     if [ -z "${CIDR}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/cidr" ]; then
         CIDR=$(cat "${STATE_DIR}/${NETWORK_ID}/cidr")
+    fi
+    if [ -z "${EXTENSION_IP}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/extension-ip" ]; then
+        EXTENSION_IP=$(cat "${STATE_DIR}/${NETWORK_ID}/extension-ip")
     fi
     if [ -z "${NAMESPACE}" ]; then
         if [ -f "${STATE_DIR}/${NETWORK_ID}/namespace" ]; then
@@ -534,14 +541,31 @@ cmd_implement() {
         fi
     fi
 
-    # ---- 4. Assign gateway IP to namespace veth ----
-    if [ -n "${GATEWAY}" ] && [ -n "${CIDR}" ]; then
+    # ---- 4. Assign extension IP to namespace veth ----
+    # EXTENSION_IP is the IP that this namespace "owns" on the guest subnet.
+    # When SourceNat/Gateway service is enabled this equals the network gateway;
+    # otherwise it is a dedicated placeholder IP allocated for DHCP/DNS/UserData.
+    # If --extension-ip was not supplied fall back to the gateway.
+    local ext_ip; ext_ip="${EXTENSION_IP:-${GATEWAY}}"
+    if [ -n "${ext_ip}" ] && [ -n "${CIDR}" ]; then
         local prefix
         prefix=$(echo "${CIDR}" | cut -d'/' -f2)
         ip netns exec "${NAMESPACE}" ip addr show "${veth_n}" 2>/dev/null | \
-            grep -q "${GATEWAY}/${prefix}" || \
-            ip netns exec "${NAMESPACE}" ip addr add "${GATEWAY}/${prefix}" dev "${veth_n}"
-        log "Assigned ${GATEWAY}/${prefix} to ${veth_n} in ${NAMESPACE}"
+            grep -q "${ext_ip}/${prefix}" || \
+            ip netns exec "${NAMESPACE}" ip addr add "${ext_ip}/${prefix}" dev "${veth_n}"
+        log "Assigned ${ext_ip}/${prefix} to ${veth_n} in ${NAMESPACE}"
+
+        # When the extension IP differs from the gateway the namespace is not
+        # the default router for the guest subnet.  Add a default route toward
+        # the actual gateway so the namespace can reach external destinations
+        # (e.g. metadata proxy, outbound health-checks).
+        if [ -n "${GATEWAY}" ] && [ "${ext_ip}" != "${GATEWAY}" ]; then
+            ip netns exec "${NAMESPACE}" ip route replace default \
+                via "${GATEWAY}" dev "${veth_n}" 2>/dev/null || \
+            ip netns exec "${NAMESPACE}" ip route add default \
+                via "${GATEWAY}" dev "${veth_n}" 2>/dev/null || true
+            log "Default route in ${NAMESPACE}: via ${GATEWAY} dev ${veth_n}"
+        fi
     fi
 
     # Disable IPv6 on the guest veth namespace interface to prevent IPv6 addresses
@@ -576,6 +600,7 @@ cmd_implement() {
     echo "${GATEWAY}"           > "${STATE_DIR}/${NETWORK_ID}/gateway"
     echo "${CIDR}"              > "${STATE_DIR}/${NETWORK_ID}/cidr"
     echo "${NAMESPACE}"         > "${STATE_DIR}/${NETWORK_ID}/namespace"
+    echo "${ext_ip}"            > "${STATE_DIR}/${NETWORK_ID}/extension-ip"
 
     release_lock
     log "implement: done network=${NETWORK_ID} namespace=${NAMESPACE}"
@@ -1313,9 +1338,11 @@ _svc_stop_haproxy() {
 ##############################################################################
 # Helpers: apache2  (userdata / metadata HTTP service)
 #
-# apache2 runs inside the namespace, listening on <GATEWAY>:80.
+# apache2 runs inside the namespace, listening on <EXTENSION_IP>:80.
 # An iptables DNAT rule inside the namespace redirects requests destined for
-# 169.254.169.254:80 to <GATEWAY>:80 so VMs can use the standard metadata URL.
+# 169.254.169.254:80 to <EXTENSION_IP>:80 so VMs can use the standard metadata URL.
+# EXTENSION_IP equals the network gateway when SourceNat/Gateway is enabled,
+# or a dedicated placeholder IP otherwise.  Falls back to GATEWAY when absent.
 #
 # Files served:
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/user-data
@@ -1392,12 +1419,15 @@ CGISCRIPT
     local require_line="Allow from all"
     [ -f "${mods}/mod_authz_core.so" ] && require_line="Require all granted"
 
+    # Use EXTENSION_IP as the listen address; fall back to GATEWAY when absent.
+    local listen_ip; listen_ip="${EXTENSION_IP:-${GATEWAY}}"
+
     cat > "$(_apache2_conf)" << EOF
 # Auto-generated by network-extension-wrapper.sh — do not edit
 ServerRoot /tmp
 PidFile $(_apache2_pid)
 ServerName metadata-${NETWORK_ID}
-Listen ${GATEWAY}:80
+Listen ${listen_ip}:80
 #User ${apuser}
 #Group ${apuser}
 
@@ -1410,7 +1440,7 @@ ${authz_line}
 DocumentRoot ${www}
 ErrorLog /var/log/cloudstack/network-extension-apache2-${NETWORK_ID}.log
 
-<VirtualHost ${GATEWAY}:80>
+<VirtualHost ${listen_ip}:80>
     ServerName metadata
     ScriptAlias / ${cgi}/
     <Directory ${dir}>
@@ -1420,7 +1450,7 @@ ErrorLog /var/log/cloudstack/network-extension-apache2-${NETWORK_ID}.log
     </Directory>
 </VirtualHost>
 EOF
-    log "apache2: wrote config $(_apache2_conf)"
+    log "apache2: wrote config $(_apache2_conf) (listen=${listen_ip}:80)"
 }
 
 _svc_start_or_reload_apache2() {
@@ -1438,13 +1468,15 @@ _svc_start_or_reload_apache2() {
         fi
     fi
 
-    # DNAT 169.254.169.254:80 → GATEWAY:80  (idempotent)
+    # DNAT 169.254.169.254:80 → EXTENSION_IP:80  (idempotent)
+    # Use EXTENSION_IP as the metadata server address; fall back to GATEWAY.
+    local meta_ip; meta_ip="${EXTENSION_IP:-${GATEWAY}}"
     ip netns exec "${NAMESPACE}" iptables -t nat \
         -C PREROUTING -d 169.254.169.254/32 -p tcp --dport 80 \
-        -j DNAT --to-destination "${GATEWAY}:80" 2>/dev/null || \
+        -j DNAT --to-destination "${meta_ip}:80" 2>/dev/null || \
     ip netns exec "${NAMESPACE}" iptables -t nat \
         -A PREROUTING -d 169.254.169.254/32 -p tcp --dport 80 \
-        -j DNAT --to-destination "${GATEWAY}:80"
+        -j DNAT --to-destination "${meta_ip}:80"
 
     # Allow metadata traffic inbound to the namespace (INPUT)
     ip netns exec "${NAMESPACE}" iptables -t filter \
@@ -1469,7 +1501,9 @@ _svc_stop_apache2() {
 ##############################################################################
 # Helpers: passwd-server  (CloudStack VR-compatible password service)
 #
-# Listens on <GATEWAY>:8080 inside the namespace.
+# Listens on <EXTENSION_IP>:8080 inside the namespace.
+# EXTENSION_IP equals the network gateway when SourceNat/Gateway is enabled,
+# or a dedicated placeholder IP otherwise.  Falls back to GATEWAY when absent.
 # Protocol (identical to VR passwd_server_ip.py):
 #   GET DomU_Request: send_my_password  → return password for REMOTE_ADDR
 #   GET DomU_Request: saved_password    → remove password + ack
@@ -1574,9 +1608,11 @@ PYEOF
         return 0
     fi
 
-    log "passwd-server: starting in namespace ${NAMESPACE} on ${GATEWAY}:8080"
+    # Use EXTENSION_IP as the listen address; fall back to GATEWAY when absent.
+    local listen_ip; listen_ip="${EXTENSION_IP:-${GATEWAY}}"
+    log "passwd-server: starting in namespace ${NAMESPACE} on ${listen_ip}:8080"
     ip netns exec "${NAMESPACE}" python3 "${script_f}" \
-        "${GATEWAY}" "${passwd_f}" "${pid_f}" \
+        "${listen_ip}" "${passwd_f}" "${pid_f}" \
         >> "${log_f}" 2>&1 &
     # Brief pause to let the server write its PID
     sleep 0.3
@@ -1631,15 +1667,17 @@ cmd_config_dns_subnet() {
     [ -z "${GATEWAY}" ] && die "config-dns-subnet: missing --gateway"
     [ -z "${CIDR}" ]    && die "config-dns-subnet: missing --cidr"
     # Ensure the per-network hosts file contains an entry for the namespace
-    # gateway named 'data-server' (idempotent).
+    # extension IP named 'data-server' (idempotent).
+    # Use EXTENSION_IP when provided; fall back to GATEWAY.
+    local data_server_ip; data_server_ip="${EXTENSION_IP:-${GATEWAY}}"
     local hosts_f; hosts_f=$(_dnsmasq_hosts)
     mkdir -p "$(dirname "${hosts_f}")"
     touch "${hosts_f}"
     # Remove any existing data-server lines, then append the desired mapping
     grep -v -E "\sdata-server(\s|$)" "${hosts_f}" > "${hosts_f}.tmp" 2>/dev/null || true
     mv "${hosts_f}.tmp" "${hosts_f}"
-    # Add the mapping: <gateway>  data-server
-    echo "${GATEWAY} data-server" >> "${hosts_f}"
+    # Add the mapping: <extension-ip>  data-server
+    echo "${data_server_ip} data-server" >> "${hosts_f}"
 
     _write_dnsmasq_conf true
     _svc_start_or_reload_dnsmasq

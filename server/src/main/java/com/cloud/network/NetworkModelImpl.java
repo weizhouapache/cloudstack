@@ -1304,15 +1304,15 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
         // resolveProvider() creates a transient Provider (not added to the static list)
         // for extension names that are not in the built-in registry.
         try {
-            List<com.cloud.network.dao.PhysicalNetworkVO> physNets = _physicalNetworkDao.listAll();
+            List<PhysicalNetworkVO> physNets = _physicalNetworkDao.listAll();
             if (physNets != null) {
                 // Use a set to avoid adding the same provider name twice (multiple phys-nets)
                 Set<String> addedExtProviders = new HashSet<>();
-                for (com.cloud.network.dao.PhysicalNetworkVO physNet : physNets) {
+                for (PhysicalNetworkVO physNet : physNets) {
                     List<com.cloud.network.dao.PhysicalNetworkServiceProviderVO> nsps =
                             _pNSPDao.listBy(physNet.getId());
                     if (nsps == null) continue;
-                    for (com.cloud.network.dao.PhysicalNetworkServiceProviderVO nsp : nsps) {
+                    for (PhysicalNetworkServiceProviderVO nsp : nsps) {
                         String provName = nsp.getProviderName();
                         if (provName == null || addedExtProviders.contains(provName)) continue;
                         if (!extensionHelper.isNetworkExtensionProvider(provName)) continue;
@@ -1344,7 +1344,7 @@ public class NetworkModelImpl extends ManagerBase implements NetworkModel, Confi
      * without having to query each extension's capability JSON.</p>
      */
     private boolean isServiceProvidedByNsp(
-            com.cloud.network.dao.PhysicalNetworkServiceProviderVO nsp, Service service) {
+            PhysicalNetworkServiceProviderVO nsp, Service service) {
         if (service == null) {
             return true;
         }
