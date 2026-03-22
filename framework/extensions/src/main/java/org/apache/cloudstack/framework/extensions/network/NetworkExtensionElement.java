@@ -31,6 +31,7 @@ import javax.naming.ConfigurationException;
 
 import com.cloud.agent.api.to.LoadBalancerTO;
 import com.cloud.dc.DataCenter;
+import com.cloud.dc.Vlan;
 import com.cloud.dc.VlanVO;
 import com.cloud.dc.dao.DataCenterDao;
 import com.cloud.dc.dao.VlanDao;
@@ -75,6 +76,7 @@ import com.cloud.offerings.NetworkOfferingVO;
 import com.cloud.offerings.dao.NetworkOfferingDao;
 import com.cloud.storage.dao.GuestOSCategoryDao;
 import com.cloud.storage.dao.GuestOSDao;
+import com.cloud.user.AccountService;
 import com.cloud.uservm.UserVm;
 import com.cloud.offering.NetworkOffering;
 import com.cloud.user.Account;
@@ -215,6 +217,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     @Inject
     private NetworkOrchestrationService networkManager;
     @Inject
+    private AccountService accountService;
+    @Inject
     private PhysicalNetworkDao physicalNetworkDao;
     @Inject
     private DataCenterDao dataCenterDao;
@@ -279,6 +283,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.userVmDao                      = this.userVmDao;
         copy.networkManager                 = this.networkManager;
         copy.networkOfferingDao             = this.networkOfferingDao;
+        copy.accountService                 = this.accountService;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -625,17 +630,24 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         if (networkModel.isAnyServiceSupportedInNetwork(network.getId(), this.getProvider(),
                 Service.Dhcp, Service.Dns, Service.UserData)) {
-            // An extra IP will be allocated and configured on the external network
-            Nic placeholderNic = networkModel.getPlaceholderNicForRouter(network, null);
-            if (placeholderNic == null) {
-                NetworkDetailVO routerIpDetail = networkDetailsDao.findDetail(network.getId(), ApiConstants.ROUTER_IP);
-                String routerIp = routerIpDetail != null ? routerIpDetail.getValue() : null;
-                String extensionIp = ipAddressManager.acquireGuestIpAddress(network, routerIp);
-                logger.debug("Saving placeholder nic with ip4 address {} for the network", extensionIp, network);
-                networkManager.savePlaceholderNic(network, null, extensionIp, null);
-                return extensionIp;
-            }
-            return placeholderNic.getIPv4Address();
+                try {
+                    // An extra IP will be allocated and configured on the external network
+                    Nic placeholderNic = networkModel.getPlaceholderNicForRouter(network, null);
+                    if (placeholderNic == null) {
+                        NetworkDetailVO routerIpDetail = networkDetailsDao.findDetail(network.getId(), ApiConstants.ROUTER_IP);
+                        String routerIp = routerIpDetail != null ? routerIpDetail.getValue() : null;
+                        Account account = accountService.getAccount(network.getAccountId());
+                        String extensionIp = Network.GuestType.Shared.equals(network.getGuestType()) ?
+                                ipAddressManager.assignPublicIpAddress(network.getDataCenterId(), null, account, Vlan.VlanType.DirectAttached, network.getId(), routerIp, false, false).getAddress().toString():
+                                ipAddressManager.acquireGuestIpAddress(network, routerIp);
+                        logger.debug("Saving placeholder nic with ip4 address {} for the network", extensionIp, network);
+                        networkManager.savePlaceholderNic(network, extensionIp, null, VirtualMachine.Type.DomainRouter);
+                        return extensionIp;
+                    }
+                    return placeholderNic.getIPv4Address();
+                } catch (Exception e) {
+                    logger.warn("Failed to acquire extension IP for network {}: {}", network.getId(), e.getMessage());
+                }
         }
         return null;
     }
