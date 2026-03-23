@@ -58,6 +58,7 @@ import com.cloud.network.PublicIpAddress;
 import com.cloud.network.addr.PublicIp;
 import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
+import com.cloud.network.element.AggregatedCommandExecutor;
 import com.cloud.network.element.DhcpServiceProvider;
 import com.cloud.network.element.DnsServiceProvider;
 import com.cloud.network.element.FirewallServiceProvider;
@@ -74,6 +75,8 @@ import com.cloud.network.rules.PortForwardingRule;
 import com.cloud.network.rules.StaticNat;
 import com.cloud.offerings.NetworkOfferingVO;
 import com.cloud.offerings.dao.NetworkOfferingDao;
+import com.cloud.service.ServiceOfferingVO;
+import com.cloud.service.dao.ServiceOfferingDao;
 import com.cloud.storage.dao.GuestOSCategoryDao;
 import com.cloud.storage.dao.GuestOSDao;
 import com.cloud.user.AccountService;
@@ -85,6 +88,7 @@ import com.cloud.utils.component.AdapterBase;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.Nic;
 import com.cloud.vm.NicProfile;
+import com.cloud.vm.NicVO;
 import com.cloud.vm.ReservationContext;
 import com.cloud.vm.UserVmVO;
 import com.cloud.vm.VirtualMachine;
@@ -92,6 +96,7 @@ import com.cloud.vm.VirtualMachineManager;
 import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.VMInstanceDetailVO;
 import com.cloud.vm.VmDetailConstants;
+import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.UserVmDao;
 import com.cloud.vm.dao.VMInstanceDetailsDao;
 import com.google.gson.Gson;
@@ -193,7 +198,8 @@ public class NetworkExtensionElement extends AdapterBase implements
         NetworkElement, SourceNatServiceProvider, StaticNatServiceProvider,
         PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider,
         DhcpServiceProvider, DnsServiceProvider, FirewallServiceProvider,
-        UserDataServiceProvider, LoadBalancingServiceProvider {
+        UserDataServiceProvider, LoadBalancingServiceProvider,
+        AggregatedCommandExecutor {
 
     private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
 
@@ -235,7 +241,11 @@ public class NetworkExtensionElement extends AdapterBase implements
     @Inject
     private UserVmDao userVmDao;
     @Inject
+    private NicDao nicDao;
+    @Inject
     private NetworkOfferingDao networkOfferingDao;
+    @Inject
+    private ServiceOfferingDao serviceOfferingDao;
 
     // ---- Script argument names ----
 
@@ -281,8 +291,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.hostDao                        = this.hostDao;
         copy.vmInstanceDetailsDao           = this.vmInstanceDetailsDao;
         copy.userVmDao                      = this.userVmDao;
+        copy.nicDao                         = this.nicDao;
         copy.networkManager                 = this.networkManager;
         copy.networkOfferingDao             = this.networkOfferingDao;
+        copy.serviceOfferingDao             = this.serviceOfferingDao;
         copy.accountService                 = this.accountService;
         copy.providerName                   = providerName;
 
@@ -1628,5 +1640,261 @@ public class NetworkExtensionElement extends AdapterBase implements
         // TODO
         return true;
     }
-}
 
+    // ---- AggregatedCommandExecutor ----
+
+    /**
+     * Called at the start of a network-restart cycle (before rules are re-programmed).
+     * We have nothing to "start" here — the batch restore is driven by
+     * {@link #completeAggregatedExecution}.
+     */
+    @Override
+    public boolean prepareAggregatedExecution(Network network, DeployDestination dest)
+            throws ResourceUnavailableException {
+        if (!canHandle(network, null)) {
+            return true;
+        }
+        logger.debug("prepareAggregatedExecution: network={}", network.getId());
+        return true;
+    }
+
+    /**
+     * Called after all firewall/NAT/LB rules have been re-applied during a network restart.
+     *
+     * <p>Queries all active User-VM NICs on this network from the database, builds a single
+     * batch JSON payload containing DHCP/DNS/metadata entries for every VM, and sends it to
+     * the wrapper script as a single {@code restore-network} call.  This avoids N script
+     * invocations (one per VM) and instead performs the full restore in one shot.</p>
+     */
+    @Override
+    public boolean completeAggregatedExecution(Network network, DeployDestination dest)
+            throws ResourceUnavailableException {
+        if (!canHandle(network, null)) {
+            return true;
+        }
+
+        logger.info("completeAggregatedExecution: restoring all VM network data for network={}", network.getId());
+
+        boolean dhcpEnabled     = networkModel.areServicesSupportedInNetwork(network.getId(), Service.Dhcp)
+                && networkModel.isProviderSupportServiceInNetwork(network.getId(), Service.Dhcp, getProvider());
+        boolean dnsEnabled      = networkModel.areServicesSupportedInNetwork(network.getId(), Service.Dns)
+                && networkModel.isProviderSupportServiceInNetwork(network.getId(), Service.Dns, getProvider());
+        boolean userdataEnabled = networkModel.areServicesSupportedInNetwork(network.getId(), Service.UserData)
+                && networkModel.isProviderSupportServiceInNetwork(network.getId(), Service.UserData, getProvider());
+
+        if (!dhcpEnabled && !dnsEnabled && !userdataEnabled) {
+            logger.debug("completeAggregatedExecution: no DHCP/DNS/UserData service for network={}, skipping", network.getId());
+            return true;
+        }
+
+        // Query all active User-VM NICs on this network
+        List<NicVO> nics = nicDao.listByNetworkIdAndType(network.getId(), VirtualMachine.Type.User);
+        if (nics == null || nics.isEmpty()) {
+            logger.debug("completeAggregatedExecution: no user VM NICs on network={}, skipping", network.getId());
+            return true;
+        }
+
+        logger.info("completeAggregatedExecution: building batch restore for {} VMs on network={}",
+                nics.size(), network.getId());
+
+        String restoreDataBase64 = buildRestoreNetworkData(network, nics, dhcpEnabled, dnsEnabled, userdataEnabled);
+
+        String extensionIp = ensureExtensionIp(network);
+        List<String> args = new ArrayList<>();
+        args.add("--network-id");    args.add(String.valueOf(network.getId()));
+        args.add("--gateway");       args.add(safeStr(network.getGateway()));
+        args.add("--cidr");          args.add(safeStr(network.getCidr()));
+        args.add("--vlan");          args.add(safeStr(getVlanId(network)));
+        args.add("--extension-ip");  args.add(safeStr(extensionIp));
+        args.add("--dns");           args.add(safeStr(getNetworkDns(network)));
+        args.add("--domain");        args.add(safeStr(network.getNetworkDomain()));
+        args.add("--restore-data");  args.add(restoreDataBase64);
+        args.addAll(getVpcIdArgs(network));
+
+        return executeScript(network, "restore-network", args.toArray(new String[0]));
+    }
+
+    /**
+     * Called in the {@code finally} block of the network-restart cycle to clean up any
+     * temporary state created by {@link #prepareAggregatedExecution}.
+     * Nothing to clean up here.
+     */
+    @Override
+    public boolean cleanupAggregatedExecution(Network network, DeployDestination dest)
+            throws ResourceUnavailableException {
+        return true;
+    }
+
+    /**
+     * Builds the base64-encoded JSON payload for {@code restore-network}.
+     *
+     * <p>The JSON structure is:</p>
+     * <pre>
+     * {
+     *   "dhcp_enabled": true,
+     *   "dns_enabled":  true,
+     *   "userdata_enabled": true,
+     *   "vms": [
+     *     {
+     *       "ip":          "10.0.0.10",
+     *       "mac":         "02:00:00:00:00:01",
+     *       "hostname":    "vm-1",
+     *       "default_nic": true,
+     *       "vm_data": [
+     *         { "dir": "userdata", "file": "user-data", "content": "<base64>" },
+     *         { "dir": "meta-data", "file": "instance-id", "content": "<base64>" },
+     *         ...
+     *       ]
+     *     },
+     *     ...
+     *   ]
+     * }
+     * </pre>
+     *
+     * <p>Each {@code vm_data} entry has its {@code content} base64-encoded (the same
+     * encoding used by the per-VM {@code save-vm-data} command), so the wrapper script
+     * can handle both paths with the same decoder.</p>
+     */
+    private String buildRestoreNetworkData(Network network, List<NicVO> nics,
+            boolean dhcpEnabled, boolean dnsEnabled, boolean userdataEnabled) {
+
+        // Precompute service-offering display text keyed by offering ID to avoid repeated DB hits
+        Map<Long, String> offeringNameCache = new HashMap<>();
+
+        StringBuilder json = new StringBuilder("{");
+        json.append("\"dhcp_enabled\":").append(dhcpEnabled).append(",");
+        json.append("\"dns_enabled\":").append(dnsEnabled).append(",");
+        json.append("\"userdata_enabled\":").append(userdataEnabled).append(",");
+        json.append("\"vms\":[");
+
+        boolean firstVm = true;
+        for (NicVO nic : nics) {
+            if (nic.getState() != Nic.State.Reserved && nic.getState() != Nic.State.Allocated) {
+                continue;
+            }
+            if (nic.getIPv4Address() == null || nic.getMacAddress() == null) {
+                continue;
+            }
+
+            Long instanceId = nic.getInstanceId();
+            if (instanceId == null) {
+                continue;
+            }
+
+            UserVmVO userVm = userVmDao.findById(instanceId);
+            if (userVm == null) {
+                continue;
+            }
+
+            // Per-VM data array (only if UserData service is enabled)
+            List<String[]> vmData = null;
+            if (userdataEnabled) {
+                try {
+                    // Service offering display text
+                    String offeringName = offeringNameCache.computeIfAbsent(userVm.getServiceOfferingId(), id -> {
+                        try {
+                            ServiceOfferingVO so = serviceOfferingDao.findById(id);
+                            return so != null ? so.getDisplayText() : "";
+                        } catch (Exception e) {
+                            return "";
+                        }
+                    });
+
+                    // SSH public key
+                    String sshPublicKey = null;
+                    try {
+                        VMInstanceDetailVO sshKeyDetail = vmInstanceDetailsDao.findDetail(instanceId, VmDetailConstants.SSH_PUBLIC_KEY);
+                        if (sshKeyDetail != null) {
+                            sshPublicKey = sshKeyDetail.getValue();
+                        }
+                    } catch (Exception e) {
+                        logger.debug("Could not fetch SSH key for VM {}: {}", instanceId, e.getMessage());
+                    }
+
+                    // Is Windows?
+                    boolean isWindows = false;
+                    try {
+                        isWindows = guestOSCategoryDao
+                                .findById(guestOSDao.findById(userVm.getGuestOSId()).getCategoryId())
+                                .getName().equalsIgnoreCase("Windows");
+                    } catch (Exception ignored) { }
+
+                    // Hypervisor hostname from current host
+                    String destHostname = null;
+                    try {
+                        if (userVm.getHostId() != null) {
+                            destHostname = VirtualMachineManager.getHypervisorHostname(
+                                    hostDao.findById(userVm.getHostId()).getName());
+                        }
+                    } catch (Exception ignored) { }
+
+                    vmData = networkModel.generateVmData(
+                            userVm.getUserData(),
+                            userVm.getUserDataDetails(),
+                            offeringName,
+                            userVm.getDataCenterId(),
+                            userVm.getInstanceName(),
+                            userVm.getHostName(),
+                            userVm.getId(),
+                            userVm.getUuid(),
+                            nic.getIPv4Address(),
+                            sshPublicKey,
+                            null,   // password — not re-issued on restore
+                            isWindows,
+                            destHostname);
+                } catch (Exception e) {
+                    logger.warn("Could not generate vmData for VM {} on network {}: {}", instanceId, network.getId(), e.getMessage());
+                }
+            }
+
+            // Build VM JSON entry
+            if (!firstVm) json.append(",");
+            firstVm = false;
+
+            json.append("{");
+            json.append("\"ip\":\"").append(jsonEscape(nic.getIPv4Address())).append("\",");
+            json.append("\"mac\":\"").append(jsonEscape(nic.getMacAddress())).append("\",");
+            json.append("\"hostname\":\"").append(jsonEscape(safeStr(userVm.getHostName()))).append("\",");
+            json.append("\"default_nic\":").append(nic.isDefaultNic()).append(",");
+            json.append("\"vm_data\":[");
+
+            if (vmData != null && !vmData.isEmpty()) {
+                boolean firstEntry = true;
+                for (String[] entry : vmData) {
+                    String dir     = entry[NetworkModel.CONFIGDATA_DIR];
+                    String file    = entry[NetworkModel.CONFIGDATA_FILE];
+                    String content = entry.length > NetworkModel.CONFIGDATA_CONTENT
+                            ? entry[NetworkModel.CONFIGDATA_CONTENT] : null;
+                    if (content == null) content = "";
+
+                    byte[] contentBytes;
+                    if (NetworkModel.USERDATA_DIR.equals(dir) && NetworkModel.USERDATA_FILE.equals(file)) {
+                        try {
+                            contentBytes = Base64.getDecoder().decode(content);
+                        } catch (Exception e) {
+                            contentBytes = content.getBytes(StandardCharsets.UTF_8);
+                        }
+                    } else {
+                        contentBytes = content.getBytes(StandardCharsets.UTF_8);
+                    }
+
+                    if (!firstEntry) json.append(",");
+                    firstEntry = false;
+                    json.append("{\"dir\":\"").append(jsonEscape(dir))
+                        .append("\",\"file\":\"").append(jsonEscape(file))
+                        .append("\",\"content\":\"")
+                        .append(Base64.getEncoder().encodeToString(contentBytes))
+                        .append("\"}");
+                }
+            }
+
+            json.append("]"); // vm_data
+            json.append("}"); // vm object
+        }
+
+        json.append("]"); // vms
+        json.append("}"); // root
+
+        return Base64.getEncoder().encodeToString(json.toString().getBytes(StandardCharsets.UTF_8));
+    }
+}

@@ -396,6 +396,7 @@ parse_args() {
     VM_DATA=""
     DOMAIN=""
     EXTENSION_IP=""
+    RESTORE_DATA=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -429,6 +430,7 @@ parse_args() {
             --vm-data)             VM_DATA="$2";             shift 2 ;;
             --domain)              DOMAIN="$2";              shift 2 ;;
             --extension-ip)        EXTENSION_IP="$2";        shift 2 ;;
+            --restore-data)        RESTORE_DATA="$2";        shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -469,6 +471,12 @@ _load_state() {
     fi
     if [ -z "${CIDR}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/cidr" ]; then
         CIDR=$(cat "${STATE_DIR}/${NETWORK_ID}/cidr")
+    fi
+    # Restore GATEWAY from the persisted state file so that commands like
+    # restore-network can call _write_dnsmasq_conf without requiring the
+    # caller to re-supply --gateway every time.
+    if [ -z "${GATEWAY}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/gateway" ]; then
+        GATEWAY=$(cat "${STATE_DIR}/${NETWORK_ID}/gateway")
     fi
     if [ -z "${EXTENSION_IP}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/extension-ip" ]; then
         EXTENSION_IP=$(cat "${STATE_DIR}/${NETWORK_ID}/extension-ip")
@@ -648,6 +656,12 @@ cmd_shutdown() {
             log "shutdown: removed public veth ${pveth_h}"
         done
     fi
+
+    # Remove guest veth pair (host-side; namespace-side disappears when IP is removed)
+    local veth_h
+    veth_h=$(veth_host_name "${VLAN}" "${CHOSEN_ID}")
+    ip link del "${veth_h}" 2>/dev/null || true
+    log "shutdown: removed guest veth ${veth_h}"
 
     # Clean transient state
     rm -rf "${STATE_DIR}/${NETWORK_ID}/ips" \
@@ -2249,6 +2263,234 @@ cmd_custom_action() {
 }
 
 ##############################################################################
+# Command: restore-network
+# Batch-restore DHCP/DNS/metadata for all VMs on a network in a single call.
+# Called by AggregatedCommandExecutor.completeAggregatedExecution() on network
+# restart so that we rebuild all state in one shot instead of N per-VM calls.
+#
+# Required arguments:
+#   --network-id   <id>
+#   --restore-data <base64-json>   JSON: see buildRestoreNetworkData() in Java
+#
+# Optional (for dnsmasq reconfiguration):
+#   --gateway <gw>  --cidr <cidr>  --dns <dns>  --domain <dom>  --extension-ip <ip>
+##############################################################################
+
+cmd_restore_network() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "restore-network: network=${NETWORK_ID} ns=${NAMESPACE}"
+    [ -z "${RESTORE_DATA}" ] && die "restore-network: missing --restore-data"
+
+    local dhcp_hosts; dhcp_hosts=$(_dnsmasq_dhcp_hosts)
+    local dhcp_opts;  dhcp_opts=$(_dnsmasq_dhcp_opts)
+    local dns_hosts;  dns_hosts=$(_dnsmasq_hosts)
+    local meta_dir;   meta_dir=$(_metadata_dir)
+    local passwd_f;   passwd_f=$(_passwd_file)
+
+    mkdir -p "$(_dnsmasq_dir)" "${meta_dir}" "$(dirname "${passwd_f}")"
+    touch "${dhcp_hosts}" "${dhcp_opts}" "${dns_hosts}" "${passwd_f}"
+
+    python3 - \
+        "${RESTORE_DATA}" \
+        "${dhcp_hosts}" "${dhcp_opts}" "${dns_hosts}" \
+        "${meta_dir}" "${passwd_f}" \
+        << 'PYEOF'
+import base64, json, os, sys
+
+restore_b64  = sys.argv[1]
+dhcp_hosts_f = sys.argv[2]
+dhcp_opts_f  = sys.argv[3]
+dns_hosts_f  = sys.argv[4]
+meta_dir     = sys.argv[5]
+passwd_f     = sys.argv[6]
+
+# ---- Decode the outer base64, then parse JSON ----
+try:
+    data = json.loads(base64.b64decode(restore_b64).decode('utf-8'))
+except Exception as e:
+    print(f"restore-network: failed to decode restore-data: {e}", file=sys.stderr)
+    sys.exit(1)
+
+dhcp_enabled     = data.get('dhcp_enabled', False)
+dns_enabled      = data.get('dns_enabled', False)
+userdata_enabled = data.get('userdata_enabled', False)
+vms              = data.get('vms', [])
+
+print(f"restore-network: dhcp={dhcp_enabled} dns={dns_enabled} "
+      f"userdata={userdata_enabled} vms={len(vms)}")
+
+# ---- Rebuild DHCP hosts file ----
+if dhcp_enabled:
+    new_hosts_lines = []
+    new_opts_lines  = []
+    # Keep existing custom dhcp-option lines not managed by us
+    try:
+        with open(dhcp_opts_f) as f:
+            existing_opts = [l for l in f if not l.startswith('set:norouter_') and
+                             'norouter_' not in l]
+    except FileNotFoundError:
+        existing_opts = []
+
+    for vm in vms:
+        ip          = vm.get('ip', '')
+        mac         = vm.get('mac', '')
+        hostname    = vm.get('hostname', '')
+        default_nic = str(vm.get('default_nic', True)).lower() not in ('false', '0', 'no')
+        if not ip or not mac:
+            continue
+        mac_tag = mac.replace(':', '_').lower()
+        if not default_nic:
+            if hostname:
+                new_hosts_lines.append(f"set:norouter_{mac_tag},{mac},{ip},{hostname},infinite\n")
+            else:
+                new_hosts_lines.append(f"set:norouter_{mac_tag},{mac},{ip},infinite\n")
+            new_opts_lines.append(f"dhcp-option=tag:norouter_{mac_tag},option:router,0.0.0.0\n")
+        else:
+            if hostname:
+                new_hosts_lines.append(f"{mac},{ip},{hostname},infinite\n")
+            else:
+                new_hosts_lines.append(f"{mac},{ip},infinite\n")
+
+    with open(dhcp_hosts_f, 'w') as f:
+        f.writelines(new_hosts_lines)
+    with open(dhcp_opts_f, 'w') as f:
+        f.writelines(existing_opts + new_opts_lines)
+    print(f"restore-network: wrote {len(new_hosts_lines)} DHCP entries")
+
+# ---- Rebuild DNS hosts file ----
+if dns_enabled:
+    new_dns_lines = []
+    for vm in vms:
+        ip       = vm.get('ip', '')
+        hostname = vm.get('hostname', '')
+        if not ip or not hostname:
+            continue
+        new_dns_lines.append(f"{ip} {hostname}\n")
+    with open(dns_hosts_f, 'w') as f:
+        f.writelines(new_dns_lines)
+    print(f"restore-network: wrote {len(new_dns_lines)} DNS entries")
+
+# ---- Restore per-VM metadata / userdata ----
+if userdata_enabled:
+    passwords = {}
+    # Load existing passwords to preserve non-restored entries
+    try:
+        with open(passwd_f) as pf:
+            for line in pf:
+                line = line.strip()
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    passwords[k] = v
+    except FileNotFoundError:
+        pass
+
+    vm_count = 0
+    for vm in vms:
+        vm_ip   = vm.get('ip', '')
+        vm_data = vm.get('vm_data', [])
+        if not vm_ip or not vm_data:
+            continue
+        vm_count += 1
+        for entry in vm_data:
+            d     = entry.get('dir', '')
+            f_    = entry.get('file', '')
+            c_b64 = entry.get('content', '')
+            if not c_b64:
+                continue
+            try:
+                content = base64.b64decode(c_b64)
+            except Exception:
+                content = c_b64.encode('utf-8') if isinstance(c_b64, str) else b''
+            if not content:
+                continue
+            # ---- path mapping (same as cmd_save_vm_data) ----
+            if d == 'userdata' and f_ == 'user_data':
+                path = os.path.join(meta_dir, vm_ip, 'latest', 'user-data')
+            elif d == 'metadata' and f_ == 'public-keys':
+                path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data',
+                                    'public-keys', '0', 'openssh-key')
+            elif d == 'metadata':
+                path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', f_)
+            elif d == 'password' and f_ == 'vm_password':
+                path = os.path.join(meta_dir, vm_ip, 'latest', 'password')
+                passwords[vm_ip] = content.decode('utf-8', errors='replace').strip()
+            elif d == 'password' and f_ == 'vm-password-md5checksum':
+                path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'password-checksum')
+            else:
+                path = os.path.join(meta_dir, vm_ip, 'latest', d, f_)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as fp:
+                fp.write(content if isinstance(content, bytes)
+                         else content.encode('utf-8'))
+
+    # Rewrite the passwords file atomically
+    try:
+        with open(passwd_f, 'w') as pf:
+            for k, v in passwords.items():
+                pf.write(f'{k}={v}\n')
+    except Exception as e:
+        print(f"restore-network: could not write passwords file: {e}", file=sys.stderr)
+
+    print(f"restore-network: restored metadata for {vm_count} VMs")
+
+print("restore-network: done")
+PYEOF
+
+    # ------------------------------------------------------------------
+    # Decode dhcp_enabled / dns_enabled from RESTORE_DATA so we can
+    # reconfigure dnsmasq correctly even when the namespace (and therefore
+    # dnsmasq.conf) was deleted and recreated.  RESTORE_DATA is passed as
+    # a positional argument to avoid shell-quoting issues with base64 data.
+    # ------------------------------------------------------------------
+    local _r_flags
+    _r_flags=$(python3 - "${RESTORE_DATA}" 2>/dev/null << 'PYFLAGSEOF'
+import base64, json, sys
+try:
+    d = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+    dhcp = 'true' if d.get('dhcp_enabled', False) else 'false'
+    dns  = 'true' if d.get('dns_enabled',  False) else 'false'
+    print(dhcp + ' ' + dns)
+except Exception:
+    print('false false')
+PYFLAGSEOF
+)
+    local _r_dhcp _r_dns
+    _r_dhcp="${_r_flags%% *}"; _r_dhcp="${_r_dhcp:-false}"
+    _r_dns="${_r_flags##* }";  _r_dns="${_r_dns:-false}"
+
+    # Re-add the data-server → extension-IP mapping when DNS is enabled.
+    # This entry is normally written by cmd_config_dns_subnet; we must
+    # reproduce it here so DNS resolution for the metadata/userdata service
+    # keeps working after a namespace restart with cleanup.
+    if [ "${_r_dns}" = "true" ]; then
+        local _ds_ip; _ds_ip="${EXTENSION_IP:-${GATEWAY}}"
+        grep -v -E "\sdata-server(\s|$)" "${dns_hosts}" > "${dns_hosts}.tmp" 2>/dev/null || true
+        mv "${dns_hosts}.tmp" "${dns_hosts}"
+        echo "${_ds_ip} data-server" >> "${dns_hosts}"
+        log "restore-network: added data-server (${_ds_ip}) to DNS hosts"
+    fi
+
+    # Re-write dnsmasq.conf.  The conf file is NOT part of the persisted
+    # state directory, so it is lost whenever the namespace is deleted.
+    # Without this call _svc_start_or_reload_dnsmasq has nothing to read
+    # and dnsmasq fails to start.
+    if [ "${_r_dhcp}" = "true" ] || [ "${_r_dns}" = "true" ]; then
+        _write_dnsmasq_conf "${_r_dns}"
+    fi
+
+    # Reload services once for the whole batch
+    _svc_start_or_reload_dnsmasq
+    _write_apache2_conf
+    _svc_start_or_reload_apache2
+    _svc_start_or_reload_passwd_server
+
+    release_lock
+    log "restore-network: done network=${NETWORK_ID}"
+}
+
+##############################################################################
 # Main dispatcher
 ##############################################################################
 
@@ -2283,6 +2525,7 @@ case "${COMMAND}" in
     save-sshkey)              cmd_save_sshkey              "$@" ;;
     save-hypervisor-hostname) cmd_save_hypervisor_hostname "$@" ;;
     save-vm-data)             cmd_save_vm_data             "$@" ;;
+    restore-network)          cmd_restore_network          "$@" ;;
     # Load balancing (haproxy)
     apply-lb-rules)           cmd_apply_lb_rules           "$@" ;;
     # Custom actions
@@ -2292,7 +2535,7 @@ case "${COMMAND}" in
              "add-static-nat|delete-static-nat|add-port-forward|delete-port-forward|" \
              "config-dhcp-subnet|remove-dhcp-subnet|add-dhcp-entry|remove-dhcp-entry|set-dhcp-options|" \
              "config-dns-subnet|remove-dns-subnet|add-dns-entry|remove-dns-entry|" \
-             "save-userdata|save-password|save-sshkey|save-hypervisor-hostname|save-vm-data|" \
+             "save-userdata|save-password|save-sshkey|save-hypervisor-hostname|save-vm-data|restore-network|" \
              "apply-lb-rules|custom-action} [options]" >&2
         exit 1 ;;
     *)
