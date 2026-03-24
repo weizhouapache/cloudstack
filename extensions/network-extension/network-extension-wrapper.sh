@@ -1207,7 +1207,9 @@ EOF
     if [ -n "${DOMAIN}" ]; then
         echo "dhcp-option=15,\"${DOMAIN}\"" >> "$(_dnsmasq_conf)"
     fi
-    [ -n "${DNS_SERVER}" ] && echo "dhcp-option=6,${DNS_SERVER}" >> "$(_dnsmasq_conf)"
+    local ext_ip; ext_ip="${EXTENSION_IP:-${GATEWAY}}"
+    [ -n "${DNS_SERVER}" ] && echo "dhcp-option=6,${ext_ip},${DNS_SERVER}" >> "$(_dnsmasq_conf)"
+    [ -z "${DNS_SERVER}" ] && echo "dhcp-option=6,${ext_ip}" >> "$(_dnsmasq_conf)"
     log "dnsmasq: wrote config $(_dnsmasq_conf) (dns_enabled=${dns_enabled})"
 }
 
