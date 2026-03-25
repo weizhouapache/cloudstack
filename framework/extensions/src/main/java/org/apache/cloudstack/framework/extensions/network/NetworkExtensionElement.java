@@ -1635,9 +1635,147 @@ public class NetworkExtensionElement extends AdapterBase implements
         return false;
     }
 
+    /**
+     * Applies all active firewall rules for a network to the external network device.
+     *
+     * <p>Three categories of rules are handled:</p>
+     * <ol>
+     *   <li><b>Egress rules</b> ({@link FirewallRule.TrafficType#Egress}) — control outbound
+     *       traffic from guest VMs.  The network offering's {@code egressDefaultPolicy} flag
+     *       is consulted:
+     *       <ul>
+     *         <li>{@code true}  (ALLOW by default) — each egress rule becomes a DROP rule;
+     *             a catch-all ACCEPT is appended at the end.</li>
+     *         <li>{@code false} (DENY by default) — each egress rule becomes an ACCEPT rule;
+     *             a catch-all DROP is appended at the end.</li>
+     *       </ul>
+     *   </li>
+     *   <li><b>Ingress rules</b> ({@link FirewallRule.TrafficType#Ingress}) on public IPs
+     *       (used for static NAT, port-forwarding, etc.) — control inbound access to a
+     *       specific public IP.  The wrapper script resolves the matching private IP from
+     *       static-nat state files and installs per-IP ACCEPT rules plus a catch-all DROP
+     *       for unmatched new connections.</li>
+     *   <li><b>Default egress policy</b> — always sent via the JSON payload so the script
+     *       can enforce it even when the explicit rule list is empty.</li>
+     * </ol>
+     *
+     * <p>All active rules are serialised as a Base64-encoded JSON payload and forwarded to
+     * the script via {@code --fw-rules}.  Revoked rules ({@link FirewallRule.State#Revoke})
+     * and non-firewall-purpose rules are excluded — the script rebuilds the entire firewall
+     * chain from scratch on every invocation (rebuild semantics, same as
+     * {@code apply-lb-rules}).</p>
+     *
+     * <p>Script command: {@code apply-fw-rules}</p>
+     */
     @Override
-    public boolean applyFWRules(Network network, List<? extends FirewallRule> rules) throws ResourceUnavailableException {
-        // TODO
+    public boolean applyFWRules(Network network, List<? extends FirewallRule> rules)
+            throws ResourceUnavailableException {
+        if (!canHandle(network, Service.Firewall)) {
+            return false;
+        }
+        if (rules == null) {
+            rules = List.of();
+        }
+
+        // Determine default egress policy from the network offering.
+        // true  = ALLOW (default permissive; explicit rules are deny-rules)
+        // false = DENY  (default restrictive; explicit rules are allow-rules)
+        NetworkOfferingVO offering = networkOfferingDao.findById(network.getNetworkOfferingId());
+        boolean defaultEgressAllow = offering == null || offering.isEgressDefaultPolicy();
+
+        logger.info("applyFWRules: network={} rules={} defaultEgressAllow={}",
+                network.getId(), rules.size(), defaultEgressAllow);
+
+        // Build JSON payload: { "default_egress_allow": <bool>, "cidr": "...", "rules": [...] }
+        StringBuilder json = new StringBuilder();
+        json.append("{\"default_egress_allow\":").append(defaultEgressAllow).append(",");
+        json.append("\"cidr\":\"").append(jsonEscape(safeStr(network.getCidr()))).append("\",");
+        json.append("\"rules\":[");
+
+        boolean first = true;
+        for (FirewallRule rule : rules) {
+            // Only handle Firewall-purpose rules; skip PortForwarding, StaticNat, etc.
+            if (!FirewallRule.Purpose.Firewall.equals(rule.getPurpose())) {
+                continue;
+            }
+            // Rebuild semantics: only include active rules (skip revoked ones).
+            if (FirewallRule.State.Revoke.equals(rule.getState())) {
+                continue;
+            }
+
+            if (!first) json.append(",");
+            first = false;
+
+            boolean isEgress = FirewallRule.TrafficType.Egress.equals(rule.getTrafficType());
+
+            json.append("{");
+            json.append("\"id\":").append(rule.getId()).append(",");
+            json.append("\"type\":\"").append(isEgress ? "egress" : "ingress").append("\",");
+            json.append("\"protocol\":\"").append(jsonEscape(safeStr(rule.getProtocol()))).append("\",");
+            if (rule.getSourcePortStart() != null) {
+                json.append("\"portStart\":").append(rule.getSourcePortStart()).append(",");
+            }
+            if (rule.getSourcePortEnd() != null) {
+                json.append("\"portEnd\":").append(rule.getSourcePortEnd()).append(",");
+            }
+            if (rule.getIcmpType() != null) {
+                json.append("\"icmpType\":").append(rule.getIcmpType()).append(",");
+            }
+            if (rule.getIcmpCode() != null) {
+                json.append("\"icmpCode\":").append(rule.getIcmpCode()).append(",");
+            }
+            // For ingress rules include the public IP the rule is associated with.
+            if (!isEgress) {
+                json.append("\"publicIp\":\"")
+                    .append(jsonEscape(getIpAddress(rule.getSourceIpAddressId())))
+                    .append("\",");
+            }
+            // sourceCidrs: for ingress = allowed external source IPs;
+            //              for egress  = allowed VM source IP ranges
+            json.append("\"sourceCidrs\":[");
+            List<String> sourceCidrs = rule.getSourceCidrList();
+            if (sourceCidrs != null && !sourceCidrs.isEmpty()) {
+                boolean firstCidr = true;
+                for (String cidr : sourceCidrs) {
+                    if (!firstCidr) json.append(",");
+                    firstCidr = false;
+                    json.append("\"").append(jsonEscape(cidr)).append("\"");
+                }
+            }
+            json.append("]");
+            // destCidrs: optional destination CIDR filter (meaningful for egress rules)
+            List<String> destCidrs = rule.getDestinationCidrList();
+            json.append(",\"destCidrs\":[");
+            if (destCidrs != null && !destCidrs.isEmpty()) {
+                boolean firstCidr = true;
+                for (String cidr : destCidrs) {
+                    if (!firstCidr) json.append(",");
+                    firstCidr = false;
+                    json.append("\"").append(jsonEscape(cidr)).append("\"");
+                }
+            }
+            json.append("]");
+            json.append("}");
+        }
+        json.append("]}");
+
+        String rulesBase64 = Base64.getEncoder().encodeToString(
+                json.toString().getBytes(StandardCharsets.UTF_8));
+
+        List<String> args = new ArrayList<>();
+        args.add("--network-id");  args.add(String.valueOf(network.getId()));
+        args.add("--vlan");        args.add(safeStr(getVlanId(network)));
+        args.add("--gateway");     args.add(safeStr(network.getGateway()));
+        args.add("--cidr");        args.add(safeStr(network.getCidr()));
+        args.add("--fw-rules");    args.add(rulesBase64);
+        args.addAll(getVpcIdArgs(network));
+
+        boolean result = executeScript(network, "apply-fw-rules", args.toArray(new String[0]));
+        if (!result) {
+            throw new ResourceUnavailableException(
+                    "Failed to apply firewall rules for network " + network.getId(),
+                    Network.class, network.getId());
+        }
         return true;
     }
 

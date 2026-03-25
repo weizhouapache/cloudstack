@@ -397,6 +397,7 @@ parse_args() {
     DOMAIN=""
     EXTENSION_IP=""
     RESTORE_DATA=""
+    FW_RULES_JSON=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -431,6 +432,7 @@ parse_args() {
             --domain)              DOMAIN="$2";              shift 2 ;;
             --extension-ip)        EXTENSION_IP="$2";        shift 2 ;;
             --restore-data)        RESTORE_DATA="$2";        shift 2 ;;
+            --fw-rules)            FW_RULES_JSON="$2";       shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -1354,7 +1356,6 @@ _svc_stop_haproxy() {
 #
 # Files served:
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/user-data
-#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/password
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/public-keys
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/hypervisor-hostname
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/local-hostname
@@ -1949,10 +1950,7 @@ cmd_save_password() {
     log "save-password: network=${NETWORK_ID} ip=${VM_IP}"
     [ -z "${VM_IP}" ] && die "save-password: missing --ip"
 
-    local vm_dir; vm_dir="$(_metadata_dir)/${VM_IP}/latest"
-    mkdir -p "${vm_dir}"
-
-    # Also write to the passwords file for the VR-compatible password server
+    # Write to the passwords file for the VR-compatible password server only.
     # Format: ip=password  (same as /var/cache/cloud/passwords-<gw> on VR)
     local passwd_f; passwd_f=$(_passwd_file)
     if [ -n "${PASSWORD}" ]; then
@@ -2028,8 +2026,7 @@ cmd_save_hypervisor_hostname() {
 #   [userdata, user_data,   <bytes>]  → latest/user-data
 #   [metadata, public-keys, <bytes>]  → latest/meta-data/public-keys  (flat file, one key per line)
 #   [metadata, <file>,      <bytes>]  → latest/meta-data/<file>
-#   [password, vm_password, <bytes>]  → latest/password
-#                                       + passwords file for VR-compat password server
+#   [password, vm_password, <bytes>]  → passwords file (VR-compat passwd-server only)
 #   [password, vm-password-md5checksum, <bytes>] → latest/meta-data/password-checksum
 #
 # After writing all files the apache2 metadata server and the VR-compatible
@@ -2093,9 +2090,10 @@ for entry in entries:
     elif d == 'metadata':
         path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', f)
     elif d == 'password' and f == 'vm_password':
-        path = os.path.join(meta_dir, vm_ip, 'latest', 'password')
-        # Also update the passwords file for the VR-compatible password server
+        # Only write to the VR-compatible passwords file; do NOT save to
+        # latest/password inside the metadata tree.
         password_written = content.decode('utf-8', errors='replace').strip()
+        continue
     elif d == 'password' and f == 'vm-password-md5checksum':
         path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'password-checksum')
     else:
@@ -2143,6 +2141,257 @@ PYEOF
 # Apply/revoke load balancing rules via haproxy inside the namespace.
 # --lb-rules <json-array>  — array of LB rule objects (see Java side for schema)
 ##############################################################################
+
+##############################################################################
+# Command: apply-fw-rules
+#
+# Rebuilds the per-network firewall chain CS_EXTNET_FW_<networkId> from
+# scratch using a Base64-encoded JSON payload supplied via --fw-rules.
+#
+# JSON payload structure (base64-decoded):
+# {
+#   "default_egress_allow": true|false,
+#   "cidr": "10.0.0.0/24",
+#   "rules": [
+#     {
+#       "id": 1,
+#       "type": "ingress"|"egress",
+#       "protocol": "tcp"|"udp"|"icmp"|"all",
+#       "portStart": <int>,          // optional
+#       "portEnd":   <int>,          // optional
+#       "icmpType":  <int>,          // optional
+#       "icmpCode":  <int>,          // optional
+#       "publicIp":  "1.2.3.4",     // ingress only
+#       "sourceCidrs": ["0.0.0.0/0", ...],
+#       "destCidrs":   ["0.0.0.0/0", ...]  // egress only, optional
+#     }, ...
+#   ]
+# }
+#
+# iptables chain layout inside the namespace
+# ------------------------------------------
+# CS_EXTNET_FWD_<networkId>           (existing "fchain")
+#   └─[pos 1]─> CS_EXTNET_FW_<networkId>  (fw_chain, this command)
+#                 1. -m state RELATED,ESTABLISHED -j ACCEPT     (established bypass)
+#                 2. ingress ACCEPT rules  (-o <veth_n> -d <private_ip> ...)
+#                 3. ingress DROP          (-o <veth_n> -d <private_ip> -m state NEW -j DROP)
+#                 4. egress ACCEPT|DROP    (-i <veth_n> [proto/port/cidr] -j ...)
+#                 5. egress default        (-i <veth_n> [-m state NEW] -j ACCEPT|DROP)
+#                 6. -j RETURN             (pass non-VM traffic to fchain catch-all rules)
+#
+# Ingress rules: The private IP is resolved from the static-nat state file
+# (written by add-static-nat).  If no mapping is found the ingress rules for
+# that public IP are skipped with a warning.
+#
+# Default egress policy:
+#   default_egress_allow=true  → ALLOW by default; explicit rules are DROP
+#   default_egress_allow=false → DENY  by default; explicit rules are ACCEPT
+##############################################################################
+
+cmd_apply_fw_rules() {
+    parse_args "$@"
+    _load_state
+    acquire_lock "${NETWORK_ID}"
+    log "apply-fw-rules: network=${NETWORK_ID} ns=${NAMESPACE}"
+
+    local veth_n fchain fw_chain
+    veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
+    fchain=$(filter_chain "${NETWORK_ID}")
+    fw_chain="${CHAIN_PREFIX}_FW_${NETWORK_ID}"
+
+    # ---- 1. Remove existing jump from fchain to fw_chain (idempotent) ----
+    ip netns exec "${NAMESPACE}" iptables -t filter \
+        -D "${fchain}" -j "${fw_chain}" 2>/dev/null || true
+
+    # ---- 2. Flush and delete old fw chain ----
+    ip netns exec "${NAMESPACE}" iptables -t filter -F "${fw_chain}" 2>/dev/null || true
+    ip netns exec "${NAMESPACE}" iptables -t filter -X "${fw_chain}" 2>/dev/null || true
+
+    # ---- 3. Create fresh fw chain ----
+    ip netns exec "${NAMESPACE}" iptables -t filter -N "${fw_chain}"
+
+    # ---- 4. Build iptables rules via Python ----
+    python3 - "${NAMESPACE}" "${FW_RULES_JSON:-}" "${veth_n}" \
+              "${fw_chain}" "${STATE_DIR}/${NETWORK_ID}" << 'PYEOF'
+import base64, json, os, subprocess, sys
+
+namespace = sys.argv[1]
+rules_b64 = sys.argv[2]
+veth_n    = sys.argv[3]
+fw_chain  = sys.argv[4]
+state_dir = sys.argv[5]
+
+def ipt(*args):
+    cmd = ['ip', 'netns', 'exec', namespace, 'iptables', '-t', 'filter'] + list(args)
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        print(f"iptables: {result.stderr.decode().strip()}", file=sys.stderr)
+
+# Decode payload
+if rules_b64:
+    try:
+        data = json.loads(base64.b64decode(rules_b64).decode('utf-8'))
+    except Exception as e:
+        print(f"apply-fw-rules: failed to decode --fw-rules: {e}", file=sys.stderr)
+        sys.exit(1)
+else:
+    data = {}
+
+default_egress_allow = data.get('default_egress_allow', True)
+rules = data.get('rules', [])
+
+ingress_rules = [r for r in rules if r.get('type') == 'ingress']
+egress_rules  = [r for r in rules if r.get('type') == 'egress']
+
+# ---- Always allow ESTABLISHED/RELATED first (bypass for ongoing connections) ----
+ipt('-A', fw_chain, '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT')
+
+# ---- Ingress rules (traffic arriving at VMs after DNAT) ----
+# Group rules by public IP, look up the corresponding private IP from the
+# static-nat state file written by add-static-nat.
+pub_ip_rules = {}
+for rule in ingress_rules:
+    pub_ip = rule.get('publicIp', '')
+    if not pub_ip:
+        continue
+    pub_ip_rules.setdefault(pub_ip, []).append(rule)
+
+for pub_ip, ip_rules in pub_ip_rules.items():
+    # Resolve private IP from static-nat state
+    private_ip = None
+    snat_file = os.path.join(state_dir, 'static-nat', pub_ip)
+    if os.path.isfile(snat_file):
+        try:
+            private_ip = open(snat_file).read().strip() or None
+        except Exception:
+            pass
+
+    if not private_ip:
+        print(f"apply-fw-rules: no static-nat mapping found for public IP {pub_ip}; "
+              f"skipping {len(ip_rules)} ingress rule(s)", file=sys.stderr)
+        continue
+
+    # Add ACCEPT rules for each explicitly allowed source
+    for rule in ip_rules:
+        protocol   = (rule.get('protocol') or 'all').lower()
+        port_start = rule.get('portStart')
+        port_end   = rule.get('portEnd')
+        icmp_type  = rule.get('icmpType')
+        icmp_code  = rule.get('icmpCode')
+        src_cidrs  = rule.get('sourceCidrs') or ['0.0.0.0/0']
+
+        for src_cidr in src_cidrs:
+            a = ['-A', fw_chain, '-o', veth_n, '-d', private_ip]
+            if protocol not in ('all', ''):
+                a += ['-p', protocol]
+                if protocol in ('tcp', 'udp') and port_start is not None:
+                    port_spec = str(port_start)
+                    if port_end is not None and port_end != port_start:
+                        port_spec = f"{port_start}:{port_end}"
+                    a += ['--dport', port_spec]
+                elif protocol == 'icmp' and icmp_type is not None and icmp_type != -1:
+                    icmp_spec = str(icmp_type)
+                    if icmp_code is not None and icmp_code != -1:
+                        icmp_spec += f"/{icmp_code}"
+                    a += ['--icmp-type', icmp_spec]
+            if src_cidr and src_cidr not in ('0.0.0.0/0', '::/0', ''):
+                a += ['-s', src_cidr]
+            a += ['-j', 'ACCEPT']
+            ipt(*a)
+
+    # Drop any NEW connection to this protected private IP not matched above.
+    # ESTABLISHED/RELATED are already handled at the top of the chain.
+    ipt('-A', fw_chain, '-o', veth_n, '-d', private_ip,
+        '-m', 'state', '--state', 'NEW', '-j', 'DROP')
+
+# ---- Egress rules (traffic originating from guest VMs) ----
+# When default_egress_allow=true  explicit rules are DROP (deny specific traffic).
+# When default_egress_allow=false explicit rules are ACCEPT (allow specific traffic).
+rule_target = 'DROP' if default_egress_allow else 'ACCEPT'
+
+for rule in egress_rules:
+    protocol   = (rule.get('protocol') or 'all').lower()
+    port_start = rule.get('portStart')
+    port_end   = rule.get('portEnd')
+    icmp_type  = rule.get('icmpType')
+    icmp_code  = rule.get('icmpCode')
+    src_cidrs  = rule.get('sourceCidrs') or ['0.0.0.0/0']
+    dest_cidrs = rule.get('destCidrs') or []
+
+    for src_cidr in src_cidrs:
+        a = ['-i', veth_n]
+        if src_cidr and src_cidr not in ('0.0.0.0/0', '::/0', ''):
+            a += ['-s', src_cidr]
+        if protocol not in ('all', ''):
+            a += ['-p', protocol]
+            if protocol in ('tcp', 'udp') and port_start is not None:
+                port_spec = str(port_start)
+                if port_end is not None and port_end != port_start:
+                    port_spec = f"{port_start}:{port_end}"
+                a += ['--dport', port_spec]
+            elif protocol == 'icmp' and icmp_type is not None and icmp_type != -1:
+                icmp_spec = str(icmp_type)
+                if icmp_code is not None and icmp_code != -1:
+                    icmp_spec += f"/{icmp_code}"
+                a += ['--icmp-type', icmp_spec]
+
+        if dest_cidrs:
+            for dest_cidr in dest_cidrs:
+                if dest_cidr and dest_cidr not in ('0.0.0.0/0', '::/0', ''):
+                    ipt('-A', fw_chain, *a, '-d', dest_cidr, '-j', rule_target)
+                else:
+                    ipt('-A', fw_chain, *a, '-j', rule_target)
+        else:
+            ipt('-A', fw_chain, *a, '-j', rule_target)
+
+# ---- Default egress policy ----
+# Apply only to NEW connections; ESTABLISHED/RELATED are already accepted at
+# the top of the chain so ongoing sessions are never interrupted by a policy
+# change.
+if not default_egress_allow:
+    # Default DENY: drop all remaining outbound new-connection attempts from VMs.
+    ipt('-A', fw_chain, '-i', veth_n, '-m', 'state', '--state', 'NEW', '-j', 'DROP')
+else:
+    # Default ALLOW: accept all remaining outbound traffic from VMs.
+    ipt('-A', fw_chain, '-i', veth_n, '-j', 'ACCEPT')
+
+# RETURN for any traffic not matched above so that fchain's catch-all rules
+# (static-NAT, source-NAT, port-forwarding etc.) still apply.
+ipt('-A', fw_chain, '-j', 'RETURN')
+
+n_in  = sum(len(v) for v in pub_ip_rules.values())
+n_eg  = len(egress_rules)
+policy = 'ALLOW' if default_egress_allow else 'DENY'
+print(f"apply-fw-rules: chain built — "
+      f"{n_in} ingress rule(s), {n_eg} egress rule(s), default_egress={policy}")
+PYEOF
+
+    local py_exit=$?
+    if [ ${py_exit} -ne 0 ]; then
+        # Python script failed — leave chain empty but continue so that the
+        # fchain catch-all rules remain effective (fail-open for existing traffic).
+        log "apply-fw-rules: Python rule builder exited ${py_exit}; firewall chain may be incomplete"
+    fi
+
+    # ---- 5. Insert jump from fchain to fw_chain at position 1 ----
+    # Runs fw_chain BEFORE the fchain catch-all ACCEPT rules so the firewall
+    # policy takes precedence.  Skipped when fchain does not exist yet (i.e.
+    # implement has not been called — the jump will be inserted on next
+    # apply-fw-rules invocation after implement).
+    if ip netns exec "${NAMESPACE}" iptables -t filter -n -L "${fchain}" >/dev/null 2>&1; then
+        ip netns exec "${NAMESPACE}" iptables -t filter \
+            -I "${fchain}" 1 -j "${fw_chain}" 2>/dev/null || true
+        log "apply-fw-rules: jump ${fchain} -> ${fw_chain} inserted at position 1"
+    else
+        log "apply-fw-rules: WARNING — ${fchain} not found; jump will be inserted on next implement"
+    fi
+
+    release_lock
+    log "apply-fw-rules: done network=${NETWORK_ID}"
+}
+
+##############################################################################
+# Command: apply-lb-rules
 
 cmd_apply_lb_rules() {
     parse_args "$@"
@@ -2320,7 +2569,7 @@ except Exception as e:
     sys.exit(1)
 
 dhcp_enabled     = data.get('dhcp_enabled', False)
-dns_enabled      = data.get('dns_enabled', False)
+dns_enabled      = data.get('dns_enabled',  False)
 userdata_enabled = data.get('userdata_enabled', False)
 vms              = data.get('vms', [])
 
@@ -2399,7 +2648,7 @@ if userdata_enabled:
         if not vm_ip or not vm_data:
             continue
         vm_count += 1
-        pub_keys = []  # accumulate public keys; written as one flat file after inner loop
+        pub_keys = []  # accumulate public keys; written as a single flat file after inner loop
         for entry in vm_data:
             d     = entry.get('dir', '')
             f_    = entry.get('file', '')
@@ -2410,6 +2659,7 @@ if userdata_enabled:
                 content = base64.b64decode(c_b64)
             except Exception:
                 content = c_b64.encode('utf-8') if isinstance(c_b64, str) else b''
+
             if not content:
                 continue
             # ---- path mapping (same as cmd_save_vm_data) ----
@@ -2422,8 +2672,10 @@ if userdata_enabled:
             elif d == 'metadata':
                 path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', f_)
             elif d == 'password' and f_ == 'vm_password':
-                path = os.path.join(meta_dir, vm_ip, 'latest', 'password')
+                # Only write to the VR-compatible passwords file; do NOT save
+                # to latest/password inside the metadata tree.
                 passwords[vm_ip] = content.decode('utf-8', errors='replace').strip()
+                continue
             elif d == 'password' and f_ == 'vm-password-md5checksum':
                 path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'password-checksum')
             else:
@@ -2542,6 +2794,7 @@ case "${COMMAND}" in
     save-vm-data)             cmd_save_vm_data             "$@" ;;
     restore-network)          cmd_restore_network          "$@" ;;
     # Load balancing (haproxy)
+    apply-fw-rules)           cmd_apply_fw_rules           "$@" ;;
     apply-lb-rules)           cmd_apply_lb_rules           "$@" ;;
     # Custom actions
     custom-action)            cmd_custom_action            "$@" ;;
@@ -2551,7 +2804,7 @@ case "${COMMAND}" in
              "config-dhcp-subnet|remove-dhcp-subnet|add-dhcp-entry|remove-dhcp-entry|set-dhcp-options|" \
              "config-dns-subnet|remove-dns-subnet|add-dns-entry|remove-dns-entry|" \
              "save-userdata|save-password|save-sshkey|save-hypervisor-hostname|save-vm-data|restore-network|" \
-             "apply-lb-rules|custom-action} [options]" >&2
+             "apply-fw-rules|apply-lb-rules|custom-action} [options]" >&2
         exit 1 ;;
     *)
         echo "Unknown command: ${COMMAND}" >&2
