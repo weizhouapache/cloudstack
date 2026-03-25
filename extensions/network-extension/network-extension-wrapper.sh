@@ -1355,7 +1355,7 @@ _svc_stop_haproxy() {
 # Files served:
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/user-data
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/password
-#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/public-keys/0/openssh-key
+#   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/public-keys
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/hypervisor-hostname
 #   ${STATE_DIR}/<NETWORK_ID>/metadata/<VM_IP>/latest/meta-data/local-hostname
 #
@@ -1981,11 +1981,13 @@ cmd_save_sshkey() {
     log "save-sshkey: network=${NETWORK_ID} ip=${VM_IP}"
     [ -z "${VM_IP}" ] && die "save-sshkey: missing --ip"
 
-    local key_dir; key_dir="$(_metadata_dir)/${VM_IP}/latest/meta-data/public-keys/0"
-    mkdir -p "${key_dir}"
-    # SSH_KEY is base64-encoded by the Java caller
-    printf '%s' "${SSH_KEY}" | base64 -d > "${key_dir}/openssh-key" 2>/dev/null || \
-        printf '%s' "${SSH_KEY}" > "${key_dir}/openssh-key"
+    local meta_dir; meta_dir="$(_metadata_dir)/${VM_IP}/latest/meta-data"
+    mkdir -p "${meta_dir}"
+    # SSH_KEY is base64-encoded by the Java caller.
+    # All public keys for the VM are stored together in a single flat file
+    # (one key per line) at latest/meta-data/public-keys.
+    printf '%s' "${SSH_KEY}" | base64 -d > "${meta_dir}/public-keys" 2>/dev/null || \
+        printf '%s' "${SSH_KEY}" > "${meta_dir}/public-keys"
 
     _write_apache2_conf
     _svc_start_or_reload_apache2
@@ -2024,7 +2026,7 @@ cmd_save_hypervisor_hostname() {
 #
 # Path mapping from generateVmData() output:
 #   [userdata, user_data,   <bytes>]  → latest/user-data
-#   [metadata, public-keys, <bytes>]  → latest/meta-data/public-keys/0/openssh-key
+#   [metadata, public-keys, <bytes>]  → latest/meta-data/public-keys  (flat file, one key per line)
 #   [metadata, <file>,      <bytes>]  → latest/meta-data/<file>
 #   [password, vm_password, <bytes>]  → latest/password
 #                                       + passwords file for VR-compat password server
@@ -2063,6 +2065,7 @@ except Exception as e:
     sys.exit(1)
 
 password_written = None
+pub_keys = []  # accumulate all public-key entries; written as one flat file after the loop
 
 for entry in entries:
     d    = entry.get('dir', '')
@@ -2083,8 +2086,10 @@ for entry in entries:
     if d == 'userdata' and f == 'user_data':
         path = os.path.join(meta_dir, vm_ip, 'latest', 'user-data')
     elif d == 'metadata' and f == 'public-keys':
-        # SSH public key → EC2-compatible path
-        path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'public-keys', '0', 'openssh-key')
+        # All public keys are collected and written together as a single
+        # flat file (one key per line) after the loop.
+        pub_keys.append(content.rstrip(b'\n') + b'\n')
+        continue
     elif d == 'metadata':
         path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', f)
     elif d == 'password' and f == 'vm_password':
@@ -2100,6 +2105,13 @@ for entry in entries:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'wb') as fp:
         fp.write(content if isinstance(content, bytes) else content.encode('utf-8'))
+
+# Write all collected public keys into a single flat file.
+if pub_keys:
+    pk_path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'public-keys')
+    os.makedirs(os.path.dirname(pk_path), exist_ok=True)
+    with open(pk_path, 'wb') as fp:
+        fp.writelines(pub_keys)
 
 # Update the passwords file (ip=password format, same as VR)
 if password_written:
@@ -2387,6 +2399,7 @@ if userdata_enabled:
         if not vm_ip or not vm_data:
             continue
         vm_count += 1
+        pub_keys = []  # accumulate public keys; written as one flat file after inner loop
         for entry in vm_data:
             d     = entry.get('dir', '')
             f_    = entry.get('file', '')
@@ -2403,8 +2416,9 @@ if userdata_enabled:
             if d == 'userdata' and f_ == 'user_data':
                 path = os.path.join(meta_dir, vm_ip, 'latest', 'user-data')
             elif d == 'metadata' and f_ == 'public-keys':
-                path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data',
-                                    'public-keys', '0', 'openssh-key')
+                # Accumulate; written as a single flat file after the inner loop.
+                pub_keys.append(content.rstrip(b'\n') + b'\n')
+                continue
             elif d == 'metadata':
                 path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', f_)
             elif d == 'password' and f_ == 'vm_password':
@@ -2418,6 +2432,13 @@ if userdata_enabled:
             with open(path, 'wb') as fp:
                 fp.write(content if isinstance(content, bytes)
                          else content.encode('utf-8'))
+
+        # Write all collected public keys as a single flat file.
+        if pub_keys:
+            pk_path = os.path.join(meta_dir, vm_ip, 'latest', 'meta-data', 'public-keys')
+            os.makedirs(os.path.dirname(pk_path), exist_ok=True)
+            with open(pk_path, 'wb') as fp:
+                fp.writelines(pub_keys)
 
     # Rewrite the passwords file atomically
     try:
