@@ -1702,6 +1702,18 @@ public class NetworkExtensionElement extends AdapterBase implements
             if (FirewallRule.State.Revoke.equals(rule.getState())) {
                 continue;
             }
+            // Skip System-type rules.  When no user-defined egress rules exist,
+            // applyDefaultEgressFirewallRule injects a single FirewallRuleType.System
+            // egress rule to signal "use the network offering default policy".
+            // That default is already conveyed by the "default_egress_allow" field
+            // in the JSON envelope, so turning the System rule into an actual iptables
+            // entry would create a spurious DROP/ACCEPT that contradicts the intended
+            // default-policy rule appended at the end of the firewall chain.
+            // (Same logic as CommandSetupHelper.createFirewallRulesCommands, which
+            // distinguishes FIREWALL_EGRESS_DEFAULT="System" vs "true"/"false".)
+            if (FirewallRule.FirewallRuleType.System.equals(rule.getType())) {
+                continue;
+            }
 
             if (!first) json.append(",");
             first = false;
