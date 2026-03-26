@@ -766,12 +766,14 @@ public class NetworkExtensionElement extends AdapterBase implements
         for (StaticNat rule : rules) {
             String action = rule.isForRevoke() ? "delete-static-nat" : "add-static-nat";
             String publicCidr = getPublicCidr(rule.getSourceIpAddressId());
+            String publicVlanTag = getPublicVlanTag(rule.getSourceIpAddressId());
 
             List<String> args = new ArrayList<>();
             args.add("--network-id");        args.add(String.valueOf(config.getId()));
             args.add("--vlan");              args.add(safeStr(vlanId));
             args.add("--public-ip");         args.add(getIpAddress(rule.getSourceIpAddressId()));
             args.add("--public-cidr");       args.add(safeStr(publicCidr));
+            args.add("--public-vlan");       args.add(publicVlanTag);
             args.add("--private-ip");        args.add(safeStr(rule.getDestIpAddress()));
             args.addAll(vpcArgs);
             boolean result = executeScript(config, action, args.toArray(new String[0]));
@@ -804,12 +806,14 @@ public class NetworkExtensionElement extends AdapterBase implements
             String publicPort  = PortForwardingServiceProvider.getPublicPortRange(rule);
             String privatePort = PortForwardingServiceProvider.getPrivatePFPortRange(rule);
             String publicCidr  = getPublicCidr(rule.getSourceIpAddressId());
+            String publicVlanTag = getPublicVlanTag(rule.getSourceIpAddressId());
 
             List<String> args = new ArrayList<>();
             args.add("--network-id");        args.add(String.valueOf(network.getId()));
             args.add("--vlan");              args.add(safeStr(vlanId));
             args.add("--public-ip");         args.add(getIpAddress(rule.getSourceIpAddressId()));
             args.add("--public-cidr");       args.add(safeStr(publicCidr));
+            args.add("--public-vlan");       args.add(publicVlanTag);
             args.add("--public-port");       args.add(safeStr(publicPort));
             args.add("--private-ip");        args.add(safeStr(rule.getDestinationIpAddress() != null
                     ? rule.getDestinationIpAddress().addr() : null));
@@ -1123,6 +1127,18 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
         VlanVO vlan = vlanDao.findById(ip.getVlanId());
         return buildCidrFromIpAndNetmask(ip.getAddress().addr(), vlan.getVlanNetmask());
+    }
+
+    private String getPublicVlanTag(Long ipAddressId) {
+        if (ipAddressId == null) {
+            return "";
+        }
+        IpAddress ip = networkModel.getIp(ipAddressId);
+        if (ip == null) {
+            return "";
+        }
+        VlanVO vlan = vlanDao.findById(ip.getVlanId());
+        return vlan != null ? safeStr(vlan.getVlanTag()) : "";
     }
 
     private String safeStr(String value) {

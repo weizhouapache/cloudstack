@@ -145,6 +145,23 @@ log() {
     echo "[${ts}] $*" >> "${LOG_FILE}" 2>/dev/null || true
 }
 
+# Save the current iptables-save output as ${STATE_DIR}/${NETWORK_ID}/iptables.dump.
+# Call this after any command that modifies iptables rules.
+_dump_iptables() {
+    local ns="${1:-${NAMESPACE}}"
+    [ -z "${ns}" ] && return
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    local ipt_out
+    ipt_out=$(ip netns exec "${ns}" iptables-save 2>/dev/null || echo "(iptables-save failed)")
+    # Also persist a current snapshot in STATE_DIR for easy inspection.
+    if [ -n "${NETWORK_ID}" ]; then
+        mkdir -p "${STATE_DIR}/${NETWORK_ID}" 2>/dev/null || true
+        printf '# iptables-save %s ns=%s\n%s\n' "${ts}" "${ns}" "${ipt_out}" \
+            > "${STATE_DIR}/${NETWORK_ID}/iptables.dump" 2>/dev/null || true
+    fi
+}
+
 die() {
     log "ERROR: $*"
     release_lock
@@ -613,6 +630,7 @@ cmd_implement() {
     echo "${NAMESPACE}"         > "${STATE_DIR}/${NETWORK_ID}/namespace"
     echo "${ext_ip}"            > "${STATE_DIR}/${NETWORK_ID}/extension-ip"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "implement: done network=${NETWORK_ID} namespace=${NAMESPACE}"
 }
@@ -815,6 +833,7 @@ cmd_assign_ip() {
     # Save public VLAN so add-static-nat / add-port-forward can look it up
     echo "${PUBLIC_VLAN}" > "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "assign-ip: done ${PUBLIC_IP} on network ${NETWORK_ID}"
 }
@@ -895,6 +914,7 @@ cmd_release_ip() {
     rm -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}" \
           "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "release-ip: done ${PUBLIC_IP} on network ${NETWORK_ID}"
 }
@@ -916,10 +936,11 @@ cmd_add_static_nat() {
     if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
         PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
     fi
+    [ -z "${PUBLIC_VLAN}" ] && die "add-static-nat: cannot determine public VLAN for ${PUBLIC_IP}"
 
     local pveth_h pveth_n veth_n nchain_pr nchain_post fchain
-    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
-    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN}" "${CHOSEN_ID}")
     veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
     nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
@@ -952,6 +973,7 @@ cmd_add_static_nat() {
     mkdir -p "${STATE_DIR}/${NETWORK_ID}/static-nat"
     echo "${PRIVATE_IP}" > "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "add-static-nat: done ${PUBLIC_IP} <-> ${PRIVATE_IP} in ${NAMESPACE}"
 }
@@ -977,9 +999,10 @@ cmd_delete_static_nat() {
     if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
         PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
     fi
+    [ -z "${PUBLIC_VLAN}" ] && die "delete-static-nat: cannot determine public VLAN for ${PUBLIC_IP}"
 
     local pveth_n veth_n nchain_pr nchain_post fchain
-    pveth_n=$(pub_veth_ns_name "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name "${PUBLIC_VLAN}" "${CHOSEN_ID}")
     veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
     nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
@@ -996,6 +1019,7 @@ cmd_delete_static_nat() {
 
     rm -f "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "delete-static-nat: done ${PUBLIC_IP} <-> ${PRIVATE_IP}"
 }
@@ -1020,10 +1044,11 @@ cmd_add_port_forward() {
     if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
         PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
     fi
+    [ -z "${PUBLIC_VLAN}" ] && die "add-port-forward: cannot determine public VLAN for ${PUBLIC_IP}"
 
     local pveth_h pveth_n veth_n nchain_pr fchain
-    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
-    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN:-0}" "${CHOSEN_ID}")
+    pveth_h=$(pub_veth_host_name "${PUBLIC_VLAN}" "${CHOSEN_ID}")
+    pveth_n=$(pub_veth_ns_name   "${PUBLIC_VLAN}" "${CHOSEN_ID}")
     veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
     nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     fchain=$(filter_chain "${NETWORK_ID}")
@@ -1058,6 +1083,7 @@ cmd_add_port_forward() {
     echo "${PROTOCOL} ${PUBLIC_IP} ${PUBLIC_PORT} ${PRIVATE_IP} ${PRIVATE_PORT}" > \
         "${STATE_DIR}/${NETWORK_ID}/port-forward/${PROTOCOL}_${PUBLIC_IP}_${safe_port}"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "add-port-forward: done ${PUBLIC_IP}:${PUBLIC_PORT} -> ${PRIVATE_IP}:${PRIVATE_PORT}"
 }
@@ -1097,6 +1123,7 @@ cmd_delete_port_forward() {
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
     rm -f "${STATE_DIR}/${NETWORK_ID}/port-forward/${PROTOCOL}_${PUBLIC_IP}_${safe_port}"
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "delete-port-forward: done"
 }
@@ -2425,12 +2452,16 @@ PYEOF
         log "apply-fw-rules: WARNING — ${fchain} not found; jump will be inserted on next implement"
     fi
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "apply-fw-rules: done network=${NETWORK_ID}"
 }
 
 ##############################################################################
 # Command: apply-lb-rules
+# Apply/revoke load balancing rules via haproxy inside the namespace.
+# --lb-rules <json-array>  — array of LB rule objects (see Java side for schema)
+##############################################################################
 
 cmd_apply_lb_rules() {
     parse_args "$@"
@@ -2478,6 +2509,7 @@ PYEOF
         _svc_stop_haproxy
     fi
 
+    _dump_iptables "${NAMESPACE}"
     release_lock
     log "apply-lb-rules: done network=${NETWORK_ID}"
 }
