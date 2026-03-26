@@ -112,6 +112,7 @@ import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.stream.Collectors;
 
 
 /**
@@ -1710,6 +1711,13 @@ public class NetworkExtensionElement extends AdapterBase implements
         // chain.  Querying the DB ensures every call produces a complete, correct chain.
         List<FirewallRuleVO> allRules = firewallRulesDao.listByNetworkAndPurposeAndNotRevoked(
                 network.getId(), FirewallRule.Purpose.Firewall);
+        // Skip System-type rules — the default egress policy is already conveyed by
+        // "default_egress_allow".  System rules are transient (not stored in DB), but
+        // guard here anyway in case of future changes.
+        allRules = allRules.stream()
+                .filter(r -> !FirewallRule.FirewallRuleType.System.equals(r.getType()))
+                .collect(Collectors.toList());
+
         for (FirewallRuleVO r : allRules) {
             firewallRulesDao.loadSourceCidrs(r);
             firewallRulesDao.loadDestinationCidrs(r);
@@ -1726,13 +1734,6 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         boolean first = true;
         for (FirewallRuleVO rule : allRules) {
-            // Skip System-type rules — the default egress policy is already conveyed by
-            // "default_egress_allow".  System rules are transient (not stored in DB), but
-            // guard here anyway in case of future changes.
-            if (FirewallRule.FirewallRuleType.System.equals(rule.getType())) {
-                continue;
-            }
-
             if (!first) json.append(",");
             first = false;
 
