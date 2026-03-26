@@ -56,6 +56,7 @@ import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.PublicIpAddress;
 import com.cloud.network.addr.PublicIp;
+import com.cloud.network.dao.FirewallRulesDao;
 import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
 import com.cloud.network.element.AggregatedCommandExecutor;
@@ -71,6 +72,7 @@ import com.cloud.network.element.StaticNatServiceProvider;
 import com.cloud.network.element.UserDataServiceProvider;
 import com.cloud.network.lb.LoadBalancingRule;
 import com.cloud.network.rules.FirewallRule;
+import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.network.rules.PortForwardingRule;
 import com.cloud.network.rules.StaticNat;
 import com.cloud.offerings.NetworkOfferingVO;
@@ -246,6 +248,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     private NetworkOfferingDao networkOfferingDao;
     @Inject
     private ServiceOfferingDao serviceOfferingDao;
+    @Inject
+    private FirewallRulesDao firewallRulesDao;
 
     // ---- Script argument names ----
 
@@ -296,6 +300,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.networkOfferingDao             = this.networkOfferingDao;
         copy.serviceOfferingDao             = this.serviceOfferingDao;
         copy.accountService                 = this.accountService;
+        copy.firewallRulesDao               = this.firewallRulesDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -1651,19 +1656,22 @@ public class NetworkExtensionElement extends AdapterBase implements
      *       </ul>
      *   </li>
      *   <li><b>Ingress rules</b> ({@link FirewallRule.TrafficType#Ingress}) on public IPs
-     *       (used for static NAT, port-forwarding, etc.) — control inbound access to a
-     *       specific public IP.  The wrapper script resolves the matching private IP from
-     *       static-nat state files and installs per-IP ACCEPT rules plus a catch-all DROP
-     *       for unmatched new connections.</li>
-     *   <li><b>Default egress policy</b> — always sent via the JSON payload so the script
-     *       can enforce it even when the explicit rule list is empty.</li>
+     *       (static NAT, port-forwarding, LB, …) — control inbound access to a specific
+     *       public IP.  The wrapper script uses {@code conntrack --ctorigdst} to match the
+     *       original pre-DNAT destination, so no private-IP lookup is required and all
+     *       DNAT-based services (static-NAT, port-forwarding, LB) are handled uniformly.</li>
+     *   <li><b>Default egress policy</b> — always conveyed via the JSON payload so the
+     *       script can enforce it even when the explicit rule list is empty.</li>
      * </ol>
      *
-     * <p>All active rules are serialised as a Base64-encoded JSON payload and forwarded to
-     * the script via {@code --fw-rules}.  Revoked rules ({@link FirewallRule.State#Revoke})
-     * and non-firewall-purpose rules are excluded — the script rebuilds the entire firewall
-     * chain from scratch on every invocation (rebuild semantics, same as
-     * {@code apply-lb-rules}).</p>
+     * <p><b>Full-state rebuild semantics:</b>
+     * {@code applyFWRules} is called with a <em>narrow</em> scope — the firewall manager
+     * passes only the rules for one public IP ({@code applyIngressFirewallRules}) or only
+     * the egress rules ({@code applyEgressFirewallRules}) per call.  The script, however,
+     * rebuilds the entire firewall chain from scratch each time it runs.  To avoid wiping
+     * the rules for other IPs on every call, this method ignores the {@code rules} parameter
+     * and instead queries the database for <em>all</em> active (non-revoked, non-System)
+     * {@link FirewallRule.Purpose#Firewall} rules for the network.</p>
      *
      * <p>Script command: {@code apply-fw-rules}</p>
      */
@@ -1673,9 +1681,6 @@ public class NetworkExtensionElement extends AdapterBase implements
         if (!canHandle(network, Service.Firewall)) {
             return false;
         }
-        if (rules == null) {
-            rules = List.of();
-        }
 
         // Determine default egress policy from the network offering.
         // true  = ALLOW (default permissive; explicit rules are deny-rules)
@@ -1683,8 +1688,19 @@ public class NetworkExtensionElement extends AdapterBase implements
         NetworkOfferingVO offering = networkOfferingDao.findById(network.getNetworkOfferingId());
         boolean defaultEgressAllow = offering == null || offering.isEgressDefaultPolicy();
 
-        logger.info("applyFWRules: network={} rules={} defaultEgressAllow={}",
-                network.getId(), rules.size(), defaultEgressAllow);
+        // Load ALL active (non-revoked) firewall rules for this network from the DB.
+        // applyFWRules is called in a narrow scope (only one public IP's ingress rules, or
+        // only egress rules per call), but the script does a full rebuild of the firewall
+        // chain.  Querying the DB ensures every call produces a complete, correct chain.
+        List<FirewallRuleVO> allRules = firewallRulesDao.listByNetworkAndPurposeAndNotRevoked(
+                network.getId(), FirewallRule.Purpose.Firewall);
+        for (FirewallRuleVO r : allRules) {
+            firewallRulesDao.loadSourceCidrs(r);
+            firewallRulesDao.loadDestinationCidrs(r);
+        }
+
+        logger.info("applyFWRules: network={} activeRules={} defaultEgressAllow={}",
+                network.getId(), allRules.size(), defaultEgressAllow);
 
         // Build JSON payload: { "default_egress_allow": <bool>, "cidr": "...", "rules": [...] }
         StringBuilder json = new StringBuilder();
@@ -1693,24 +1709,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         json.append("\"rules\":[");
 
         boolean first = true;
-        for (FirewallRule rule : rules) {
-            // Only handle Firewall-purpose rules; skip PortForwarding, StaticNat, etc.
-            if (!FirewallRule.Purpose.Firewall.equals(rule.getPurpose())) {
-                continue;
-            }
-            // Rebuild semantics: only include active rules (skip revoked ones).
-            if (FirewallRule.State.Revoke.equals(rule.getState())) {
-                continue;
-            }
-            // Skip System-type rules.  When no user-defined egress rules exist,
-            // applyDefaultEgressFirewallRule injects a single FirewallRuleType.System
-            // egress rule to signal "use the network offering default policy".
-            // That default is already conveyed by the "default_egress_allow" field
-            // in the JSON envelope, so turning the System rule into an actual iptables
-            // entry would create a spurious DROP/ACCEPT that contradicts the intended
-            // default-policy rule appended at the end of the firewall chain.
-            // (Same logic as CommandSetupHelper.createFirewallRulesCommands, which
-            // distinguishes FIREWALL_EGRESS_DEFAULT="System" vs "true"/"false".)
+        for (FirewallRuleVO rule : allRules) {
+            // Skip System-type rules — the default egress policy is already conveyed by
+            // "default_egress_allow".  System rules are transient (not stored in DB), but
+            // guard here anyway in case of future changes.
             if (FirewallRule.FirewallRuleType.System.equals(rule.getType())) {
                 continue;
             }

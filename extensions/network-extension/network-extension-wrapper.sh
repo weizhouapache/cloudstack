@@ -282,7 +282,8 @@ pub_veth_ns_name() {
 }
 
 nat_chain()    { echo "${CHAIN_PREFIX}_${1}"; }
-filter_chain() { echo "${CHAIN_PREFIX}_FWD_${1}"; }
+filter_chain()   { echo "${CHAIN_PREFIX}_FWD_${1}"; }
+firewall_chain() { echo "${CHAIN_PREFIX}_FWRULES_${1}"; }
 
 ensure_public_ip_on_namespace() {
     local public_ip="$1" public_cidr="$2" pveth_n="$3" pveth_h="$4" addr_spec prefix
@@ -2145,7 +2146,7 @@ PYEOF
 ##############################################################################
 # Command: apply-fw-rules
 #
-# Rebuilds the per-network firewall chain CS_EXTNET_FW_<networkId> from
+# Rebuilds the per-network firewall chain CS_EXTNET_FWRULES_<networkId> from
 # scratch using a Base64-encoded JSON payload supplied via --fw-rules.
 #
 # JSON payload structure (base64-decoded):
@@ -2168,24 +2169,32 @@ PYEOF
 #   ]
 # }
 #
-# iptables chain layout inside the namespace
-# ------------------------------------------
-# CS_EXTNET_FWD_<networkId>           (existing "fchain")
-#   └─[pos 1]─> CS_EXTNET_FW_<networkId>  (fw_chain, this command)
-#                 1. -m state RELATED,ESTABLISHED -j ACCEPT     (established bypass)
-#                 2. ingress ACCEPT rules  (-o <veth_n> -d <private_ip> ...)
-#                 3. ingress DROP          (-o <veth_n> -d <private_ip> -m state NEW -j DROP)
-#                 4. egress ACCEPT|DROP    (-i <veth_n> [proto/port/cidr] -j ...)
-#                 5. egress default        (-i <veth_n> [-m state NEW] -j ACCEPT|DROP)
-#                 6. -j RETURN             (pass non-VM traffic to fchain catch-all rules)
+# iptables design (two-part, mirroring the VR FIREWALL_<pubIP> pattern)
+# ----------------------------------------------------------------------
 #
-# Ingress rules: The private IP is resolved from the static-nat state file
-# (written by add-static-nat).  If no mapping is found the ingress rules for
-# that public IP are skipped with a warning.
+# PART 1 – Ingress: mangle table, PREROUTING hook (BEFORE nat DNAT)
+#
+#   Per-public-IP chains CS_EXTNET_FWI_<pubIp> in the mangle table:
+#   -A PREROUTING -d <pubIp>/32 -j CS_EXTNET_FWI_<pubIp>
+#   -A CS_EXTNET_FWI_<pubIp>  [explicit allow rules]  -j RETURN
+#   -A CS_EXTNET_FWI_<pubIp>  -m state --state RELATED,ESTABLISHED  -j RETURN
+#   -A CS_EXTNET_FWI_<pubIp>  -j DROP
+#
+#   Checking in PREROUTING mangle (before DNAT) lets us match directly on the
+#   public destination IP — works for static-NAT, port-forwarding, and LB alike.
+#
+# PART 2 – Egress: filter table, FORWARD hook (CS_EXTNET_FWRULES_<N>)
+#
+#   CS_EXTNET_FWD_<networkId>                    (existing "fchain")
+#     └─[pos 1]─> CS_EXTNET_FWRULES_<networkId>  (fw_chain, egress only)
+#                   1. RELATED,ESTABLISHED  → ACCEPT
+#                   2. explicit egress rules (-i <veth_n> ... -j ACCEPT|DROP)
+#                   3. default egress policy (-i <veth_n> ... -j ACCEPT|DROP)
+#                   4. -j RETURN
 #
 # Default egress policy:
-#   default_egress_allow=true  → ALLOW by default; explicit rules are DROP
-#   default_egress_allow=false → DENY  by default; explicit rules are ACCEPT
+#   default_egress_allow=true  → ALLOW by default; explicit egress rules are DROP
+#   default_egress_allow=false → DENY  by default; explicit egress rules are ACCEPT
 ##############################################################################
 
 cmd_apply_fw_rules() {
@@ -2197,7 +2206,7 @@ cmd_apply_fw_rules() {
     local veth_n fchain fw_chain
     veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
     fchain=$(filter_chain "${NETWORK_ID}")
-    fw_chain="${CHAIN_PREFIX}_FW_${NETWORK_ID}"
+    fw_chain=$(firewall_chain "${NETWORK_ID}")
 
     # ---- 1. Remove existing jump from fchain to fw_chain (idempotent) ----
     ip netns exec "${NAMESPACE}" iptables -t filter \
@@ -2212,22 +2221,36 @@ cmd_apply_fw_rules() {
 
     # ---- 4. Build iptables rules via Python ----
     python3 - "${NAMESPACE}" "${FW_RULES_JSON:-}" "${veth_n}" \
-              "${fw_chain}" "${STATE_DIR}/${NETWORK_ID}" << 'PYEOF'
-import base64, json, os, subprocess, sys
+              "${fw_chain}" << 'PYEOF'
+import base64, json, re, subprocess, sys
 
 namespace = sys.argv[1]
 rules_b64 = sys.argv[2]
 veth_n    = sys.argv[3]
-fw_chain  = sys.argv[4]
-state_dir = sys.argv[5]
+fw_chain  = sys.argv[4]   # filter table egress chain (CS_EXTNET_FWRULES_<N>)
 
-def ipt(*args):
-    cmd = ['ip', 'netns', 'exec', namespace, 'iptables', '-t', 'filter'] + list(args)
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        print(f"iptables: {result.stderr.decode().strip()}", file=sys.stderr)
+# Prefix for per-public-IP ingress chains in the mangle table.
+# e.g. CS_EXTNET_FWI_10.0.56.20
+FW_INGRESS_PREFIX = 'CS_EXTNET_FWI_'
 
+def _run(table, *args):
+    cmd = ['ip', 'netns', 'exec', namespace, 'iptables', '-t', table] + list(args)
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        print(f"iptables ({table}): {r.stderr.decode().strip()}", file=sys.stderr)
+    return r
+
+def iptf(*args):
+    """iptables filter table."""
+    _run('filter', *args)
+
+def iptm(*args):
+    """iptables mangle table."""
+    _run('mangle', *args)
+
+# ---------------------------------------------------------------------------
 # Decode payload
+# ---------------------------------------------------------------------------
 if rules_b64:
     try:
         data = json.loads(base64.b64decode(rules_b64).decode('utf-8'))
@@ -2243,70 +2266,18 @@ rules = data.get('rules', [])
 ingress_rules = [r for r in rules if r.get('type') == 'ingress']
 egress_rules  = [r for r in rules if r.get('type') == 'egress']
 
-# ---- Always allow ESTABLISHED/RELATED first (bypass for ongoing connections) ----
-ipt('-A', fw_chain, '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT')
+# ---------------------------------------------------------------------------
+# PART 1 – Egress rules in filter table (CS_EXTNET_FWRULES_<N>)
+#
+# Handles only outbound guest-VM traffic (-i <veth_n>).
+# ---------------------------------------------------------------------------
 
-# ---- Ingress rules (traffic arriving at VMs after DNAT) ----
-# Group rules by public IP, look up the corresponding private IP from the
-# static-nat state file written by add-static-nat.
-pub_ip_rules = {}
-for rule in ingress_rules:
-    pub_ip = rule.get('publicIp', '')
-    if not pub_ip:
-        continue
-    pub_ip_rules.setdefault(pub_ip, []).append(rule)
+# Allow established/related first so ongoing sessions are never interrupted.
+iptf('-A', fw_chain, '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'ACCEPT')
 
-for pub_ip, ip_rules in pub_ip_rules.items():
-    # Resolve private IP from static-nat state
-    private_ip = None
-    snat_file = os.path.join(state_dir, 'static-nat', pub_ip)
-    if os.path.isfile(snat_file):
-        try:
-            private_ip = open(snat_file).read().strip() or None
-        except Exception:
-            pass
-
-    if not private_ip:
-        print(f"apply-fw-rules: no static-nat mapping found for public IP {pub_ip}; "
-              f"skipping {len(ip_rules)} ingress rule(s)", file=sys.stderr)
-        continue
-
-    # Add ACCEPT rules for each explicitly allowed source
-    for rule in ip_rules:
-        protocol   = (rule.get('protocol') or 'all').lower()
-        port_start = rule.get('portStart')
-        port_end   = rule.get('portEnd')
-        icmp_type  = rule.get('icmpType')
-        icmp_code  = rule.get('icmpCode')
-        src_cidrs  = rule.get('sourceCidrs') or ['0.0.0.0/0']
-
-        for src_cidr in src_cidrs:
-            a = ['-A', fw_chain, '-o', veth_n, '-d', private_ip]
-            if protocol not in ('all', ''):
-                a += ['-p', protocol]
-                if protocol in ('tcp', 'udp') and port_start is not None:
-                    port_spec = str(port_start)
-                    if port_end is not None and port_end != port_start:
-                        port_spec = f"{port_start}:{port_end}"
-                    a += ['--dport', port_spec]
-                elif protocol == 'icmp' and icmp_type is not None and icmp_type != -1:
-                    icmp_spec = str(icmp_type)
-                    if icmp_code is not None and icmp_code != -1:
-                        icmp_spec += f"/{icmp_code}"
-                    a += ['--icmp-type', icmp_spec]
-            if src_cidr and src_cidr not in ('0.0.0.0/0', '::/0', ''):
-                a += ['-s', src_cidr]
-            a += ['-j', 'ACCEPT']
-            ipt(*a)
-
-    # Drop any NEW connection to this protected private IP not matched above.
-    # ESTABLISHED/RELATED are already handled at the top of the chain.
-    ipt('-A', fw_chain, '-o', veth_n, '-d', private_ip,
-        '-m', 'state', '--state', 'NEW', '-j', 'DROP')
-
-# ---- Egress rules (traffic originating from guest VMs) ----
-# When default_egress_allow=true  explicit rules are DROP (deny specific traffic).
-# When default_egress_allow=false explicit rules are ACCEPT (allow specific traffic).
+# Explicit egress rules.
+# default_egress_allow=true  → explicit rules are DROP  (deny specific traffic)
+# default_egress_allow=false → explicit rules are ACCEPT (allow specific traffic)
 rule_target = 'DROP' if default_egress_allow else 'ACCEPT'
 
 for rule in egress_rules:
@@ -2338,32 +2309,100 @@ for rule in egress_rules:
         if dest_cidrs:
             for dest_cidr in dest_cidrs:
                 if dest_cidr and dest_cidr not in ('0.0.0.0/0', '::/0', ''):
-                    ipt('-A', fw_chain, *a, '-d', dest_cidr, '-j', rule_target)
+                    iptf('-A', fw_chain, *a, '-d', dest_cidr, '-j', rule_target)
                 else:
-                    ipt('-A', fw_chain, *a, '-j', rule_target)
+                    iptf('-A', fw_chain, *a, '-j', rule_target)
         else:
-            ipt('-A', fw_chain, *a, '-j', rule_target)
+            iptf('-A', fw_chain, *a, '-j', rule_target)
 
-# ---- Default egress policy ----
-# Apply only to NEW connections; ESTABLISHED/RELATED are already accepted at
-# the top of the chain so ongoing sessions are never interrupted by a policy
-# change.
+# Default egress policy (NEW connections only — RELATED/ESTABLISHED already ACCEPTed).
 if not default_egress_allow:
-    # Default DENY: drop all remaining outbound new-connection attempts from VMs.
-    ipt('-A', fw_chain, '-i', veth_n, '-m', 'state', '--state', 'NEW', '-j', 'DROP')
+    iptf('-A', fw_chain, '-i', veth_n, '-m', 'state', '--state', 'NEW', '-j', 'DROP')
 else:
-    # Default ALLOW: accept all remaining outbound traffic from VMs.
-    ipt('-A', fw_chain, '-i', veth_n, '-j', 'ACCEPT')
+    iptf('-A', fw_chain, '-i', veth_n, '-j', 'ACCEPT')
 
-# RETURN for any traffic not matched above so that fchain's catch-all rules
-# (static-NAT, source-NAT, port-forwarding etc.) still apply.
-ipt('-A', fw_chain, '-j', 'RETURN')
+# RETURN so that fchain catch-all rules (static-NAT, PF, etc.) remain active
+# for any non-VM traffic that reaches this chain.
+iptf('-A', fw_chain, '-j', 'RETURN')
+
+# ---------------------------------------------------------------------------
+# PART 2 – Ingress firewall in mangle table, PREROUTING hook (before DNAT)
+#
+# Mirrors the VR's FIREWALL_<pubIp> chains in the mangle table:
+#   -A PREROUTING -d <pubIp>/32 -j CS_EXTNET_FWI_<pubIp>
+#   -A CS_EXTNET_FWI_<pubIp>  [explicit allow rules]  -j RETURN
+#   -A CS_EXTNET_FWI_<pubIp>  -m state --state RELATED,ESTABLISHED -j RETURN
+#   -A CS_EXTNET_FWI_<pubIp>  -j DROP
+#
+# Running in PREROUTING mangle (before nat PREROUTING DNAT) means we match
+# on the real public destination IP directly — no conntrack tricks needed.
+# Works uniformly for static-NAT, port-forwarding, and LB public IPs.
+# ---------------------------------------------------------------------------
+
+# Step 1: discover and flush all existing CS_EXTNET_FWI_* chains (full rebuild).
+ls_out = _run('mangle', '-n', '-L').stdout.decode('utf-8', errors='replace')
+old_chains = re.findall(
+    r'^Chain (' + re.escape(FW_INGRESS_PREFIX) + r'[\d.]+) ',
+    ls_out, re.MULTILINE)
+for old_chain in old_chains:
+    old_ip = old_chain[len(FW_INGRESS_PREFIX):]
+    iptm('-D', 'PREROUTING', '-d', f'{old_ip}/32', '-j', old_chain)
+    iptm('-F', old_chain)
+    iptm('-X', old_chain)
+
+# Step 2: build a per-IP chain for every public IP that has ingress rules.
+pub_ip_rules = {}
+for rule in ingress_rules:
+    pub_ip = rule.get('publicIp', '')
+    if not pub_ip:
+        continue
+    pub_ip_rules.setdefault(pub_ip, []).append(rule)
+
+for pub_ip, ip_rules in pub_ip_rules.items():
+    chain_name = FW_INGRESS_PREFIX + pub_ip   # e.g. CS_EXTNET_FWI_10.0.56.20
+
+    # Create chain and register it in mangle PREROUTING.
+    iptm('-N', chain_name)
+    iptm('-A', 'PREROUTING', '-d', f'{pub_ip}/32', '-j', chain_name)
+
+    # Explicit ALLOW rules — RETURN lets the packet proceed to DNAT and FORWARD.
+    for rule in ip_rules:
+        protocol   = (rule.get('protocol') or 'all').lower()
+        port_start = rule.get('portStart')
+        port_end   = rule.get('portEnd')
+        icmp_type  = rule.get('icmpType')
+        icmp_code  = rule.get('icmpCode')
+        src_cidrs  = rule.get('sourceCidrs') or ['0.0.0.0/0']
+
+        for src_cidr in src_cidrs:
+            a = ['-A', chain_name]
+            if src_cidr and src_cidr not in ('0.0.0.0/0', '::/0', ''):
+                a += ['-s', src_cidr]
+            if protocol not in ('all', ''):
+                a += ['-p', protocol]
+                if protocol in ('tcp', 'udp') and port_start is not None:
+                    port_spec = str(port_start)
+                    if port_end is not None and port_end != port_start:
+                        port_spec = f"{port_start}:{port_end}"
+                    a += ['--dport', port_spec]
+                elif protocol == 'icmp' and icmp_type is not None and icmp_type != -1:
+                    icmp_spec = str(icmp_type)
+                    if icmp_code is not None and icmp_code != -1:
+                        icmp_spec += f"/{icmp_code}"
+                    a += ['--icmp-type', icmp_spec]
+            a += ['-j', 'RETURN']
+            iptm(*a)
+
+    # Always allow packets belonging to an already-established session.
+    iptm('-A', chain_name, '-m', 'state', '--state', 'RELATED,ESTABLISHED', '-j', 'RETURN')
+    # Default: drop new connections not matched by any explicit rule above.
+    iptm('-A', chain_name, '-j', 'DROP')
 
 n_in  = sum(len(v) for v in pub_ip_rules.values())
 n_eg  = len(egress_rules)
 policy = 'ALLOW' if default_egress_allow else 'DENY'
-print(f"apply-fw-rules: chain built — "
-      f"{n_in} ingress rule(s), {n_eg} egress rule(s), default_egress={policy}")
+print(f"apply-fw-rules: built {n_in} ingress rule(s) across {len(pub_ip_rules)} public IP(s), "
+      f"{n_eg} egress rule(s), default_egress={policy}")
 PYEOF
 
     local py_exit=$?
