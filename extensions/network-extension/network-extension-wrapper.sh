@@ -145,7 +145,30 @@ log() {
     echo "[${ts}] $*" >> "${LOG_FILE}" 2>/dev/null || true
 }
 
-# Save the current iptables-save output as ${STATE_DIR}/${NETWORK_ID}/iptables.dump.
+# ---------------------------------------------------------------------------
+# State directory helpers
+#
+# Per-network state (unique to each tier / isolated network):
+#   ${STATE_DIR}/network-<networkId>/
+#
+# VPC-wide shared state (public IPs, namespace, iptables dump):
+#   ${STATE_DIR}/vpc-<vpcId>/          (VPC network)
+#   ${STATE_DIR}/network-<networkId>/  (isolated — same as _net_state_dir)
+#
+# Call these only after parse_args has set NETWORK_ID / VPC_ID.
+# ---------------------------------------------------------------------------
+_net_state_dir() { echo "${STATE_DIR}/network-${NETWORK_ID}"; }
+
+_vpc_state_dir() {
+    if [ -n "${VPC_ID}" ]; then
+        echo "${STATE_DIR}/vpc-${VPC_ID}"
+    else
+        echo "${STATE_DIR}/network-${NETWORK_ID}"
+    fi
+}
+
+# Save the current iptables-save output to the log and to
+# <vpc-or-net-state-dir>/iptables.dump (full namespace snapshot).
 # Call this after any command that modifies iptables rules.
 _dump_iptables() {
     local ns="${1:-${NAMESPACE}}"
@@ -154,11 +177,17 @@ _dump_iptables() {
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     local ipt_out
     ipt_out=$(ip netns exec "${ns}" iptables-save 2>/dev/null || echo "(iptables-save failed)")
-    # Also persist a current snapshot in STATE_DIR for easy inspection.
+    {
+        printf '\n=== iptables-save [%s] ns=%s ===\n' "${ts}" "${ns}"
+        printf '%s\n' "${ipt_out}"
+        printf '=== end iptables-save ===\n\n'
+    } >> "${LOG_FILE}" 2>/dev/null || true
+    # Persist a current snapshot under the VPC/network state dir.
     if [ -n "${NETWORK_ID}" ]; then
-        mkdir -p "${STATE_DIR}/${NETWORK_ID}" 2>/dev/null || true
+        local dump_dir; dump_dir=$(_vpc_state_dir)
+        mkdir -p "${dump_dir}" 2>/dev/null || true
         printf '# iptables-save %s ns=%s\n%s\n' "${ts}" "${ns}" "${ipt_out}" \
-            > "${STATE_DIR}/${NETWORK_ID}/iptables.dump" 2>/dev/null || true
+            > "${dump_dir}/iptables.dump" 2>/dev/null || true
     fi
 }
 
@@ -174,7 +203,14 @@ ensure_dirs() {
 
 acquire_lock() {
     local network_id="$1"
-    local lockfile="${STATE_DIR}/lock-${network_id}"
+    # For VPC networks serialize on the VPC ID so all tiers sharing the same
+    # namespace are protected by a single lock.
+    local lockfile
+    if [ -n "${VPC_ID:-}" ]; then
+        lockfile="${STATE_DIR}/lock-vpc-${VPC_ID}"
+    else
+        lockfile="${STATE_DIR}/lock-network-${network_id}"
+    fi
     mkdir -p "${STATE_DIR}"
     # Record the current lockfile path so release_lock can remove it later
     GLOBAL_LOCKFILE="${lockfile}"
@@ -484,30 +520,45 @@ parse_args() {
     fi
 }
 
-# Load persisted state (shutdown, destroy, IP operations)
+# Load persisted state (shutdown, destroy, IP operations).
+# Reads from the new network-<id>/vpc-<id> layout first; falls back to the
+# legacy ${STATE_DIR}/${NETWORK_ID} path for backward compatibility.
 _load_state() {
-    if [ -z "${VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/vlan" ]; then
-        VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/vlan")
-    fi
-    if [ -z "${CIDR}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/cidr" ]; then
-        CIDR=$(cat "${STATE_DIR}/${NETWORK_ID}/cidr")
-    fi
-    # Restore GATEWAY from the persisted state file so that commands like
-    # restore-network can call _write_dnsmasq_conf without requiring the
-    # caller to re-supply --gateway every time.
-    if [ -z "${GATEWAY}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/gateway" ]; then
-        GATEWAY=$(cat "${STATE_DIR}/${NETWORK_ID}/gateway")
-    fi
-    if [ -z "${EXTENSION_IP}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/extension-ip" ]; then
-        EXTENSION_IP=$(cat "${STATE_DIR}/${NETWORK_ID}/extension-ip")
-    fi
+    local nsd; nsd=$(_net_state_dir)
+    local vsd; vsd=$(_vpc_state_dir)
+    local old="${STATE_DIR}/${NETWORK_ID}"  # legacy path
+
+    _read_sf() {
+        # _read_sf <varname> <filename> [<dir>...]
+        # Sets <varname> from the first dir that contains <filename>.
+        local _var="$1" _file="$2"; shift 2
+        eval "local _cur=\${${_var}}"
+        [ -n "${_cur}" ] && return
+        local _d
+        for _d in "$@"; do
+            if [ -f "${_d}/${_file}" ]; then
+                eval "${_var}=\$(cat '${_d}/${_file}')"
+                return
+            fi
+        done
+    }
+
+    _read_sf VLAN        vlan        "${nsd}" "${old}"
+    _read_sf CIDR        cidr        "${nsd}" "${old}"
+    _read_sf GATEWAY     gateway     "${nsd}" "${old}"
+    _read_sf EXTENSION_IP extension-ip "${nsd}" "${old}"
+
     if [ -z "${NAMESPACE}" ]; then
-        if [ -f "${STATE_DIR}/${NETWORK_ID}/namespace" ]; then
-            NAMESPACE=$(cat "${STATE_DIR}/${NETWORK_ID}/namespace")
-        else
+        # Namespace is VPC-wide: check vpc state dir, then per-net, then legacy.
+        _read_sf NAMESPACE namespace "${vsd}" "${nsd}" "${old}"
+        if [ -z "${NAMESPACE}" ]; then
             local NS_FROM_DETAILS
             NS_FROM_DETAILS=$(_json_get "${EXTENSION_DETAILS}" "namespace")
-            NAMESPACE="${NS_FROM_DETAILS:-cs-net-${NETWORK_ID}}"
+            if [ -n "${VPC_ID}" ]; then
+                NAMESPACE="${NS_FROM_DETAILS:-cs-vpc-${VPC_ID}}"
+            else
+                NAMESPACE="${NS_FROM_DETAILS:-cs-net-${NETWORK_ID}}"
+            fi
         fi
     fi
     # CHOSEN_ID will be set by parse_args; do not read or persist legacy network_or_vpc_id
@@ -623,12 +674,23 @@ cmd_implement() {
         -A "${fchain}" -o "${veth_n}" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     # ---- 7. Persist state ----
-    mkdir -p "${STATE_DIR}/${NETWORK_ID}"
-    echo "${VLAN}"              > "${STATE_DIR}/${NETWORK_ID}/vlan"
-    echo "${GATEWAY}"           > "${STATE_DIR}/${NETWORK_ID}/gateway"
-    echo "${CIDR}"              > "${STATE_DIR}/${NETWORK_ID}/cidr"
-    echo "${NAMESPACE}"         > "${STATE_DIR}/${NETWORK_ID}/namespace"
-    echo "${ext_ip}"            > "${STATE_DIR}/${NETWORK_ID}/extension-ip"
+    # Per-network state → network-<networkId>/
+    local nsd; nsd=$(_net_state_dir)
+    mkdir -p "${nsd}"
+    echo "${VLAN}"    > "${nsd}/vlan"
+    echo "${GATEWAY}" > "${nsd}/gateway"
+    echo "${CIDR}"    > "${nsd}/cidr"
+    echo "${ext_ip}"  > "${nsd}/extension-ip"
+
+    # Namespace + VPC tier tracking → vpc-<vpcId>/ (or network-<networkId>/ for isolated)
+    local vsd; vsd=$(_vpc_state_dir)
+    mkdir -p "${vsd}"
+    echo "${NAMESPACE}" > "${vsd}/namespace"
+    # Register this network as an active tier under the VPC (for destroy tracking)
+    if [ -n "${VPC_ID}" ]; then
+        mkdir -p "${vsd}/tiers"
+        touch "${vsd}/tiers/${NETWORK_ID}"
+    fi
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -637,8 +699,9 @@ cmd_implement() {
 
 ##############################################################################
 # Command: shutdown
-# Flush iptables chains and remove public veth pairs.
-# Keep namespace and guest veth (bridge stays on host for VM traffic).
+# Flush iptables chains and remove this network's veth pairs.
+# For VPC networks the shared namespace is preserved (other tiers still use it).
+# For isolated networks the namespace is also removed.
 ##############################################################################
 
 cmd_shutdown() {
@@ -646,19 +709,19 @@ cmd_shutdown() {
     _load_state
     acquire_lock "${NETWORK_ID}"
 
-    log "shutdown: network=${NETWORK_ID} ns=${NAMESPACE}"
+    log "shutdown: network=${NETWORK_ID} ns=${NAMESPACE} vpc=${VPC_ID}"
 
     local nchain_pr nchain_post fchain
     nchain_pr="${CHAIN_PREFIX}_${NETWORK_ID}_PR"
     nchain_post="${CHAIN_PREFIX}_${NETWORK_ID}_POST"
     fchain=$(filter_chain "${NETWORK_ID}")
 
-    # Remove iptables chain jumps
+    # Remove iptables chain jumps for this network
     ip netns exec "${NAMESPACE}" iptables -t nat    -D PREROUTING  -j "${nchain_pr}"   2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat    -D POSTROUTING -j "${nchain_post}" 2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t filter -D FORWARD     -j "${fchain}"      2>/dev/null || true
 
-    # Flush and delete chains
+    # Flush and delete this network's chains
     ip netns exec "${NAMESPACE}" iptables -t nat    -F "${nchain_pr}"   2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat    -X "${nchain_pr}"   2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t nat    -F "${nchain_post}" 2>/dev/null || true
@@ -666,9 +729,10 @@ cmd_shutdown() {
     ip netns exec "${NAMESPACE}" iptables -t filter -F "${fchain}"      2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t filter -X "${fchain}"      2>/dev/null || true
 
-    # Remove public veth pairs (host-side; namespace-side disappears when IP is removed)
-    if [ -d "${STATE_DIR}/${NETWORK_ID}/ips" ]; then
-        for f in "${STATE_DIR}/${NETWORK_ID}/ips/"*.pvlan; do
+    # Remove public veth pairs tracked under the VPC/net state dir
+    local vsd; vsd=$(_vpc_state_dir)
+    if [ -d "${vsd}/ips" ]; then
+        for f in "${vsd}/ips/"*.pvlan; do
             [ -f "${f}" ] || continue
             local pvlan pveth_h
             pvlan=$(cat "${f}")
@@ -678,16 +742,14 @@ cmd_shutdown() {
         done
     fi
 
-    # Remove guest veth pair (host-side; namespace-side disappears when IP is removed)
+    # Remove this tier's guest veth pair (host-side)
     local veth_h
     veth_h=$(veth_host_name "${VLAN}" "${CHOSEN_ID}")
     ip link del "${veth_h}" 2>/dev/null || true
     log "shutdown: removed guest veth ${veth_h}"
 
-    # Clean transient state
-    rm -rf "${STATE_DIR}/${NETWORK_ID}/ips" \
-           "${STATE_DIR}/${NETWORK_ID}/static-nat" \
-           "${STATE_DIR}/${NETWORK_ID}/port-forward"
+    # Clean transient VPC-wide public IP state
+    rm -rf "${vsd}/ips" "${vsd}/static-nat" "${vsd}/port-forward"
 
     # Stop per-network services (dnsmasq, haproxy, apache2, passwd-server)
     _svc_stop_dnsmasq
@@ -695,8 +757,14 @@ cmd_shutdown() {
     _svc_stop_apache2
     _svc_stop_passwd_server
 
-    # remove netns
-    ip netns del "${NAMESPACE}" || true
+    # For isolated networks delete the namespace; VPC namespaces are shared
+    # across tiers and must only be deleted when the last tier is destroyed.
+    if [ -z "${VPC_ID}" ]; then
+        ip netns del "${NAMESPACE}" 2>/dev/null || true
+        log "shutdown: deleted namespace ${NAMESPACE}"
+    else
+        log "shutdown: preserved shared namespace ${NAMESPACE} (VPC tier)"
+    fi
 
     release_lock
     log "shutdown: done network=${NETWORK_ID}"
@@ -704,7 +772,9 @@ cmd_shutdown() {
 
 ##############################################################################
 # Command: destroy
-# Delete namespace entirely and all state.
+# Delete this network's state entirely.
+# For VPC networks the shared namespace is only deleted when this is the last
+# remaining tier (tracked via vpc-<vpcId>/tiers/<networkId> marker files).
 ##############################################################################
 
 cmd_destroy() {
@@ -712,16 +782,18 @@ cmd_destroy() {
     _load_state
     acquire_lock "${NETWORK_ID}"
 
-    log "destroy: network=${NETWORK_ID} ns=${NAMESPACE}"
+    log "destroy: network=${NETWORK_ID} ns=${NAMESPACE} vpc=${VPC_ID}"
 
-    # Remove guest veth host-side
+    # Remove this tier's guest veth host-side
     local veth_h
     veth_h=$(veth_host_name "${VLAN}" "${CHOSEN_ID}")
     ip link del "${veth_h}" 2>/dev/null || true
 
-    # Remove public veth pairs
-    if [ -d "${STATE_DIR}/${NETWORK_ID}/ips" ]; then
-        for f in "${STATE_DIR}/${NETWORK_ID}/ips/"*.pvlan; do
+    local vsd; vsd=$(_vpc_state_dir)
+
+    # Remove public veth pairs tracked under VPC/net state dir
+    if [ -d "${vsd}/ips" ]; then
+        for f in "${vsd}/ips/"*.pvlan; do
             [ -f "${f}" ] || continue
             local pvlan pveth_h
             pvlan=$(cat "${f}")
@@ -730,19 +802,38 @@ cmd_destroy() {
         done
     fi
 
-    # Delete namespace (removes all interfaces inside it)
-    if ip netns list 2>/dev/null | grep -q "^${NAMESPACE}\b"; then
-        ip netns del "${NAMESPACE}"
-        log "Deleted namespace ${NAMESPACE}"
-    fi
-
     # Stop per-network services before removing state
     _svc_stop_dnsmasq
     _svc_stop_haproxy
     _svc_stop_apache2
     _svc_stop_passwd_server
 
-    rm -rf "${STATE_DIR}/${NETWORK_ID}"
+    # Remove this network's per-tier state directory
+    rm -rf "$(_net_state_dir)"
+
+    # Deregister this tier from VPC tracking
+    if [ -n "${VPC_ID}" ]; then
+        rm -f "${vsd}/tiers/${NETWORK_ID}" 2>/dev/null || true
+        # Only delete the VPC-wide namespace and state when no more tiers remain
+        local remaining_tiers
+        remaining_tiers=$(find "${vsd}/tiers/" -type f 2>/dev/null | wc -l)
+        if [ "${remaining_tiers}" -le 0 ]; then
+            if ip netns list 2>/dev/null | grep -q "^${NAMESPACE}\b"; then
+                ip netns del "${NAMESPACE}"
+                log "destroy: deleted shared namespace ${NAMESPACE} (last VPC tier)"
+            fi
+            rm -rf "${vsd}"
+            log "destroy: removed VPC state dir ${vsd}"
+        else
+            log "destroy: preserved namespace ${NAMESPACE} (${remaining_tiers} tier(s) remaining)"
+        fi
+    else
+        # Isolated network: delete the namespace directly
+        if ip netns list 2>/dev/null | grep -q "^${NAMESPACE}\b"; then
+            ip netns del "${NAMESPACE}"
+            log "destroy: deleted namespace ${NAMESPACE}"
+        fi
+    fi
 
     release_lock
     log "destroy: done network=${NETWORK_ID}"
@@ -828,10 +919,12 @@ cmd_assign_ip() {
     fi
 
     # ---- Persist state ----
-    mkdir -p "${STATE_DIR}/${NETWORK_ID}/ips"
-    echo "${SOURCE_NAT}"  > "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}"
+    # Public IP state is VPC-wide (shared across all tiers in a VPC)
+    local vsd; vsd=$(_vpc_state_dir)
+    mkdir -p "${vsd}/ips"
+    echo "${SOURCE_NAT}"  > "${vsd}/ips/${PUBLIC_IP}"
     # Save public VLAN so add-static-nat / add-port-forward can look it up
-    echo "${PUBLIC_VLAN}" > "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan"
+    echo "${PUBLIC_VLAN}" > "${vsd}/ips/${PUBLIC_IP}.pvlan"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -851,8 +944,9 @@ cmd_release_ip() {
     [ -z "${PUBLIC_IP}" ] && die "Missing --public-ip"
 
     # Restore PUBLIC_VLAN from state if not on CLI
-    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
-        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    local vsd; vsd=$(_vpc_state_dir)
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${vsd}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${vsd}/ips/${PUBLIC_IP}.pvlan")
     fi
     [ -z "${PUBLIC_VLAN}" ] && die "release-ip: cannot determine public VLAN for ${PUBLIC_IP}"
 
@@ -893,7 +987,7 @@ cmd_release_ip() {
 
     # Delete public veth if no other IPs share the same public VLAN + network id
     local remaining
-    remaining=$(find "${STATE_DIR}/${NETWORK_ID}/ips/" -name "*.pvlan" \
+    remaining=$(find "${vsd}/ips/" -name "*.pvlan" \
         ! -name "${PUBLIC_IP}.pvlan" -exec grep -l "^${PUBLIC_VLAN}$" {} \; 2>/dev/null | wc -l)
     if [ "${remaining}" -eq 0 ]; then
         ip link del "${pveth_h}" 2>/dev/null || true
@@ -903,7 +997,7 @@ cmd_release_ip() {
     # Remove default route if no IPs remain
     if [ -n "${PUBLIC_GATEWAY}" ]; then
         local total_ips
-        total_ips=$(find "${STATE_DIR}/${NETWORK_ID}/ips/" -maxdepth 1 \
+        total_ips=$(find "${vsd}/ips/" -maxdepth 1 \
             -not -name "*.pvlan" -type f 2>/dev/null | wc -l)
         if [ "${total_ips}" -le 1 ]; then
             ip netns exec "${NAMESPACE}" ip route del default \
@@ -911,8 +1005,8 @@ cmd_release_ip() {
         fi
     fi
 
-    rm -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}" \
-          "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan"
+    rm -f "${vsd}/ips/${PUBLIC_IP}" \
+          "${vsd}/ips/${PUBLIC_IP}.pvlan"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -933,8 +1027,9 @@ cmd_add_static_nat() {
     [ -z "${PRIVATE_IP}" ] && die "Missing --private-ip"
 
     # Restore PUBLIC_VLAN from state (written by assign-ip)
-    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
-        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    local vsd; vsd=$(_vpc_state_dir)
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${vsd}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${vsd}/ips/${PUBLIC_IP}.pvlan")
     fi
     [ -z "${PUBLIC_VLAN}" ] && die "add-static-nat: cannot determine public VLAN for ${PUBLIC_IP}"
 
@@ -970,8 +1065,8 @@ cmd_add_static_nat() {
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -A "${fchain}" -s "${PRIVATE_IP}" -i "${veth_n}" -j ACCEPT
 
-    mkdir -p "${STATE_DIR}/${NETWORK_ID}/static-nat"
-    echo "${PRIVATE_IP}" > "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}"
+    mkdir -p "${vsd}/static-nat"
+    echo "${PRIVATE_IP}" > "${vsd}/static-nat/${PUBLIC_IP}"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -990,14 +1085,15 @@ cmd_delete_static_nat() {
     log "delete-static-nat: network=${NETWORK_ID} ns=${NAMESPACE} ${PUBLIC_IP}"
     [ -z "${PUBLIC_IP}" ] && die "Missing --public-ip"
 
-    if [ -z "${PRIVATE_IP}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}" ]; then
-        PRIVATE_IP=$(cat "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}")
+    local vsd; vsd=$(_vpc_state_dir)
+    if [ -z "${PRIVATE_IP}" ] && [ -f "${vsd}/static-nat/${PUBLIC_IP}" ]; then
+        PRIVATE_IP=$(cat "${vsd}/static-nat/${PUBLIC_IP}")
     fi
     [ -z "${PRIVATE_IP}" ] && die "Missing --private-ip and no saved state"
 
     # Restore PUBLIC_VLAN from state
-    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
-        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${vsd}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${vsd}/ips/${PUBLIC_IP}.pvlan")
     fi
     [ -z "${PUBLIC_VLAN}" ] && die "delete-static-nat: cannot determine public VLAN for ${PUBLIC_IP}"
 
@@ -1017,7 +1113,7 @@ cmd_delete_static_nat() {
     ip netns exec "${NAMESPACE}" iptables -t filter \
         -D "${fchain}" -s "${PRIVATE_IP}" -i "${veth_n}" -j ACCEPT 2>/dev/null || true
 
-    rm -f "${STATE_DIR}/${NETWORK_ID}/static-nat/${PUBLIC_IP}"
+    rm -f "${vsd}/static-nat/${PUBLIC_IP}"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -1041,8 +1137,9 @@ cmd_add_port_forward() {
     [ -z "${PROTOCOL}" ]     && PROTOCOL="tcp"
 
     # Restore PUBLIC_VLAN from state
-    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan" ]; then
-        PUBLIC_VLAN=$(cat "${STATE_DIR}/${NETWORK_ID}/ips/${PUBLIC_IP}.pvlan")
+    local vsd; vsd=$(_vpc_state_dir)
+    if [ -z "${PUBLIC_VLAN}" ] && [ -f "${vsd}/ips/${PUBLIC_IP}.pvlan" ]; then
+        PUBLIC_VLAN=$(cat "${vsd}/ips/${PUBLIC_IP}.pvlan")
     fi
     [ -z "${PUBLIC_VLAN}" ] && die "add-port-forward: cannot determine public VLAN for ${PUBLIC_IP}"
 
@@ -1079,9 +1176,9 @@ cmd_add_port_forward() {
 
     local safe_port
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
-    mkdir -p "${STATE_DIR}/${NETWORK_ID}/port-forward"
+    mkdir -p "${vsd}/port-forward"
     echo "${PROTOCOL} ${PUBLIC_IP} ${PUBLIC_PORT} ${PRIVATE_IP} ${PRIVATE_PORT}" > \
-        "${STATE_DIR}/${NETWORK_ID}/port-forward/${PROTOCOL}_${PUBLIC_IP}_${safe_port}"
+        "${vsd}/port-forward/${PROTOCOL}_${PUBLIC_IP}_${safe_port}"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -1121,7 +1218,8 @@ cmd_delete_port_forward() {
 
     local safe_port
     safe_port=$(echo "${PUBLIC_PORT}" | tr ':' '-')
-    rm -f "${STATE_DIR}/${NETWORK_ID}/port-forward/${PROTOCOL}_${PUBLIC_IP}_${safe_port}"
+    local vsd; vsd=$(_vpc_state_dir)
+    rm -f "${vsd}/port-forward/${PROTOCOL}_${PUBLIC_IP}_${safe_port}"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -1130,30 +1228,33 @@ cmd_delete_port_forward() {
 
 ##############################################################################
 # Helpers: path accessors  (require NETWORK_ID to be set)
+#
+# Per-network state  → _net_state_dir() = ${STATE_DIR}/network-<networkId>
+# VPC-wide state     → _vpc_state_dir() = ${STATE_DIR}/vpc-<vpcId>  (or same as net for isolated)
 ##############################################################################
 
-_dnsmasq_dir()        { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq"; }
-_dnsmasq_conf()       { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dnsmasq.conf"; }
-_dnsmasq_pid()        { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dnsmasq.pid"; }
-_dnsmasq_hosts()      { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/hosts"; }
-_dnsmasq_dhcp_hosts() { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dhcp-hosts"; }
-_dnsmasq_dhcp_opts()  { echo "${STATE_DIR}/${NETWORK_ID}/dnsmasq/dhcp-opts"; }
+_dnsmasq_dir()        { echo "$(_net_state_dir)/dnsmasq"; }
+_dnsmasq_conf()       { echo "$(_net_state_dir)/dnsmasq/dnsmasq.conf"; }
+_dnsmasq_pid()        { echo "$(_net_state_dir)/dnsmasq/dnsmasq.pid"; }
+_dnsmasq_hosts()      { echo "$(_net_state_dir)/dnsmasq/hosts"; }
+_dnsmasq_dhcp_hosts() { echo "$(_net_state_dir)/dnsmasq/dhcp-hosts"; }
+_dnsmasq_dhcp_opts()  { echo "$(_net_state_dir)/dnsmasq/dhcp-opts"; }
 
-_haproxy_dir()  { echo "${STATE_DIR}/${NETWORK_ID}/haproxy"; }
-_haproxy_conf() { echo "${STATE_DIR}/${NETWORK_ID}/haproxy/haproxy.cfg"; }
-_haproxy_pid()  { echo "${STATE_DIR}/${NETWORK_ID}/haproxy/haproxy.pid"; }
-_haproxy_sock() { echo "${STATE_DIR}/${NETWORK_ID}/haproxy/haproxy.sock"; }
+_haproxy_dir()  { echo "$(_net_state_dir)/haproxy"; }
+_haproxy_conf() { echo "$(_net_state_dir)/haproxy/haproxy.cfg"; }
+_haproxy_pid()  { echo "$(_net_state_dir)/haproxy/haproxy.pid"; }
+_haproxy_sock() { echo "$(_net_state_dir)/haproxy/haproxy.sock"; }
 
-_apache2_dir()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2"; }
-_apache2_conf() { echo "${STATE_DIR}/${NETWORK_ID}/apache2/apache2.conf"; }
-_apache2_pid()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2/apache2.pid"; }
-_metadata_dir() { echo "${STATE_DIR}/${NETWORK_ID}/metadata"; }
-_apache2_cgi()  { echo "${STATE_DIR}/${NETWORK_ID}/apache2/metadata.cgi"; }
+_apache2_dir()  { echo "$(_net_state_dir)/apache2"; }
+_apache2_conf() { echo "$(_net_state_dir)/apache2/apache2.conf"; }
+_apache2_pid()  { echo "$(_net_state_dir)/apache2/apache2.pid"; }
+_metadata_dir() { echo "$(_net_state_dir)/metadata"; }
+_apache2_cgi()  { echo "$(_net_state_dir)/apache2/metadata.cgi"; }
 
 # Password server (VR-compatible, port 8080, DomU_Request protocol)
-_passwd_file()          { echo "${STATE_DIR}/${NETWORK_ID}/passwords"; }
-_passwd_server_pid()    { echo "${STATE_DIR}/${NETWORK_ID}/passwd-server.pid"; }
-_passwd_server_script() { echo "${STATE_DIR}/${NETWORK_ID}/passwd-server.py"; }
+_passwd_file()          { echo "$(_net_state_dir)/passwords"; }
+_passwd_server_pid()    { echo "$(_net_state_dir)/passwd-server.pid"; }
+_passwd_server_script() { echo "$(_net_state_dir)/passwd-server.py"; }
 
 ##############################################################################
 # Helpers: binary detection
@@ -2164,11 +2265,6 @@ PYEOF
     log "save-vm-data: done network=${NETWORK_ID} ip=${VM_IP}"
 }
 
-##############################################################################
-# Command: apply-lb-rules
-# Apply/revoke load balancing rules via haproxy inside the namespace.
-# --lb-rules <json-array>  — array of LB rule objects (see Java side for schema)
-##############################################################################
 
 ##############################################################################
 # Command: apply-fw-rules
@@ -2573,8 +2669,10 @@ cmd_custom_action() {
             ip netns exec "${NAMESPACE}" iptables -t nat    -L -n -v 2>/dev/null || echo "(unavailable)"
             echo "=== FILTER table ==="
             ip netns exec "${NAMESPACE}" iptables -t filter -L -n -v 2>/dev/null || echo "(unavailable)"
-            echo "=== State files ==="
-            ls -la "${STATE_DIR}/${NETWORK_ID}/" 2>/dev/null || echo "(no state)"
+            echo "=== Per-network state ($(_net_state_dir)) ==="
+            ls -la "$(_net_state_dir)/" 2>/dev/null || echo "(no network state)"
+            echo "=== VPC/shared state ($(_vpc_state_dir)) ==="
+            ls -la "$(_vpc_state_dir)/" 2>/dev/null || echo "(no vpc state)"
             ;;
         *)
             local hook="${STATE_DIR}/hooks/custom-action-${ACTION_NAME}.sh"
