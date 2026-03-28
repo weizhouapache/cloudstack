@@ -17,9 +17,9 @@
 # under the License.
 
 ##############################################################################
-# network-extension.sh  (network-extension)
+# network-namespace.sh  (network-namespace)
 #
-# Proxy script for the NetworkExtension CloudStack extension.
+# Proxy script for the network-namespace CloudStack extension.
 # Runs on the CloudStack management server.
 #
 # Two modes of operation:
@@ -38,7 +38,7 @@
 #
 #  2. All other commands  (forwarded to the target host via SSH)
 #     The target host is taken from --network-extension-details["host"].
-#     The remote script (network-extension-wrapper.sh) is called with all
+#     The remote script (network-namespace-wrapper.sh) is called with all
 #     arguments including both --physical-network-extension-details and
 #     --network-extension-details.
 #
@@ -77,8 +77,8 @@ set -euo pipefail
 
 DEFAULT_SSH_PORT=22
 DEFAULT_SSH_USER=root
-DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-extension/network-extension-wrapper.sh
-LOG_FILE=/var/log/cloudstack/management/network-extension.log
+DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-namespace/network-namespace-wrapper.sh
+LOG_FILE=/var/log/cloudstack/management/network-namespace.log
 TMPDIR_BASE=/tmp
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ json_get() {
 # ---------------------------------------------------------------------------
 
 if [ $# -lt 1 ]; then
-    die "Usage: network-extension.sh <command> [arguments...]" 1
+    die "Usage: network-namespace.sh <command> [arguments...]" 1
 fi
 
 COMMAND="$1"
