@@ -17,9 +17,9 @@
 # under the License.
 
 ##############################################################################
-# network-extension.sh  (network-extension)
+# network-namespace.sh  (network-namespace)
 #
-# Proxy script for the NetworkExtension CloudStack extension.
+# Proxy script for the network-namespace CloudStack extension.
 # Runs on the CloudStack management server.
 #
 # Two modes of operation:
@@ -38,7 +38,7 @@
 #
 #  2. All other commands  (forwarded to the target host via SSH)
 #     The target host is taken from --network-extension-details["host"].
-#     The remote script (network-extension-wrapper.sh) is called with all
+#     The remote script (network-namespace-wrapper.sh) is called with all
 #     arguments including both --physical-network-extension-details and
 #     --network-extension-details.
 #
@@ -77,8 +77,8 @@ set -euo pipefail
 
 DEFAULT_SSH_PORT=22
 DEFAULT_SSH_USER=root
-DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-extension-wrapper.sh
-LOG_FILE=/var/log/cloudstack/management/network-extension.log
+DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-namespace/network-namespace-wrapper.sh
+LOG_FILE=/var/log/cloudstack/management/network-namespace.log
 TMPDIR_BASE=/tmp
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,6 @@ log() {
     local ts
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     printf '[%s] %s\n' "${ts}" "$*" >> "${LOG_FILE}" 2>/dev/null || true
-    printf '%s\n' "$*" >&2
 }
 
 die() {
@@ -111,7 +110,7 @@ json_get() {
 # ---------------------------------------------------------------------------
 
 if [ $# -lt 1 ]; then
-    die "Usage: network-extension.sh <command> [arguments...]" 1
+    die "Usage: network-namespace.sh <command> [arguments...]" 1
 fi
 
 COMMAND="$1"
@@ -125,6 +124,7 @@ PHYS_DETAILS="{}"
 EXTENSION_DETAILS="{}"
 NETWORK_ID=""
 CURRENT_DETAILS="{}"
+VPC_ID=""
 FORWARD_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -137,6 +137,10 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --network-id)
             NETWORK_ID="${2:-}"
+            FORWARD_ARGS+=("$1" "$2")
+            shift 2 ;;
+        --vpc-id)
+            VPC_ID="${2:-}"
             FORWARD_ARGS+=("$1" "$2")
             shift 2 ;;
         --current-details)
@@ -206,7 +210,11 @@ ssh_opts() {
     if [ -n "${KEY_TMPFILE}" ]; then
         opts+=(-i "${KEY_TMPFILE}" -o IdentitiesOnly=yes -o BatchMode=yes)
     elif [ -n "${REMOTE_PASS}" ]; then
-        opts+=(-o IdentitiesOnly=yes -o IdentityFile=/dev/null)
+        # When using password-based auth we should not force an IdentityFile of /dev/null
+        # because recent OpenSSH may attempt to parse it and emit libcrypto errors
+        # (seen as: Load key "/dev/null": error in libcrypto). Just rely on sshpass
+        # (SSHPASS) to provide the password if needed.
+        opts+=(-o IdentitiesOnly=yes)
     fi
     printf '%s\n' "${opts[@]}"
 }
@@ -256,7 +264,13 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         die "ensure-network-device: no hosts configured. Set 'hosts' in registerExtension details." 1
     fi
 
-    NAMESPACE="cs-net-${NETWORK_ID}"
+    # Namespace: VPC networks share one namespace per VPC (cs-net-<vpcId>);
+    # standalone isolated networks get their own namespace (cs-net-<networkId>).
+    if [ -n "${VPC_ID}" ]; then
+        NAMESPACE="cs-net-${VPC_ID}"
+    else
+        NAMESPACE="cs-net-${NETWORK_ID}"
+    fi
 
     # Try the previously selected host first (from --current-details or --network-extension-details)
     CURRENT_HOST=$(json_get "${CURRENT_DETAILS}" "host")
@@ -268,7 +282,13 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
             if [ "${h}" = "${CURRENT_HOST}" ]; then
                 if host_reachable "${CURRENT_HOST}"; then
                     log "ensure-network-device: network=${NETWORK_ID} keeping current host=${CURRENT_HOST}"
-                    printf '{"host":"%s","namespace":"%s"}\n' "${CURRENT_HOST}" "${NAMESPACE}"
+                    if [ -n "${VPC_ID}" ]; then
+                        printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
+                            "${CURRENT_HOST}" "${NAMESPACE}" "${VPC_ID}"
+                    else
+                        printf '{"host":"%s","namespace":"%s"}\n' \
+                            "${CURRENT_HOST}" "${NAMESPACE}"
+                    fi
                     exit 0
                 else
                     log "ensure-network-device: current host ${CURRENT_HOST} not reachable — failover"
@@ -283,7 +303,12 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         h="${h// /}"
         if host_reachable "${h}"; then
             log "ensure-network-device: network=${NETWORK_ID} selected host=${h}"
-            printf '{"host":"%s","namespace":"%s"}\n' "${h}" "${NAMESPACE}"
+            if [ -n "${VPC_ID}" ]; then
+                printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
+                    "${h}" "${NAMESPACE}" "${VPC_ID}"
+            else
+                printf '{"host":"%s","namespace":"%s"}\n' "${h}" "${NAMESPACE}"
+            fi
             exit 0
         else
             log "ensure-network-device: host ${h} not reachable, trying next"
