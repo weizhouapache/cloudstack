@@ -34,6 +34,7 @@ import base64
 import json
 import logging
 import os
+import random
 import shutil
 import stat
 import subprocess
@@ -418,6 +419,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.mgmt_deployer     = None
         self._mgmt_script_path = None
         self.kvm_deployer      = None
+        self._ssh_private_key_file = None
 
     def tearDown(self):
         self._safe_teardown()
@@ -482,8 +484,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
                                                 logger=self.logger)
-        self._mgmt_script_path = os.path.join(self.extension_path,
-                                               ENTRY_POINT_FILENAME)
+        # The extension framework executes <extension-name>.sh from extension_path.
+        extension_script = "%s.sh" % os.path.basename(self.extension_path.rstrip('/'))
+        self._mgmt_script_path = os.path.join(self.extension_path, extension_script)
         self.mgmt_deployer.copy_file(entry_point_src, self._mgmt_script_path)
         self.logger.info("network-namespace.sh deployed to mgmt at %s",
                          self._mgmt_script_path)
@@ -535,19 +538,23 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
     # ------------------------------------------------------------------
 
     def _verify_vm_ssh_access(self, ip, port=22, timeout=30, retries=3):
-        """Return True if SSH to *ip*:*port* succeeds using the class keypair.
+        """Return True if SSH to *ip*:*port* succeeds using the active keypair.
 
         The VM is expected to run Ubuntu 22.04 (cloud-init) with username
         ``ubuntu``.  Returns False if no keypair is available or if the
         connection fails.
         """
-        if not self.keypair or not getattr(self.keypair, 'private_key_file', None):
+        key_file = self._ssh_private_key_file
+        if not key_file and self.keypair:
+            key_file = getattr(self.keypair, 'private_key_file', None)
+
+        if not key_file:
             self.logger.warning("No SSH keypair available; returning False")
             return False
         try:
             ssh = SshClient(
                 ip, int(port), "ubuntu", None,
-                keyPairFiles=self.keypair.private_key_file,
+                keyPairFiles=key_file,
                 timeout=timeout,
                 retries=retries,
             )
@@ -656,6 +663,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             {"key": "username", "value": self.kvm_host_configs[0].get('username', 'root')},
             {"key": "password", "value": self.kvm_host_configs[0].get('password', '')},
         ]
+
         self.extension.register(
             self.apiclient,
             self.physical_network.id,
@@ -686,6 +694,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             "supportedservices": _svc,
             "serviceProviderList": _provider_map,
         }
+        if guestiptype == "Shared":
+            # CloudStack requires shared guest offerings to explicitly allow
+            # caller-specified IP ranges.
+            offering_params["specifyIpRanges"] = True
         if guestiptype == "Isolated" and "SourceNat" in _svc:
             offering_params["serviceCapabilityList"] = {
                 "SourceNat": {"SupportedSourceNatTypes": "peraccount"},
@@ -698,11 +710,37 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         return nw_offering, ext_name
 
+    def _create_account_keypair(self, account, name_suffix=""):
+        """Create an SSH keypair scoped to *account* and save private key file."""
+        try:
+            kp_name = "extnet-%s-%s" % (name_suffix or random_gen(), random_gen())
+            kp = SSHKeyPair.create(
+                self.apiclient,
+                name=kp_name,
+                account=account.name,
+                domainid=account.domainid,
+            )
+            self.cleanup.append(SSHKeyPair(kp.__dict__, None))
+
+            pkfile = os.path.join(tempfile.gettempdir(), kp.name)
+            with open(pkfile, "w+") as fh:
+                fh.write(kp.privatekey)
+            os.chmod(pkfile, 0o400)
+
+            self.tmp_files.append(pkfile)
+            kp.private_key_file = pkfile
+            self._ssh_private_key_file = pkfile
+            self.logger.info("Account keypair '%s' written to %s", kp.name, pkfile)
+            return kp
+        except Exception as e:
+            self.logger.warning("Could not create account keypair: %s", e)
+            return None
+
     def _create_account_network_vm(self, nw_offering, name_suffix="",
                                    network_params=None):
         """Create an account, an isolated network, and deploy a cloud-init VM.
 
-        The VM is deployed with the class-level SSH keypair so that SSH
+        The VM is deployed with an account-scoped SSH keypair so that SSH
         access can be tested directly.  Username is ``ubuntu``.
 
         Returns ``(account, network, vm)``.
@@ -750,8 +788,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             templateid=self.template.id,
             networkids=[network.id],
         )
-        if self.keypair:
-            vm_kwargs["keypair"] = self.keypair.name
+        account_keypair = self._create_account_keypair(account, suffix)
+        if account_keypair:
+            vm_kwargs["keypair"] = account_keypair.name
 
         vm = VirtualMachine.create(self.apiclient, vm_cfg, **vm_kwargs)
         self.cleanup.insert(0, vm)
@@ -909,8 +948,17 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         nw_offering, _ext_name = self._setup_extension_nsp_offering(
             "extnet-dhcp", supported_services=svc, guestiptype="Shared")
 
+        # Shared offerings with specifyIpRanges=True require explicit range.
+        third_octet = random.randint(32, 220)
+        shared_params = {
+            "gateway": "172.31.%d.1" % third_octet,
+            "netmask": "255.255.255.0",
+            "startip": "172.31.%d.10" % third_octet,
+            "endip": "172.31.%d.200" % third_octet,
+        }
+
         account, network, vm = self._create_account_network_vm(
-            nw_offering, name_suffix="dhcp")
+            nw_offering, name_suffix="dhcp", network_params=shared_params)
 
         # Verify VM is in Running state — DHCP must have worked
         self.assertEqual(
@@ -952,7 +1000,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
              → assert SSH works (namespace rebuilt, rules reapplied)
         """
         # ---- Setup ----
-        svc = "SourceNat,StaticNat,PortForwarding,Firewall,Lb"
+        svc = "SourceNat,StaticNat,PortForwarding,Firewall,Lb,UserData"
         nw_offering, _ext_name = self._setup_extension_nsp_offering(
             "extnet-iso", supported_services=svc)
         account, network, vm = self._create_account_network_vm(
@@ -1133,12 +1181,12 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         CloudStack for VPC-associated tier networks.
         """
         # ---- Setup: extension + NSP + isolated offering (for reference) ----
-        svc = "SourceNat,StaticNat,PortForwarding,Firewall"
+        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData"
         _nw_offering, ext_name = self._setup_extension_nsp_offering(
             "extnet-vpc", supported_services=svc)
 
         # ---- VPC tier network offering (useVpc=on) ----
-        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Firewall"
+        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData"
         _tier_prov   = {s.strip(): ext_name for s in vpc_tier_svc.split(',')}
         vpc_tier_offering = NetworkOffering.create(self.apiclient, {
             "name":              "ExtNet-VPCTier-%s" % random_gen(),
@@ -1158,7 +1206,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.logger.info("VPC tier offering '%s' enabled", vpc_tier_offering.name)
 
         # ---- VPC offering ----
-        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Firewall"
+        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Lb,UserData"
         _vpc_prov = {s.strip(): ext_name for s in vpc_svc.split(',')}
         vpc_offering = VpcOffering.create(self.apiclient, {
             "name":              "ExtNet-VPC-%s" % random_gen(),
@@ -1179,6 +1227,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             domainid=self.domain.id
         )
         self.cleanup.append(account)
+        account_keypair = self._create_account_keypair(account, suffix)
 
         # ---- VPC ----
         vpc = VPC.create(
@@ -1237,8 +1286,8 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                        serviceofferingid=svc_offering.id,
                        templateid=self.template.id,
                        networkids=[tier1.id])
-        if self.keypair:
-            vm1_kw["keypair"] = self.keypair.name
+        if account_keypair:
+            vm1_kw["keypair"] = account_keypair.name
         vm1 = VirtualMachine.create(self.apiclient, vm1_cfg, **vm1_kw)
         self.cleanup.insert(0, vm1)
         self.logger.info("VM1 deployed in tier 1: %s (%s)", vm1.name, vm1.id)
@@ -1252,13 +1301,13 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                        serviceofferingid=svc_offering.id,
                        templateid=self.template.id,
                        networkids=[tier2.id])
-        if self.keypair:
-            vm2_kw["keypair"] = self.keypair.name
+        if account_keypair:
+            vm2_kw["keypair"] = account_keypair.name
         vm2 = VirtualMachine.create(self.apiclient, vm2_cfg, **vm2_kw)
         self.cleanup.insert(0, vm2)
         self.logger.info("VM2 deployed in tier 2: %s (%s)", vm2.name, vm2.id)
 
-        # ---- Tier 1: PF + FW ----
+        # ---- Tier 1: PF ----
         pf_ip1 = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
@@ -1273,12 +1322,11 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             ipaddressid=pf_ip1.ipaddress.id,
             networkid=tier1.id
         )
-        self._create_firewall_rule_for_ssh(pf_ip1.ipaddress.id)
         tier1_ip = pf_ip1.ipaddress.ipaddress
-        self.logger.info("Tier 1 PF + FW: %s:22 → VM1:22", tier1_ip)
+        self.logger.info("Tier 1 PF: %s:22 → VM1:22", tier1_ip)
 
-        # ---- Tier 2: PF + FW ----
-        pf_ip2 = PublicIPAddress.create(
+        # ---- Tier 2: LB ----
+        lb_ip2 = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
             zoneid=self.zone.id,
@@ -1286,15 +1334,21 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             networkid=tier2.id,
             vpcid=vpc.id
         )
-        pf_rule2 = NATRule.create(
-            self.apiclient, vm2,
-            {"privateport": 22, "publicport": 22, "protocol": "TCP"},
-            ipaddressid=pf_ip2.ipaddress.id,
-            networkid=tier2.id
+        lb_rule2 = LoadBalancerRule.create(
+            self.apiclient,
+            {"name":        "vpc-lb-ssh-%s" % random_gen(),
+             "alg":         "roundrobin",
+             "privateport": 22,
+             "publicport":  22},
+            ipaddressid=lb_ip2.ipaddress.id,
+            accountid=account.name,
+            networkid=tier2.id,
+            domainid=account.domainid
         )
-        self._create_firewall_rule_for_ssh(pf_ip2.ipaddress.id)
-        tier2_ip = pf_ip2.ipaddress.ipaddress
-        self.logger.info("Tier 2 PF + FW: %s:22 → VM2:22", tier2_ip)
+        self.assertIsNotNone(lb_rule2)
+        lb_rule2.assign(self.apiclient, vms=[vm2])
+        tier2_ip = lb_ip2.ipaddress.ipaddress
+        self.logger.info("Tier 2 LB: %s:22 → VM2:22", tier2_ip)
 
         # ---- Verify SSH to both VMs ----
         self._assert_vm_ssh_accessible(
@@ -1304,8 +1358,8 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self._assert_vm_ssh_accessible(
             tier2_ip, 22,
-            "SSH to tier-2 VM (%s) should succeed" % tier2_ip)
-        self.logger.info("Verified: SSH to tier-2 VM works")
+            "SSH to tier-2 VM via LB (%s) should succeed" % tier2_ip)
+        self.logger.info("Verified: SSH to tier-2 VM works via LB")
 
         # ---- VPC restart (cleanup=True) ----
         self.logger.info("Restarting VPC %s (cleanup=True) ...", vpc.id)
@@ -1317,7 +1371,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             "SSH to tier-1 VM must work after VPC restart")
         self._assert_vm_ssh_accessible(
             tier2_ip, 22,
-            "SSH to tier-2 VM must work after VPC restart")
+            "SSH to tier-2 VM via LB must work after VPC restart")
         self.logger.info("Verified: both VMs accessible after VPC restart")
 
         # ---- Delete tier 1 VM + network ----
@@ -1332,12 +1386,13 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         # Tier 2 must remain accessible
         self._assert_vm_ssh_accessible(
             tier2_ip, 22,
-            "SSH to tier-2 VM must still work after tier-1 deleted")
-        self.logger.info("Verified: tier-2 VM still accessible after tier-1 deleted")
+            "SSH to tier-2 VM via LB must still work after tier-1 deleted")
+        self.logger.info("Verified: tier-2 VM still accessible via LB after tier-1 deleted")
 
         # ---- Delete tier 2 VM + network ----
-        pf_rule2.delete(self.apiclient)
-        pf_ip2.delete(self.apiclient)
+        lb_rule2.remove(self.apiclient, vms=[vm2])
+        lb_rule2.delete(self.apiclient)
+        lb_ip2.delete(self.apiclient)
         vm2.delete(self.apiclient, expunge=True)
         self.cleanup = [o for o in self.cleanup if o != vm2]
         tier2.delete(self.apiclient)

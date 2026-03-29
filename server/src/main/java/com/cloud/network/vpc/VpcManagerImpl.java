@@ -84,6 +84,7 @@ import org.apache.cloudstack.api.command.user.vpc.RestartVPCCmd;
 import org.apache.cloudstack.api.command.user.vpc.UpdateVPCCmd;
 import org.apache.cloudstack.context.CallContext;
 import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
+import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
 import org.apache.cloudstack.framework.config.dao.ConfigurationDao;
@@ -323,6 +324,8 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     Site2SiteVpnConnectionDao site2SiteVpnConnectionDao;
     @Inject
     Site2SiteCustomerGatewayDao site2SiteCustomerGatewayDao;
+    @Inject
+    ExtensionHelper extensionHelper;
 
     private final ScheduledExecutorService _executor = Executors.newScheduledThreadPool(1, new NamedThreadFactory("VpcChecker"));
     private List<VpcProvider> vpcElements = null;
@@ -2155,7 +2158,8 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
         // 1) in current release, only vpc provider is supported by Vpc offering
         final List<Provider> providers = _ntwkModel.getNtwkOffDistinctProviders(guestNtwkOff.getId());
         for (final Provider provider : providers) {
-            if (!supportedProviders.contains(provider)) {
+            if (!supportedProviders.contains(provider)
+                    && !extensionHelper.isNetworkExtensionProvider(provider.getName())) {
                 throw new InvalidParameterValueException("Provider of type " + provider.getName() + " is not supported for network offerings that can be used in VPC");
             }
         }
