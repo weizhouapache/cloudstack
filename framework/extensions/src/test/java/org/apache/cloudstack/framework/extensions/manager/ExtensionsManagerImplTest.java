@@ -74,6 +74,7 @@ import org.apache.cloudstack.framework.extensions.api.RunCustomActionCmd;
 import org.apache.cloudstack.framework.extensions.api.UnregisterExtensionCmd;
 import org.apache.cloudstack.framework.extensions.api.UpdateCustomActionCmd;
 import org.apache.cloudstack.framework.extensions.api.UpdateExtensionCmd;
+import org.apache.cloudstack.framework.extensions.api.UpdateRegisteredExtensionCmd;
 import org.apache.cloudstack.framework.extensions.command.CleanupExtensionFilesCommand;
 import org.apache.cloudstack.framework.extensions.command.ExtensionServerActionBaseCommand;
 import org.apache.cloudstack.framework.extensions.command.GetExtensionPathChecksumCommand;
@@ -123,7 +124,9 @@ import com.cloud.network.Network;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
+import com.cloud.network.dao.NetworkVO;
 import com.cloud.network.dao.PhysicalNetworkDao;
+import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.network.element.NetworkElement;
 import org.apache.cloudstack.extension.NetworkCustomActionProvider;
 import com.cloud.org.Cluster;
@@ -1062,6 +1065,63 @@ public class ExtensionsManagerImplTest {
             .thenReturn(null);
         extensionsManager.unregisterExtensionWithCluster(cluster, extensionId);
         verify(extensionResourceMapDao, never()).remove(anyLong());
+    }
+
+    @Test
+    public void unregisterExtensionWithResourceThrowsWhenProviderUsedByExistingNetworks() {
+        UnregisterExtensionCmd cmd = mock(UnregisterExtensionCmd.class);
+        when(cmd.getResourceType()).thenReturn(ExtensionResourceMap.ResourceType.PhysicalNetwork.name());
+        when(cmd.getResourceId()).thenReturn("physnet-uuid");
+        when(cmd.getExtensionId()).thenReturn(1L);
+
+        PhysicalNetworkVO physicalNetwork = mock(PhysicalNetworkVO.class);
+        when(physicalNetwork.getId()).thenReturn(42L);
+        when(physicalNetworkDao.findByUuid("physnet-uuid")).thenReturn(physicalNetwork);
+
+        ExtensionResourceMapVO existing = mock(ExtensionResourceMapVO.class);
+        when(existing.getExtensionId()).thenReturn(1L);
+        when(extensionResourceMapDao.listByResourceIdAndType(42L, ExtensionResourceMap.ResourceType.PhysicalNetwork))
+                .thenReturn(List.of(existing));
+
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extension.getName()).thenReturn("extnet-provider");
+        when(extensionDao.findById(1L)).thenReturn(extension);
+
+        NetworkVO network = mock(NetworkVO.class);
+        when(networkDao.listByPhysicalNetworkAndProvider(42L, "extnet-provider")).thenReturn(List.of(network));
+
+        assertThrows(CloudRuntimeException.class, () -> extensionsManager.unregisterExtensionWithResource(cmd));
+        verify(extensionResourceMapDao, never()).remove(anyLong());
+    }
+
+    @Test
+    public void updateRegisteredExtensionWithResourceUpdatesDetailsForExistingMapping() {
+        UpdateRegisteredExtensionCmd cmd = mock(UpdateRegisteredExtensionCmd.class);
+        when(cmd.getResourceType()).thenReturn(ExtensionResourceMap.ResourceType.PhysicalNetwork.name());
+        when(cmd.getResourceId()).thenReturn("physnet-uuid");
+        when(cmd.getExtensionId()).thenReturn(1L);
+        when(cmd.getDetails()).thenReturn(Map.of("username", "root", "hosts", "10.10.10.10"));
+        when(cmd.isCleanupDetails()).thenReturn(false);
+
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extension.getName()).thenReturn("extnet-provider");
+        when(extensionDao.findById(1L)).thenReturn(extension);
+
+        PhysicalNetworkVO physicalNetwork = mock(PhysicalNetworkVO.class);
+        when(physicalNetwork.getId()).thenReturn(42L);
+        when(physicalNetworkDao.findByUuid("physnet-uuid")).thenReturn(physicalNetwork);
+
+        ExtensionResourceMapVO existing = mock(ExtensionResourceMapVO.class);
+        when(existing.getExtensionId()).thenReturn(1L);
+        when(existing.getId()).thenReturn(100L);
+        when(extensionResourceMapDao.listByResourceIdAndType(42L, ExtensionResourceMap.ResourceType.PhysicalNetwork))
+                .thenReturn(List.of(existing));
+
+        Extension result = extensionsManager.updateRegisteredExtensionWithResource(cmd);
+
+        assertEquals(extension, result);
+        verify(extensionResourceMapDetailsDao, never()).removeDetails(anyLong());
+        verify(extensionResourceMapDetailsDao).saveDetails(any());
     }
 
     @Test

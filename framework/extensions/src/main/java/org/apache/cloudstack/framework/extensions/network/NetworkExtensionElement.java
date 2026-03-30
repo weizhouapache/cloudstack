@@ -57,6 +57,8 @@ import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.PublicIpAddress;
 import com.cloud.network.addr.PublicIp;
 import com.cloud.network.dao.FirewallRulesDao;
+import com.cloud.network.dao.IPAddressDao;
+import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
 import com.cloud.network.element.AggregatedCommandExecutor;
@@ -251,6 +253,8 @@ public class NetworkExtensionElement extends AdapterBase implements
     private ServiceOfferingDao serviceOfferingDao;
     @Inject
     private FirewallRulesDao firewallRulesDao;
+    @Inject
+    private IPAddressDao ipAddressDao;
 
     // ---- Script argument names ----
 
@@ -302,6 +306,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.serviceOfferingDao             = this.serviceOfferingDao;
         copy.accountService                 = this.accountService;
         copy.firewallRulesDao               = this.firewallRulesDao;
+        copy.ipAddressDao                   = this.ipAddressDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -528,9 +533,56 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.addAll(getVpcIdArgs(network));
         boolean result = executeScript(network, "destroy", args.toArray(new String[0]));
         if (result) {
+            cleanupPlaceholderNicIp(network, context);
             networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
         }
         return result;
+    }
+
+    /**
+     * Releases placeholder NIC IPs allocated for DHCP/DNS/UserData extension traffic,
+     * then removes the placeholder NIC record(s) for this network.
+     */
+    protected void cleanupPlaceholderNicIp(Network network, ReservationContext context) {
+        List<NicVO> placeholderNics = nicDao.listPlaceholderNicsByNetworkIdAndVmType(
+                network.getId(), VirtualMachine.Type.DomainRouter);
+        if (placeholderNics == null || placeholderNics.isEmpty()) {
+            return;
+        }
+
+        long userId = accountService.getSystemUser().getId();
+        Account caller = accountService.getSystemAccount();
+        if (context != null && context.getAccount() != null) {
+            caller = context.getAccount();
+        }
+
+        for (NicVO placeholderNic : placeholderNics) {
+            try {
+                String ip = placeholderNic.getIPv4Address();
+                if (ip != null && !ip.isBlank()) {
+                    logger.debug("Cleaning up PlaceHolder IP {} on network {}", ip, network.getId());
+                    IPAddressVO ipAddress = ipAddressDao.findByIpAndSourceNetworkId(network.getId(), ip);
+                    if (ipAddress != null) {
+                        if (Network.GuestType.Shared.equals(network.getGuestType())) {
+                            ipAddressManager.disassociatePublicIpAddress(ipAddress, userId, caller);
+                        } else {
+                            ipAddressManager.markIpAsUnavailable(ipAddress.getId());
+                            ipAddressDao.unassignIpAddress(ipAddress.getId());
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to release placeholder IP for network {} and nic {}: {}",
+                        network.getId(), placeholderNic.getId(), e.getMessage());
+            }
+
+            try {
+                nicDao.remove(placeholderNic.getId());
+            } catch (Exception e) {
+                logger.warn("Failed to remove placeholder nic {} for network {}: {}",
+                        placeholderNic.getId(), network.getId(), e.getMessage());
+            }
+        }
     }
 
     @Override

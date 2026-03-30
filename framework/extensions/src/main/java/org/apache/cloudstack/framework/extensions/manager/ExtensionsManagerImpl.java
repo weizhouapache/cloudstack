@@ -77,6 +77,7 @@ import org.apache.cloudstack.framework.extensions.api.RunCustomActionCmd;
 import org.apache.cloudstack.framework.extensions.api.UnregisterExtensionCmd;
 import org.apache.cloudstack.framework.extensions.api.UpdateCustomActionCmd;
 import org.apache.cloudstack.framework.extensions.api.UpdateExtensionCmd;
+import org.apache.cloudstack.framework.extensions.api.UpdateRegisteredExtensionCmd;
 import org.apache.cloudstack.framework.extensions.command.CleanupExtensionFilesCommand;
 import org.apache.cloudstack.framework.extensions.command.ExtensionRoutingUpdateCommand;
 import org.apache.cloudstack.framework.extensions.command.ExtensionServerActionBaseCommand;
@@ -134,6 +135,7 @@ import com.cloud.network.NetworkModel;
 import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
+import com.cloud.network.dao.NetworkVO;
 import com.cloud.network.dao.PhysicalNetworkServiceProviderDao;
 import com.cloud.network.dao.PhysicalNetworkServiceProviderVO;
 import com.cloud.network.element.NetworkElement;
@@ -961,6 +963,73 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
+    @ActionEvent(eventType = EventTypes.EVENT_EXTENSION_RESOURCE_REGISTER, eventDescription = "updating extension resource")
+    public Extension updateRegisteredExtensionWithResource(UpdateRegisteredExtensionCmd cmd) {
+        final String resourceId = cmd.getResourceId();
+        final Long extensionId = cmd.getExtensionId();
+        final String resourceType = cmd.getResourceType();
+        final Map<String, String> details = cmd.getDetails();
+        final Boolean cleanupDetails = cmd.isCleanupDetails();
+
+        if (!EnumUtils.isValidEnum(ExtensionResourceMap.ResourceType.class, resourceType)) {
+            throw new InvalidParameterValueException(
+                    String.format("Currently only [%s] can be used to update an extension registration",
+                            EnumSet.allOf(ExtensionResourceMap.ResourceType.class)));
+        }
+        ExtensionVO extension = extensionDao.findById(extensionId);
+        if (extension == null) {
+            throw new InvalidParameterValueException("Invalid extension specified");
+        }
+
+        ExtensionResourceMap.ResourceType resType = ExtensionResourceMap.ResourceType.valueOf(resourceType);
+        long resolvedResourceId;
+        if (ExtensionResourceMap.ResourceType.PhysicalNetwork.equals(resType)) {
+            PhysicalNetworkVO physicalNetwork = physicalNetworkDao.findByUuid(resourceId);
+            if (physicalNetwork == null) {
+                try {
+                    physicalNetwork = physicalNetworkDao.findById(Long.parseLong(resourceId));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            if (physicalNetwork == null) {
+                throw new InvalidParameterValueException("Invalid physical network ID specified");
+            }
+            resolvedResourceId = physicalNetwork.getId();
+        } else {
+            ClusterVO clusterVO = clusterDao.findByUuid(resourceId);
+            if (clusterVO == null) {
+                throw new InvalidParameterValueException("Invalid cluster ID specified");
+            }
+            resolvedResourceId = clusterVO.getId();
+        }
+
+        List<ExtensionResourceMapVO> mappings = extensionResourceMapDao.listByResourceIdAndType(resolvedResourceId, resType);
+        ExtensionResourceMapVO targetMapping = null;
+        if (CollectionUtils.isNotEmpty(mappings)) {
+            for (ExtensionResourceMapVO mapping : mappings) {
+                if (mapping.getExtensionId() == extensionId) {
+                    targetMapping = mapping;
+                    break;
+                }
+            }
+        }
+        if (targetMapping == null) {
+            throw new InvalidParameterValueException(String.format(
+                    "Extension '%s' is not registered with resource %s (%s)",
+                    extension.getName(), resourceId, resourceType));
+        }
+
+        if (Boolean.TRUE.equals(cleanupDetails)) {
+            extensionResourceMapDetailsDao.removeDetails(targetMapping.getId());
+        }
+        if (MapUtils.isNotEmpty(details)) {
+            updateExtensionResourceMapDetails(targetMapping.getId(), details);
+        }
+
+        return extensionDao.findById(extensionId);
+    }
+
+    @Override
     @ActionEvent(eventType = EventTypes.EVENT_EXTENSION_RESOURCE_REGISTER, eventDescription = "registering extension resource")
     public ExtensionResourceMap registerExtensionWithCluster(Cluster cluster, Extension extension,
                   Map<String, String> details) {
@@ -1250,11 +1319,22 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         final long physNetId = physicalNetwork.getId();
         for (ExtensionResourceMapVO existing : existingList) {
             if (extensionId == null || existing.getExtensionId() == extensionId) {
+                ExtensionVO ext = extensionDao.findById(existing.getExtensionId());
+                if (ext != null) {
+                    List<NetworkVO> networksUsingProvider = networkDao.listByPhysicalNetworkAndProvider(
+                            physNetId, ext.getName());
+                    if (CollectionUtils.isNotEmpty(networksUsingProvider)) {
+                        throw new CloudRuntimeException(String.format(
+                                "Cannot unregister extension '%s' from physical network %s. "
+                                        + "Provider is used by %d existing network(s)",
+                                ext.getName(), physNetId, networksUsingProvider.size()));
+                    }
+                }
+
                 extensionResourceMapDao.remove(existing.getId());
                 extensionResourceMapDetailsDao.removeDetails(existing.getId());
 
                 // Also remove the auto-created NSP for this extension
-                ExtensionVO ext = extensionDao.findById(existing.getExtensionId());
                 if (ext != null) {
                     PhysicalNetworkServiceProviderVO nsp =
                             physicalNetworkServiceProviderDao.findByServiceProvider(physNetId, ext.getName());
