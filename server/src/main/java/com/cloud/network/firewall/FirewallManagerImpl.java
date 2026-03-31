@@ -599,7 +599,11 @@ public class FirewallManagerImpl extends ManagerBase implements FirewallService,
             String supportedProtocols;
             String supportedTrafficTypes = null;
             if (purpose == FirewallRule.Purpose.Firewall) {
-                supportedTrafficTypes = caps.get(Capability.SupportedTrafficDirection).toLowerCase();
+                String supportedTrafficTypesStr = caps.get(Capability.SupportedTrafficDirection);
+                if (supportedTrafficTypesStr == null) {
+                    throw new CloudRuntimeException("Supported traffic direction capability is not defined for Firewall service");
+                }
+                supportedTrafficTypes = supportedTrafficTypesStr.toLowerCase();
             }
 
             if (purpose == FirewallRule.Purpose.Firewall && trafficType == FirewallRule.TrafficType.Egress) {

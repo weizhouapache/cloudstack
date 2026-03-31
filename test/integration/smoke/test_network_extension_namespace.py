@@ -30,7 +30,6 @@ This module provides:
 Renamed from ``test_network_extension_provider.py``.  The canonical test file
 is ``test_network_extension_namespace.py``.
 """
-import base64
 import json
 import logging
 import os
@@ -97,15 +96,50 @@ ENTRY_POINT_SCRIPT_LOCAL = os.path.join(_SCRIPT_CACHE_DIR, ENTRY_POINT_FILENAME)
 NETWORK_CAPABILITIES_JSON = json.dumps({
     "services": [
         "Dhcp", "Dns", "UserData",
-        "SourceNat", "StaticNat", "PortForwarding", "Firewall", "Lb"
+        "SourceNat", "StaticNat", "PortForwarding", "Firewall", "Lb", "NetworkACL"
     ],
     "capabilities": {
+        "Lb": {
+            "SupportedLBAlgorithms": "roundrobin,leastconn,source",
+            "SupportedLBIsolation": "dedicated",
+            "SupportedProtocols": "tcp,udp,tcp-proxy",
+            "SupportedStickinessMethods": "lbcookie,appsession",
+            "LbSchemes": "Public",
+            "SslTermination": "false",
+            "VmAutoScaling": "false"
+        },
+        "Firewall": {
+            "TrafficStatistics": "per public ip",
+            "SupportedProtocols": "tcp,udp,icmp",
+            "SupportedEgressProtocols": "tcp,udp,icmp,all",
+            "SupportedTrafficDirection": "ingress,egress",
+            "MultipleIps": "true"
+        },
+        "Dns": {
+            "AllowDnsSuffixModification": "true",
+            "ExternalDns": "true"
+        },
+        "Dhcp": {
+            "DhcpAccrossMultipleSubnets": "true"
+        },
+        "Gateway": {
+            "RedundantRouter": "false"
+        },
         "SourceNat": {
             "SupportedSourceNatTypes": "peraccount",
             "RedundantRouter": "false"
         },
-        "Firewall": {
-            "TrafficStatistics": "per public ip"
+        "StaticNat": {
+            "Supported": "true"
+        },
+        "PortForwarding": {
+            "SupportedProtocols": "tcp,udp"
+        },
+        "UserData": {
+            "Supported": "true"
+        },
+        "NetworkACL": {
+            "SupportedProtocols": "tcp,udp,icmp"
         }
     }
 })
@@ -230,10 +264,9 @@ def _ssh_copy_file(host_ip, host_port, username, password, local_path, remote_pa
     """Transfer *local_path* to *remote_path* on *host_ip* via SshClient."""
     ssh = SshClient(host_ip, int(host_port), username, password)
     ssh.execute("mkdir -p '%s'" % os.path.dirname(remote_path))
-    with open(local_path, 'rb') as fh:
-        b64 = base64.b64encode(fh.read()).decode()
-    ssh.execute("echo '%s' | base64 -d > '%s' && chmod 755 '%s'" %
-                (b64, remote_path, remote_path))
+    # Use SFTP upload to avoid very large shell arguments for script content.
+    ssh.scp(local_path, remote_path)
+    ssh.execute("chmod 755 '%s'" % remote_path)
 
 
 # ---------------------------------------------------------------------------
@@ -484,9 +517,8 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
                                                 logger=self.logger)
-        # The extension framework executes <extension-name>.sh from extension_path.
-        extension_script = "%s.sh" % os.path.basename(self.extension_path.rstrip('/'))
-        self._mgmt_script_path = os.path.join(self.extension_path, extension_script)
+        # Extension path is the entrypoint file path; append .sh if omitted.
+        self._mgmt_script_path = (self.extension_path or "").strip().rstrip('/')
         self.mgmt_deployer.copy_file(entry_point_src, self._mgmt_script_path)
         self.logger.info("network-namespace.sh deployed to mgmt at %s",
                          self._mgmt_script_path)
@@ -659,9 +691,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         # Register extension to physical network
         register_details = [
-            {"key": "hosts",    "value": kvm_hosts_csv},
-            {"key": "username", "value": self.kvm_host_configs[0].get('username', 'root')},
-            {"key": "password", "value": self.kvm_host_configs[0].get('password', '')},
+            {"hosts": kvm_hosts_csv},
+            {"username": self.kvm_host_configs[0].get('username', 'root')},
+            {"password": self.kvm_host_configs[0].get('password', '')},
         ]
 
         self.extension.register(
@@ -1000,9 +1032,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
              → assert SSH works (namespace rebuilt, rules reapplied)
         """
         # ---- Setup ----
-        svc = "SourceNat,StaticNat,PortForwarding,Firewall,Lb,UserData"
+        svc = "SourceNat,StaticNat,PortForwarding,Firewall,Lb,UserData,Dhcp,Dns"
         nw_offering, _ext_name = self._setup_extension_nsp_offering(
-            "extnet-iso", supported_services=svc)
+            "extnet-isolated", supported_services=svc)
         account, network, vm = self._create_account_network_vm(
             nw_offering, name_suffix="iso")
 
@@ -1181,12 +1213,12 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         CloudStack for VPC-associated tier networks.
         """
         # ---- Setup: extension + NSP + isolated offering (for reference) ----
-        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData"
+        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
         _nw_offering, ext_name = self._setup_extension_nsp_offering(
             "extnet-vpc", supported_services=svc)
 
         # ---- VPC tier network offering (useVpc=on) ----
-        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData"
+        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
         _tier_prov   = {s.strip(): ext_name for s in vpc_tier_svc.split(',')}
         vpc_tier_offering = NetworkOffering.create(self.apiclient, {
             "name":              "ExtNet-VPCTier-%s" % random_gen(),
