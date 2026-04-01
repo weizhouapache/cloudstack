@@ -91,56 +91,56 @@ _SCRIPT_CACHE_DIR = os.path.join(tempfile.gettempdir(), 'cs-extnet-script-cache'
 WRAPPER_SCRIPT_LOCAL     = os.path.join(_SCRIPT_CACHE_DIR, SCRIPT_FILENAME)
 ENTRY_POINT_SCRIPT_LOCAL = os.path.join(_SCRIPT_CACHE_DIR, ENTRY_POINT_FILENAME)
 
-# Network capabilities JSON — all services this extension supports.
+# Network services — comma-separated list of all services this extension supports.
 # Tests select a subset when creating NetworkOfferings.
-NETWORK_CAPABILITIES_JSON = json.dumps({
-    "services": [
-        "Dhcp", "Dns", "UserData",
-        "SourceNat", "StaticNat", "PortForwarding", "Firewall", "Lb", "NetworkACL"
-    ],
-    "capabilities": {
-        "Lb": {
-            "SupportedLBAlgorithms": "roundrobin,leastconn,source",
-            "SupportedLBIsolation": "dedicated",
-            "SupportedProtocols": "tcp,udp,tcp-proxy",
-            "SupportedStickinessMethods": "lbcookie,appsession",
-            "LbSchemes": "Public",
-            "SslTermination": "false",
-            "VmAutoScaling": "false"
-        },
-        "Firewall": {
-            "TrafficStatistics": "per public ip",
-            "SupportedProtocols": "tcp,udp,icmp",
-            "SupportedEgressProtocols": "tcp,udp,icmp,all",
-            "SupportedTrafficDirection": "ingress,egress",
-            "MultipleIps": "true"
-        },
-        "Dns": {
-            "AllowDnsSuffixModification": "true",
-            "ExternalDns": "true"
-        },
-        "Dhcp": {
-            "DhcpAccrossMultipleSubnets": "true"
-        },
-        "Gateway": {
-            "RedundantRouter": "false"
-        },
-        "SourceNat": {
-            "SupportedSourceNatTypes": "peraccount",
-            "RedundantRouter": "false"
-        },
-        "StaticNat": {
-            "Supported": "true"
-        },
-        "PortForwarding": {
-            "SupportedProtocols": "tcp,udp"
-        },
-        "UserData": {
-            "Supported": "true"
-        },
-        "NetworkACL": {
-            "SupportedProtocols": "tcp,udp,icmp"
-        }
+NETWORK_SERVICES = (
+    "Dhcp,Dns,UserData,"
+    "SourceNat,StaticNat,PortForwarding,Firewall,Lb,NetworkACL"
+)
+
+# Per-service capabilities JSON object (no "services" wrapper).
+NETWORK_SERVICE_CAPABILITIES_JSON = json.dumps({
+    "Lb": {
+        "SupportedLBAlgorithms": "roundrobin,leastconn,source",
+        "SupportedLBIsolation": "dedicated",
+        "SupportedProtocols": "tcp,udp,tcp-proxy",
+        "SupportedStickinessMethods": "lbcookie,appsession",
+        "LbSchemes": "Public",
+        "SslTermination": "false",
+        "VmAutoScaling": "false"
+    },
+    "Firewall": {
+        "TrafficStatistics": "per public ip",
+        "SupportedProtocols": "tcp,udp,icmp",
+        "SupportedEgressProtocols": "tcp,udp,icmp,all",
+        "SupportedTrafficDirection": "ingress,egress",
+        "MultipleIps": "true"
+    },
+    "Dns": {
+        "AllowDnsSuffixModification": "true",
+        "ExternalDns": "true"
+    },
+    "Dhcp": {
+        "DhcpAccrossMultipleSubnets": "true"
+    },
+    "Gateway": {
+        "RedundantRouter": "false"
+    },
+    "SourceNat": {
+        "SupportedSourceNatTypes": "peraccount",
+        "RedundantRouter": "false"
+    },
+    "StaticNat": {
+        "Supported": "true"
+    },
+    "PortForwarding": {
+        "SupportedProtocols": "tcp,udp"
+    },
+    "UserData": {
+        "Supported": "true"
+    },
+    "NetworkACL": {
+        "SupportedProtocols": "tcp,udp,icmp"
     }
 })
 
@@ -351,7 +351,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
     Covers:
       test_01 — NSP state transitions (Disabled/Enabled/Disabled)
-      test_02 — network.capabilities detail stored correctly
+      test_02 — network.services / network.service.capabilities details stored correctly
       test_03 — extension enable/disable and delete restriction
       test_04 — DHCP/DNS/UserData: cloud-init VM on a shared network reaches Running state
       test_05 — full isolated lifecycle: static NAT, PF, LB, restart
@@ -671,7 +671,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             self.apiclient,
             name=ext_name,
             type='NetworkOrchestrator',
-            details=[{"network.capabilities": NETWORK_CAPABILITIES_JSON}]
+            details=[
+                {"network.services": NETWORK_SERVICES},
+                {"network.service.capabilities": NETWORK_SERVICE_CAPABILITIES_JSON},
+            ]
         )
         self.assertIsNotNone(self.extension)
         self.assertEqual('Enabled', self.extension.state)
@@ -861,7 +864,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             self.apiclient,
             name=ext_name,
             type='NetworkOrchestrator',
-            details=[{"network.capabilities": NETWORK_CAPABILITIES_JSON}]
+            details=[
+                {"network.services": NETWORK_SERVICES},
+                {"network.service.capabilities": NETWORK_SERVICE_CAPABILITIES_JSON},
+            ]
         )
         self.extension.register(self.apiclient, pn.id, 'PhysicalNetwork')
 
@@ -886,16 +892,18 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
     def test_02_extension_capabilities_detail(self):
-        """Verify network.capabilities JSON is stored and retrievable via API."""
-        caps_json = json.dumps({
-            "services": ["SourceNat"],
-            "capabilities": {"SourceNat": {"SupportedSourceNatTypes": "peraccount"}}
+        """Verify network.services and network.service.capabilities details are stored and retrievable via API."""
+        svc_caps_json = json.dumps({
+            "SourceNat": {"SupportedSourceNatTypes": "peraccount"}
         })
         ext = Extension.create(
             self.apiclient,
             name="extnet-caps-" + random_gen(),
             type='NetworkOrchestrator',
-            details=[{"network.capabilities": caps_json}]
+            details=[
+                {"network.services": "SourceNat"},
+                {"network.service.capabilities": svc_caps_json},
+            ]
         )
         self.cleanup.append(ext)
         ext_list = Extension.list(self.apiclient, id=ext.id)
@@ -905,9 +913,11 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             d = (ext_obj.details.__dict__
                  if not isinstance(ext_obj.details, dict)
                  else ext_obj.details)
-            self.assertIn("network.capabilities", d)
-            stored = json.loads(d["network.capabilities"])
-            self.assertIn("SourceNat", stored["services"])
+            self.assertIn("network.services", d)
+            self.assertIn("SourceNat", d["network.services"].split(","))
+            self.assertIn("network.service.capabilities", d)
+            stored_caps = json.loads(d["network.service.capabilities"])
+            self.assertIn("SourceNat", stored_caps)
         self.logger.info("test_02 PASSED")
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
@@ -921,7 +931,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             self.apiclient,
             name=ext_name,
             type='NetworkOrchestrator',
-            details=[{"network.capabilities": NETWORK_CAPABILITIES_JSON}]
+            details=[
+                {"network.services": NETWORK_SERVICES},
+                {"network.service.capabilities": NETWORK_SERVICE_CAPABILITIES_JSON},
+            ]
         )
         self.assertIsNotNone(self.extension)
         self.assertEqual('Enabled', self.extension.state,

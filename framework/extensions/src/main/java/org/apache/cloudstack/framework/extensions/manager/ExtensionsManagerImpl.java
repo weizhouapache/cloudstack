@@ -1093,7 +1093,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             }
         }
 
-        // Resolve which services this extension provides from its network.capabilities detail
+        // Resolve which services this extension provides from its network.services detail
         Set<String> services = resolveExtensionServices(extension);
 
         return Transaction.execute((TransactionCallbackWithException<ExtensionResourceMap, CloudRuntimeException>) status -> {
@@ -1135,20 +1135,96 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     /**
      * Resolves the set of network service names declared in the extension's
-     * {@code network.capabilities} detail.  Falls back to the full default set
-     * if no capabilities are declared.
+     * {@code network.services} detail. Falls back to an empty set if not present
      */
     private Set<String> resolveExtensionServices(Extension extension) {
         Map<String, String> extDetails = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
-        if (extDetails != null && extDetails.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
-            Set<String> parsed = parseServicesFromCapabilitiesJson(
-                    extDetails.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY));
-            if (!parsed.isEmpty()) {
-                return parsed;
-            }
+        Set<String> parsed = parseServicesFromDetailKeys(extDetails);
+        if (!parsed.isEmpty()) {
+            return parsed;
         }
         // Default: the full set of services NetworkExtensionElement supports
         return new HashSet<>();
+    }
+
+    /**
+     * Resolves the set of service names from the extension detail map.
+     * From {@code network.services} comma-separated key.
+     */
+    @SuppressWarnings("deprecation")
+    private Set<String> parseServicesFromDetailKeys(Map<String, String> extDetails) {
+        if (extDetails == null) {
+            return Collections.emptySet();
+        }
+        // New format: "network.services" = "SourceNat,StaticNat,..."
+        if (extDetails.containsKey(ExtensionHelper.NETWORK_SERVICES_DETAIL_KEY)) {
+            String value = extDetails.get(ExtensionHelper.NETWORK_SERVICES_DETAIL_KEY);
+            if (StringUtils.isNotBlank(value)) {
+                Set<String> services = new HashSet<>();
+                for (String s : value.split(",")) {
+                    String trimmed = s.trim();
+                    if (!trimmed.isEmpty()) {
+                        services.add(trimmed);
+                    }
+                }
+                if (!services.isEmpty()) {
+                    return services;
+                }
+            }
+        }
+
+        return Collections.emptySet();
+    }
+
+    /**
+     * Builds a full {@code Map<Service, Map<Capability, String>>} from the
+     * extension detail map.  From the split keys
+     * {@code network.services} + {@code network.service.capabilities}.
+     */
+    @SuppressWarnings("deprecation")
+    private Map<Service, Map<Capability, String>> buildCapabilitiesFromDetailKeys(
+            Map<String, String> extDetails) {
+        if (extDetails == null) {
+            return new HashMap<>();
+        }
+        // New split format
+        if (extDetails.containsKey(ExtensionHelper.NETWORK_SERVICES_DETAIL_KEY)) {
+            Set<String> serviceNames = parseServicesFromDetailKeys(extDetails);
+            if (!serviceNames.isEmpty()) {
+                JsonObject capsObj = null;
+                if (extDetails.containsKey(ExtensionHelper.NETWORK_SERVICE_CAPABILITIES_DETAIL_KEY)) {
+                    try {
+                        capsObj = JsonParser.parseString(
+                                extDetails.get(ExtensionHelper.NETWORK_SERVICE_CAPABILITIES_DETAIL_KEY))
+                                .getAsJsonObject();
+                    } catch (Exception e) {
+                        logger.warn("Failed to parse network.service.capabilities JSON: {}", e.getMessage());
+                    }
+                }
+                Map<Service, Map<Capability, String>> result = new HashMap<>();
+                for (String svcName : serviceNames) {
+                    Service service = Service.getService(svcName);
+                    if (service == null) {
+                        logger.warn("Unknown network service '{}' in network.services — skipping", svcName);
+                        continue;
+                    }
+                    Map<Capability, String> capMap = new HashMap<>();
+                    if (capsObj != null && capsObj.has(svcName)) {
+                        JsonObject svcCaps = capsObj.getAsJsonObject(svcName);
+                        for (Map.Entry<String, JsonElement> entry : svcCaps.entrySet()) {
+                            Capability cap = Capability.getCapability(entry.getKey());
+                            if (cap != null) {
+                                capMap.put(cap, entry.getValue().getAsString());
+                            }
+                        }
+                    }
+                    result.put(service, capMap);
+                }
+                return result;
+            }
+        }
+
+        return new HashMap<>();
     }
 
     /**
@@ -1176,23 +1252,18 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
     /**
      * Validates that the comma-separated or JSON-array {@code servicesValue} is a
-     * subset of the services declared in the extension's {@code network.capabilities}
-     * detail.  Throws {@link InvalidParameterValueException} if any service in the
-     * request is not offered by the extension.
+     * subset of the services declared in the extension's {@code network.services}
+     * Throws {@link InvalidParameterValueException} if any service in the request is not
+     * offered by the extension.
      */
     protected void validateNetworkServicesSubset(Extension extension, String servicesValue) {
         if (StringUtils.isBlank(servicesValue)) {
             return;
         }
-        // Parse the extension's network.capabilities JSON to get the declared services
         Map<String, String> extDetails = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
-        if (extDetails == null || !extDetails.containsKey("network.capabilities")) {
-            // No capabilities declared → accept any services
-            return;
-        }
-        String capsJson = extDetails.get("network.capabilities");
-        Set<String> allowedServices = parseServicesFromCapabilitiesJson(capsJson);
+        Set<String> allowedServices = parseServicesFromDetailKeys(extDetails);
         if (allowedServices.isEmpty()) {
+            // No services declared → accept any
             return;
         }
 
@@ -1206,31 +1277,6 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
                     "The following services are not supported by extension '%s': %s. "
                     + "Supported services are: %s",
                     extension.getName(), invalid, allowedServices));
-        }
-    }
-
-    /**
-     * Parses the {@code services} array from a {@code network.capabilities} JSON string.
-     * Returns an empty set if parsing fails or services are not defined.
-     */
-    private Set<String> parseServicesFromCapabilitiesJson(String json) {
-        if (StringUtils.isBlank(json)) {
-            return Collections.emptySet();
-        }
-        try {
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            JsonArray arr = root.getAsJsonArray("services");
-            if (arr == null) {
-                return Collections.emptySet();
-            }
-            Set<String> services = new HashSet<>();
-            for (JsonElement el : arr) {
-                services.add(el.getAsString());
-            }
-            return services;
-        } catch (Exception e) {
-            logger.warn("Failed to parse network.capabilities JSON: {}", e.getMessage());
-            return Collections.emptySet();
         }
     }
 
@@ -2342,61 +2388,6 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             return new HashMap<>();
         }
         Map<String, String> extDetails = extensionDetailsDao.listDetailsKeyPairs(extension.getId());
-        if (extDetails == null || !extDetails.containsKey(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY)) {
-            return new HashMap<>();
-        }
-        return parseCapabilitiesFromJson(extDetails.get(ExtensionHelper.NETWORK_CAPABILITIES_DETAIL_KEY));
-    }
-
-    /**
-     * Parses a {@code network.capabilities} JSON string into a
-     * {@code Map<Service, Map<Capability, String>>} suitable for
-     * {@link com.cloud.network.element.NetworkElement#getCapabilities()}.
-     *
-     * <p>Expected JSON format:</p>
-     * <pre>
-     * {
-     *   "services": ["SourceNat", "StaticNat", ...],
-     *   "capabilities": {
-     *     "SourceNat": { "SupportedSourceNatTypes": "peraccount", "RedundantRouter": "false" }
-     *   }
-     * }
-     * </pre>
-     */
-    private Map<Service, Map<Capability, String>> parseCapabilitiesFromJson(String json) {
-        Map<Service, Map<Capability, String>> result = new HashMap<>();
-        if (StringUtils.isBlank(json)) {
-            return result;
-        }
-        try {
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            JsonArray servicesArr = root.getAsJsonArray("services");
-            if (servicesArr == null) {
-                return result;
-            }
-            JsonObject capsObj = root.has("capabilities") ? root.getAsJsonObject("capabilities") : null;
-            for (JsonElement el : servicesArr) {
-                String svcName = el.getAsString();
-                Service service = Service.getService(svcName);
-                if (service == null) {
-                    logger.warn("Unknown network service '{}' in extension capabilities JSON — skipping", svcName);
-                    continue;
-                }
-                Map<Capability, String> capMap = new HashMap<>();
-                if (capsObj != null && capsObj.has(svcName)) {
-                    JsonObject svcCaps = capsObj.getAsJsonObject(svcName);
-                    for (Map.Entry<String, JsonElement> entry : svcCaps.entrySet()) {
-                        Capability cap = Capability.getCapability(entry.getKey());
-                        if (cap != null) {
-                            capMap.put(cap, entry.getValue().getAsString());
-                        }
-                    }
-                }
-                result.put(service, capMap);
-            }
-        } catch (Exception e) {
-            logger.warn("Failed to parse network.capabilities JSON: {}", e.getMessage());
-        }
-        return result;
+        return buildCapabilitiesFromDetailKeys(extDetails);
     }
 }

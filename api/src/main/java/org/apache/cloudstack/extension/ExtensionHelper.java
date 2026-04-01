@@ -25,8 +25,19 @@ import com.cloud.network.Network.Service;
 
 public interface ExtensionHelper {
 
-    /** Detail key used to store the JSON network capabilities of a NetworkOrchestrator extension. */
-    String NETWORK_CAPABILITIES_DETAIL_KEY = "network.capabilities";
+    /**
+     * Detail key used to store the comma-separated list of network services provided
+     * by a NetworkOrchestrator extension (e.g. {@code "SourceNat,StaticNat,Firewall"}).
+     */
+    String NETWORK_SERVICES_DETAIL_KEY = "network.services";
+
+    /**
+     * Detail key used to store a JSON object mapping each service name to its
+     * CloudStack {@link com.cloud.network.Network.Capability} key/value pairs.
+     * Example: {@code {"SourceNat":{"SupportedSourceNatTypes":"peraccount"}}}.
+     * Used together with {@link #NETWORK_SERVICES_DETAIL_KEY}.
+     */
+    String NETWORK_SERVICE_CAPABILITIES_DETAIL_KEY = "network.service.capabilities";
 
     Long getExtensionIdForCluster(long clusterId);
     Extension getExtension(long id);
