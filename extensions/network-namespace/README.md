@@ -254,36 +254,49 @@ cmk createExtension \
     name=my-extnet \
     type=NetworkOrchestrator \
     path=network-namespace \
-    "details[0].key=network.capabilities" \
-    "details[0].value={\"services\":[\"SourceNat\",\"StaticNat\",\"PortForwarding\",\"Firewall\",\"Gateway\"],\"capabilities\":{\"SourceNat\":{\"SupportedSourceNatTypes\":\"peraccount\",\"RedundantRouter\":\"false\"},\"Firewall\":{\"TrafficStatistics\":\"per public ip\"}}}"
+    "details[0].key=network.services" \
+    "details[0].value=SourceNat,StaticNat,PortForwarding,Firewall,Gateway" \
+    "details[1].key=network.service.capabilities" \
+    "details[1].value={\"SourceNat\":{\"SupportedSourceNatTypes\":\"peraccount\",\"RedundantRouter\":\"false\"},\"Firewall\":{\"TrafficStatistics\":\"per public ip\"}}"
 ```
 
-The `network.capabilities` detail declares which services this extension provides
-and their CloudStack capability values.  These are consulted when listing network
-service providers and when validating network offerings.
+The two details declare which services this extension provides and their
+CloudStack capability values.  These are consulted when listing network service
+providers and when validating network offerings.
 
-**`network.capabilities` JSON format:**
+**`network.services`** — comma-separated list of service names:
+```
+SourceNat,StaticNat,PortForwarding,Firewall,Gateway
+```
+Valid service names include: `Vpn`, `Dhcp`, `Dns`, `SourceNat`,
+`PortForwarding`, `Lb`, `UserData`, `StaticNat`, `NetworkACL`, `Firewall`,
+`Gateway`, `SecurityGroup`.
+
+**`network.service.capabilities`** — JSON object mapping each service to its
+CloudStack `Capability` key/value pairs:
 ```json
 {
-  "services": ["SourceNat", "StaticNat", "PortForwarding", "Firewall", "Gateway"],
-  "capabilities": {
-    "SourceNat": {
-      "SupportedSourceNatTypes": "peraccount",
-      "RedundantRouter": "false"
-    },
-    "Firewall": {
-      "TrafficStatistics": "per public ip"
-    }
+  "SourceNat": {
+    "SupportedSourceNatTypes": "peraccount",
+    "RedundantRouter": "false"
+  },
+  "Firewall": {
+    "TrafficStatistics": "per public ip"
   }
 }
 ```
 
-Services not listed in `capabilities` (e.g. `StaticNat`, `PortForwarding`,
+Services listed in `network.services` that have no entry in
+`network.service.capabilities` (e.g. `StaticNat`, `PortForwarding`,
 `Gateway`) are still offered — CloudStack treats missing capability values as
 "no constraint" and accepts any value when creating the network offering.
 
-If you omit the `network.capabilities` detail entirely, the extension defaults
-to all five services with `SourceNat.SupportedSourceNatTypes=peraccount`.
+If you omit both details entirely, the extension defaults to an empty set of
+services and no capabilities.
+
+> **Backward compatibility:** the old combined `network.capabilities` JSON
+> key (with a `"services"` array and `"capabilities"` object in one blob) is
+> still accepted but deprecated.  Prefer the split keys above.
 
 Verify the extension was created and its state is `Enabled`:
 ```bash
