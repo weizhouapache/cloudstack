@@ -729,11 +729,21 @@ cmd_shutdown() {
     ip netns exec "${NAMESPACE}" iptables -t filter -F "${fchain}"      2>/dev/null || true
     ip netns exec "${NAMESPACE}" iptables -t filter -X "${fchain}"      2>/dev/null || true
 
-    # Remove public veth pairs tracked under the VPC/net state dir
+    # Remove public veth pairs owned by THIS tier only (guarded by .tier file).
+    # IPs owned by other tiers are left untouched so those tiers keep working.
+    # Backward compat: if no .tier file exists assume the IP belongs here.
     local vsd; vsd=$(_vpc_state_dir)
     if [ -d "${vsd}/ips" ]; then
         for f in "${vsd}/ips/"*.pvlan; do
             [ -f "${f}" ] || continue
+            local tier_f; tier_f="${f%.pvlan}.tier"
+            if [ -f "${tier_f}" ]; then
+                local owner_tier; owner_tier=$(cat "${tier_f}" 2>/dev/null || true)
+                if [ -n "${owner_tier}" ] && [ "${owner_tier}" != "${NETWORK_ID}" ]; then
+                    log "shutdown: skipping veth for $(basename "${f%.pvlan}") (owned by tier ${owner_tier})"
+                    continue
+                fi
+            fi
             local pvlan pveth_h
             pvlan=$(cat "${f}")
             pveth_h=$(pub_veth_host_name "${pvlan}" "${CHOSEN_ID}")
@@ -748,8 +758,16 @@ cmd_shutdown() {
     ip link del "${veth_h}" 2>/dev/null || true
     log "shutdown: removed guest veth ${veth_h}"
 
-    # Clean transient VPC-wide public IP state
-    rm -rf "${vsd}/ips" "${vsd}/static-nat" "${vsd}/port-forward"
+    # Clean transient public IP state.
+    # For isolated networks the state dir is per-network, so wipe it entirely.
+    # For VPC networks the ips/ dir is shared across all tiers; only remove the
+    # per-tier rule directories so other tiers are not affected.
+    if [ -z "${VPC_ID}" ]; then
+        rm -rf "${vsd}/ips" "${vsd}/static-nat" "${vsd}/port-forward"
+    else
+        rm -rf "${STATE_DIR}/network-${NETWORK_ID}/static-nat" \
+               "${STATE_DIR}/network-${NETWORK_ID}/port-forward" 2>/dev/null || true
+    fi
 
     # Stop per-network services (dnsmasq, haproxy, apache2, passwd-server)
     _svc_stop_dnsmasq
@@ -906,6 +924,16 @@ cmd_assign_ip() {
     # ---- Host route for incoming traffic ----
     ip route show | grep -q "^${PUBLIC_IP}" || \
         ip route add "${PUBLIC_IP}/32" dev "${pveth_h}" 2>/dev/null || true
+
+    # ---- Gratuitous ARP to flush upstream gateway's ARP cache ----
+    # After a network restart the veth is recreated with a new MAC address.
+    # Without a gratuitous ARP the upstream gateway retains the stale ARP entry
+    # for the old MAC and packets cannot reach the new veth.
+    if command -v arping >/dev/null 2>&1; then
+        ip netns exec "${NAMESPACE}" arping -c 3 -U -I "${pveth_n}" "${PUBLIC_IP}" \
+            >/dev/null 2>&1 || true
+        log "assign-ip: sent gratuitous ARP for ${PUBLIC_IP} on ${pveth_n}"
+    fi
 
     # ---- Default route inside namespace toward upstream gateway ----
     if [ -n "${PUBLIC_GATEWAY}" ]; then
