@@ -47,6 +47,7 @@ from marvin.cloudstackAPI import (listPhysicalNetworks,
                                   updateNetworkServiceProvider,
                                   deleteNetworkServiceProvider,
                                   createFirewallRule,
+                                  deleteFirewallRule,
                                   listPublicIpAddresses)
 from marvin.lib.base import (Account,
                              Extension,
@@ -455,7 +456,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self._ssh_private_key_file = None
 
     def tearDown(self):
-        self._safe_teardown()
+        #self._safe_teardown()
         try:
             cleanup_resources(self.apiclient, self.cleanup)
         except Exception as e:
@@ -517,7 +518,6 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
                                                 logger=self.logger)
-        # Extension path is the entrypoint file path; append .sh if omitted.
         self._mgmt_script_path = (self.extension_path or "").strip().rstrip('/')
         self.mgmt_deployer.copy_file(entry_point_src, self._mgmt_script_path)
         self.logger.info("network-namespace.sh deployed to mgmt at %s",
@@ -626,6 +626,18 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.logger.info("FW rule (TCP/22) created: id=%s on ipaddressid=%s",
                          rule.id, ipaddressid)
         return rule.id
+
+    def _delete_firewall_rule(self, fw_rule_id):
+        """Delete a firewall rule by ID (best-effort, warns on failure)."""
+        if not fw_rule_id:
+            return
+        cmd = deleteFirewallRule.deleteFirewallRuleCmd()
+        cmd.id = fw_rule_id
+        try:
+            self.apiclient.deleteFirewallRule(cmd)
+            self.logger.info("FW rule %s deleted", fw_rule_id)
+        except Exception as e:
+            self.logger.warning("Could not delete FW rule %s: %s", fw_rule_id, e)
 
     def _get_source_nat_ip(self, network_id):
         """Return the source NAT public IP object for *network_id*, or None."""
@@ -1053,6 +1065,11 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         # ==============================================================
         # A. Static NAT
+        #
+        # StaticNATRule.enable() does NOT auto-create a firewall rule, so we
+        # must create one explicitly.  StaticNATRule.disable() internally
+        # calls revokeFirewallRulesForIp(), which cascade-deletes our rule,
+        # so no explicit _delete_firewall_rule() is needed afterwards.
         # ==============================================================
         self.logger.info("--- Sub-test A: Static NAT ---")
         snat_ip_obj = PublicIPAddress.create(
@@ -1070,13 +1087,15 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                              virtualmachineid=vm.id,
                              networkid=network.id)
         self.logger.info("Static NAT enabled on %s", snat_ip)
-
+        # Explicit FW rule required — static NAT does not auto-create one
         self._create_firewall_rule_for_ssh(snat_ip_id)
+
         self._assert_vm_ssh_accessible(
             snat_ip, 22,
             "SSH via static NAT %s:22 should succeed" % snat_ip)
         self.logger.info("Verified: SSH works via static NAT %s", snat_ip)
 
+        # disable() cascades revokeFirewallRulesForIp() — deletes the FW rule
         StaticNATRule.disable(self.apiclient, ipaddressid=snat_ip_id)
         self.logger.info("Static NAT disabled on %s", snat_ip)
         self._assert_vm_ssh_not_accessible(
@@ -1087,6 +1106,12 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         # ==============================================================
         # B. Port forwarding
+        #
+        # NATRule.create() passes openFirewall=True (default for non-VPC),
+        # so CloudStack automatically creates a TCP/22 FW rule with
+        # relatedRuleId=pf_rule.id.  pf_rule.delete() cascade-removes it.
+        # Do NOT call _create_firewall_rule_for_ssh() — that would conflict
+        # with the auto-created rule.
         # ==============================================================
         self.logger.info("--- Sub-test B: Port forwarding ---")
         pf_ip_obj = PublicIPAddress.create(
@@ -1106,14 +1131,15 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             networkid=network.id
         )
         self.assertIsNotNone(pf_rule)
-        self.logger.info("PF rule created: %s:22 → VM:22", pf_ip)
+        self.logger.info("PF rule created: %s:22 → VM:22 (FW rule auto-created)",
+                         pf_ip)
 
-        self._create_firewall_rule_for_ssh(pf_ip_id)
         self._assert_vm_ssh_accessible(
             pf_ip, 22,
             "SSH via PF %s:22 should succeed" % pf_ip)
         self.logger.info("Verified: SSH works via port forwarding %s", pf_ip)
 
+        # delete() cascades revokeRelatedFirewallRule() — removes auto FW rule
         pf_rule.delete(self.apiclient)
         self.logger.info("PF rule deleted on %s", pf_ip)
         self._assert_vm_ssh_not_accessible(
@@ -1124,6 +1150,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         # ==============================================================
         # C. Load balancer (haproxy)
+        #
+        # LoadBalancerRule.create() also uses openFirewall=True by default,
+        # auto-creating a TCP/22 FW rule.  lb_rule.delete() cascades it.
         # ==============================================================
         self.logger.info("--- Sub-test C: Load balancer ---")
         lb_ip_obj = PublicIPAddress.create(
@@ -1149,9 +1178,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         )
         self.assertIsNotNone(lb_rule)
         lb_rule.assign(self.apiclient, vms=[vm])
-        self.logger.info("LB rule created, VM assigned: %s:22", lb_ip)
+        self.logger.info("LB rule created, VM assigned: %s:22 (FW rule auto-created)",
+                         lb_ip)
 
-        self._create_firewall_rule_for_ssh(lb_ip_id)
         self._assert_vm_ssh_accessible(
             lb_ip, 22,
             "SSH via LB %s:22 should succeed (haproxy required on KVM hosts)"
@@ -1165,6 +1194,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         # ==============================================================
         # D. Network restart (cleanup=True)
+        #
+        # NATRule.create() auto-creates the TCP/22 FW rule.
+        # After network restart both the PF rule and the FW rule must be
+        # re-applied by the extension, so SSH should work again.
         # ==============================================================
         self.logger.info("--- Sub-test D: Network restart ---")
         rst_ip_obj = PublicIPAddress.create(
@@ -1183,7 +1216,6 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             ipaddressid=rst_ip_id,
             networkid=network.id
         )
-        self._create_firewall_rule_for_ssh(rst_ip_id)
         self._assert_vm_ssh_accessible(
             rst_ip, 22,
             "SSH via %s:22 should work before restart" % rst_ip)
@@ -1251,7 +1283,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.logger.info("VPC tier offering '%s' enabled", vpc_tier_offering.name)
 
         # ---- VPC offering ----
-        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Lb,UserData"
+        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
         _vpc_prov = {s.strip(): ext_name for s in vpc_svc.split(',')}
         vpc_offering = VpcOffering.create(self.apiclient, {
             "name":              "ExtNet-VPC-%s" % random_gen(),
@@ -1428,7 +1460,8 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.cleanup = [o for o in self.cleanup if o != tier1]
         self.logger.info("Tier 1 VM + network deleted")
 
-        # Tier 2 must remain accessible
+        # Tier 2 must remain accessible — cmd_destroy() on tier-1 must not
+        # delete tier-2's public veth (fixed via .tier ownership tracking).
         self._assert_vm_ssh_accessible(
             tier2_ip, 22,
             "SSH to tier-2 VM via LB must still work after tier-1 deleted")
