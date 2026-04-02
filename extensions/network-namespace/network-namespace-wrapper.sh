@@ -791,14 +791,25 @@ cmd_destroy() {
 
     local vsd; vsd=$(_vpc_state_dir)
 
-    # Remove public veth pairs tracked under VPC/net state dir
+    # Remove public veth pairs that belong to THIS tier (guarded by .tier file).
+    # IPs owned by other tiers are left untouched so those tiers keep working.
+    # Backward compat: if no .tier file exists assume the IP belongs here.
     if [ -d "${vsd}/ips" ]; then
         for f in "${vsd}/ips/"*.pvlan; do
             [ -f "${f}" ] || continue
+            local tier_f; tier_f="${f%.pvlan}.tier"
+            if [ -f "${tier_f}" ]; then
+                local owner_tier; owner_tier=$(cat "${tier_f}" 2>/dev/null || true)
+                if [ -n "${owner_tier}" ] && [ "${owner_tier}" != "${NETWORK_ID}" ]; then
+                    log "destroy: skipping veth for $(basename "${f%.pvlan}") (owned by tier ${owner_tier})"
+                    continue
+                fi
+            fi
             local pvlan pveth_h
             pvlan=$(cat "${f}")
             pveth_h=$(pub_veth_host_name "${pvlan}" "${CHOSEN_ID}")
             ip link del "${pveth_h}" 2>/dev/null || true
+            rm -f "${f}" "${f%.pvlan}" "${tier_f}" 2>/dev/null || true
         done
     fi
 
@@ -925,6 +936,8 @@ cmd_assign_ip() {
     echo "${SOURCE_NAT}"  > "${vsd}/ips/${PUBLIC_IP}"
     # Save public VLAN so add-static-nat / add-port-forward can look it up
     echo "${PUBLIC_VLAN}" > "${vsd}/ips/${PUBLIC_IP}.pvlan"
+    # Save owning tier (network ID) so cmd_destroy only cleans up its own IPs
+    echo "${NETWORK_ID}"  > "${vsd}/ips/${PUBLIC_IP}.tier"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
@@ -1006,7 +1019,8 @@ cmd_release_ip() {
     fi
 
     rm -f "${vsd}/ips/${PUBLIC_IP}" \
-          "${vsd}/ips/${PUBLIC_IP}.pvlan"
+          "${vsd}/ips/${PUBLIC_IP}.pvlan" \
+          "${vsd}/ips/${PUBLIC_IP}.tier"
 
     _dump_iptables "${NAMESPACE}"
     release_lock
