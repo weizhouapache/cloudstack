@@ -37,6 +37,7 @@ import com.cloud.dc.dao.DataCenterDao;
 import com.cloud.dc.dao.VlanDao;
 import com.cloud.deploy.DeployDestination;
 import com.cloud.exception.ConcurrentOperationException;
+import com.cloud.exception.InsufficientAddressCapacityException;
 import com.cloud.exception.InsufficientCapacityException;
 import com.cloud.exception.ResourceUnavailableException;
 import com.cloud.host.dao.HostDao;
@@ -54,6 +55,7 @@ import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.network.PhysicalNetworkServiceProvider;
 import com.cloud.network.PublicIpAddress;
+import com.cloud.network.addr.PublicIp;
 import com.cloud.network.dao.FirewallRulesDao;
 import com.cloud.network.dao.IPAddressDao;
 import com.cloud.network.dao.IPAddressVO;
@@ -442,6 +444,29 @@ public class NetworkExtensionElement extends AdapterBase implements
 
         if (!result) {
             return false;
+        }
+
+        // Step 3: Configure source NAT if supported.
+        if (canHandle(network, Service.SourceNat)) {
+            try {
+                Account owner = context != null ? context.getAccount() : null;
+                PublicIp sourceNatIp = null;
+                if (owner != null) {
+                    sourceNatIp = ipAddressManager.assignSourceNatIpAddressToGuestNetwork(owner, network);
+                }
+                if (sourceNatIp == null) {
+                    PublicIpAddress existingIp = networkModel.getSourceNatIpAddressForGuestNetwork(owner, network);
+                    if (existingIp != null) {
+                        applyIps(network, List.of(existingIp), Set.of(Service.SourceNat));
+                    }
+                } else {
+                    applyIps(network, List.of(sourceNatIp), Set.of(Service.SourceNat));
+                }
+            } catch (InsufficientAddressCapacityException e) {
+                logger.warn("Could not assign source NAT IP for network {}: {}", network.getId(), e.getMessage());
+            } catch (Exception e) {
+                logger.warn("Failed to configure source NAT IP for network {}: {}", network.getId(), e.getMessage(), e);
+            }
         }
 
         return true;
