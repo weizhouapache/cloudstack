@@ -79,10 +79,17 @@ DEFAULT_SSH_PORT=22
 DEFAULT_SSH_USER=root
 
 # ---------------------------------------------------------------------------
-# The KVM wrapper script is deployed to the **same path** as this entry-point
-# on the management server.  Resolve $0 to an absolute path so that the
-# remote SSH call uses the correct location regardless of how this script was
-# invoked (relative path, symlink, etc.).
+# Resolve this entry-point's absolute path so we can derive both the KVM
+# wrapper path and the log file name from the extension directory name.
+#
+# Layout:
+#   management server:  /usr/share/cloudstack-management/extensions/<name>/<name>.sh
+#   KVM host (wrapper): /etc/cloudstack/extensions/<name>/<name>-wrapper.sh
+#
+# _EXT_DIR_NAME is the basename of the directory containing this script,
+# which equals the extension name assigned by CloudStack (e.g.
+# "extnet-isolated-gk3yys").  Both the wrapper path and the log file are
+# derived from it so that renamed deployments work automatically.
 #
 # Callers may still override the remote path via CS_NET_SCRIPT_PATH:
 #   CS_NET_SCRIPT_PATH=/custom/path/wrapper.sh network-namespace.sh <cmd> ...
@@ -90,13 +97,15 @@ DEFAULT_SSH_USER=root
 _SELF="$(readlink -f "$0" 2>/dev/null \
          || realpath "$0" 2>/dev/null \
          || echo "$0")"
-DEFAULT_SCRIPT_PATH="${_SELF}"
-
-# Derive the log file name from this script's own basename so that a renamed
-# deployment (e.g. "my-extension.sh") writes to its own log file instead of
-# a hardcoded "network-namespace.log".
 _SCRIPT_BASENAME="$(basename "${_SELF}" .sh)"
-LOG_FILE="/var/log/cloudstack/management/${_SCRIPT_BASENAME}.log"
+_EXT_DIR_NAME="$(basename "$(dirname "${_SELF}")")"
+
+# Remote wrapper path on each KVM host.
+DEFAULT_SCRIPT_PATH="/etc/cloudstack/extensions/${_EXT_DIR_NAME}/${_SCRIPT_BASENAME}-wrapper.sh"
+
+# Log file — under /var/log/cloudstack/extensions/ named after the extension.
+LOG_FILE="/var/log/cloudstack/extensions/${_EXT_DIR_NAME}.log"
+mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
 TMPDIR_BASE=/tmp
 
 # ---------------------------------------------------------------------------

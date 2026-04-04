@@ -78,8 +78,20 @@
 
 set -e
 
-LOG_FILE="/var/log/cloudstack/network-namespace.log"
-STATE_DIR="/var/lib/cloudstack/network-namespace"
+# ---------------------------------------------------------------------------
+# Derive log path from this wrapper's own directory name so that each
+# renamed deployment writes to its own log file.
+#   /etc/cloudstack/extensions/<name>/<name>-wrapper.sh
+#   → /var/log/cloudstack/extensions/<name>/<name>.log
+# ---------------------------------------------------------------------------
+_WRAPPER_SELF="$(readlink -f "$0" 2>/dev/null \
+                 || realpath "$0" 2>/dev/null \
+                 || echo "$0")"
+_WRAPPER_EXT_DIR="$(basename "$(dirname "${_WRAPPER_SELF}")")"
+LOG_FILE="/var/log/cloudstack/extensions/${_WRAPPER_EXT_DIR}/${_WRAPPER_EXT_DIR}.log"
+mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+
+STATE_DIR="/var/lib/cloudstack/${_WRAPPER_EXT_DIR}"
 
 # ---------------------------------------------------------------------------
 # JSON helpers (no jq dependency)
