@@ -303,14 +303,19 @@ class MgmtServerDeployer:
 # ---------------------------------------------------------------------------
 
 class KvmHostDeployer:
-    """Copies network-namespace-wrapper.sh to all KVM hosts via SSH."""
+    """Copies the KVM wrapper script to all KVM hosts via SSH.
 
-    DEST_PATH = EXTENSIONS_DIR + '/' + SCRIPT_FILENAME
+    *dest_path* is the absolute path on each KVM host where the wrapper
+    script is installed.  It must be identical to the management-server
+    extension path so that both the entry-point and the wrapper share the
+    same directory and filename on their respective machines.
+    """
 
-    def __init__(self, config_hosts=None, logger=None):
+    def __init__(self, config_hosts=None, logger=None, dest_path=None):
         self.config_hosts    = config_hosts or []
         self.logger          = logger or logging.getLogger('KvmHostDeployer')
         self._deployed_hosts = []
+        self._dest_path      = dest_path
 
     def deploy(self):
         """Deploy wrapper to all configured hosts. Returns list of deployed IPs."""
@@ -325,11 +330,13 @@ class KvmHostDeployer:
             password = h.get('password', '')
             if not ip:
                 continue
-            self.logger.info("Deploying wrapper to KVM host %s", ip)
+            self.logger.info("Deploying wrapper to KVM host %s at %s",
+                             ip, self._dest_path)
             try:
                 _ssh_copy_file(ip, 22, username, password,
-                               wrapper_path, self.DEST_PATH)
-                self.logger.info("Deployed wrapper to %s at %s", ip, self.DEST_PATH)
+                               wrapper_path, self._dest_path)
+                self.logger.info("Deployed wrapper to %s at %s",
+                                 ip, self._dest_path)
                 self._deployed_hosts.append(ip)
             except Exception as e:
                 self.logger.warning("Failed deploying to %s: %s", ip, e)
@@ -513,21 +520,36 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
     # ------------------------------------------------------------------
 
     def _deploy_scripts(self):
-        """Deploy scripts to management server and all KVM hosts."""
-        _, entry_point_src = _ensure_scripts_downloaded()
+        """Deploy scripts to management server and all KVM hosts.
+
+        Both the entry-point (network-namespace.sh) and the KVM wrapper
+        (network-namespace-wrapper.sh) are deployed to the **same path**:
+        ``self.extension_path``.  The management server receives the
+        entry-point script; each KVM host receives the wrapper script — both
+        under the same directory and filename so that the entry-point can call
+        the wrapper via its own ``$0`` path without any hard-coded name.
+        """
+        wrapper_src, entry_point_src = _ensure_scripts_downloaded()
 
         self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
                                                 logger=self.logger)
         self._mgmt_script_path = (self.extension_path or "").strip().rstrip('/')
         self.mgmt_deployer.copy_file(entry_point_src, self._mgmt_script_path)
-        self.logger.info("network-namespace.sh deployed to mgmt at %s",
+        self.logger.info("Entry-point script deployed to mgmt at %s",
                          self._mgmt_script_path)
 
-        self.kvm_deployer = KvmHostDeployer(config_hosts=self.kvm_host_configs,
-                                            logger=self.logger)
+        # Deploy the wrapper to KVM hosts at the SAME path as the management
+        # server entry-point so that both scripts share the same directory and
+        # filename on their respective hosts.
+        self.kvm_deployer = KvmHostDeployer(
+            config_hosts=self.kvm_host_configs,
+            logger=self.logger,
+            dest_path=self._mgmt_script_path,
+        )
         deployed = self.kvm_deployer.deploy()
-        self.logger.info("network-namespace-wrapper.sh deployed to %d host(s): %s",
-                         len(deployed), deployed)
+        self.logger.info(
+            "KVM wrapper deployed to %d host(s) at %s: %s",
+            len(deployed), self._mgmt_script_path, deployed)
 
     def _cleanup_mgmt_script(self):
         if self.mgmt_deployer and self._mgmt_script_path:
@@ -569,7 +591,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
     # SSH helpers (provider-agnostic — no KVM namespace checks)
     # ------------------------------------------------------------------
 
-    def _verify_vm_ssh_access(self, ip, port=22, timeout=30, retries=3):
+    def _verify_vm_ssh_access(self, ip, port=22, timeout=30, retries=10):
         """Return True if SSH to *ip*:*port* succeeds using the active keypair.
 
         The VM is expected to run Ubuntu 22.04 (cloud-init) with username
@@ -658,24 +680,29 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
     def _setup_extension_nsp_offering(self, ext_name_prefix,
                                       supported_services=None,
-                                      guestiptype="Isolated"):
+                                      guestiptype="Isolated",
+                                      for_vpc=False):
         """Create extension, deploy scripts, register to physical network,
-        enable NSP, and create a NetworkOffering.
+        enable NSP, and optionally create a NetworkOffering.
 
-        *supported_services* is a comma-separated list of CloudStack service
-        names.  Defaults to ``"SourceNat,StaticNat,PortForwarding,Firewall"``.
+        *supported_services* is a comma-separated list of CloudStack service names.
 
         *guestiptype* controls the guest IP type for the NetworkOffering:
         ``"Isolated"`` (default) or ``"Shared"``.
+
+        *for_vpc* — when ``True`` the NetworkOffering creation step is skipped.
+        VPC tests create their own VPC tier offering in the test body after this
+        helper returns, so creating a generic isolated offering here would be
+        wasteful and misleading.  ``(None, ext_name)`` is returned in that case.
 
         Sets ``self.physical_network``, ``self.extension``,
         ``self.extension_path``, ``self.provider_id``,
         ``self.kvm_deployer``, ``self.mgmt_deployer``.
 
-        Returns ``(nw_offering, ext_name)``.  Skips when no KVM hosts are
-        available.
+        Returns ``(nw_offering, ext_name)``.  *nw_offering* is ``None`` when
+        *for_vpc* is ``True``.  Skips when no KVM hosts are available.
         """
-        _svc = supported_services or "SourceNat,StaticNat,PortForwarding,Firewall"
+        _svc = supported_services
         self.physical_network = self._get_physical_network()
 
         ext_name = "%s-%s" % (ext_name_prefix, random_gen())
@@ -731,7 +758,14 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                                              ext_name).state)
         self.logger.info("NSP '%s' enabled", ext_name)
 
-        # Create NetworkOffering
+        # Create NetworkOffering — skipped for VPC tests because the caller
+        # creates a VPC tier offering separately after this helper returns.
+        if for_vpc:
+            self.logger.info(
+                "for_vpc=True: skipping isolated NetworkOffering creation "
+                "(VPC tier offering will be created in the test body)")
+            return None, ext_name
+
         _provider_map = {s.strip(): ext_name for s in _svc.split(',')}
         offering_params = {
             "name":              "ExtNet-Offering-%s" % random_gen(),
@@ -1257,13 +1291,13 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         The VPC tier network offering uses ``useVpc=on`` as required by
         CloudStack for VPC-associated tier networks.
         """
-        # ---- Setup: extension + NSP + isolated offering (for reference) ----
+        # ---- Setup: extension + NSP only (no isolated offering for VPC tests) ----
         svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
         _nw_offering, ext_name = self._setup_extension_nsp_offering(
-            "extnet-vpc", supported_services=svc)
+            "extnet-vpc", supported_services=svc, for_vpc=True)
 
         # ---- VPC tier network offering (useVpc=on) ----
-        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
+        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
         _tier_prov   = {s.strip(): ext_name for s in vpc_tier_svc.split(',')}
         vpc_tier_offering = NetworkOffering.create(self.apiclient, {
             "name":              "ExtNet-VPCTier-%s" % random_gen(),
@@ -1283,7 +1317,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.logger.info("VPC tier offering '%s' enabled", vpc_tier_offering.name)
 
         # ---- VPC offering ----
-        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
+        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
         _vpc_prov = {s.strip(): ext_name for s in vpc_svc.split(',')}
         vpc_offering = VpcOffering.create(self.apiclient, {
             "name":              "ExtNet-VPC-%s" % random_gen(),

@@ -77,8 +77,26 @@ set -euo pipefail
 
 DEFAULT_SSH_PORT=22
 DEFAULT_SSH_USER=root
-DEFAULT_SCRIPT_PATH=/etc/cloudstack/extensions/network-namespace/network-namespace-wrapper.sh
-LOG_FILE=/var/log/cloudstack/management/network-namespace.log
+
+# ---------------------------------------------------------------------------
+# The KVM wrapper script is deployed to the **same path** as this entry-point
+# on the management server.  Resolve $0 to an absolute path so that the
+# remote SSH call uses the correct location regardless of how this script was
+# invoked (relative path, symlink, etc.).
+#
+# Callers may still override the remote path via CS_NET_SCRIPT_PATH:
+#   CS_NET_SCRIPT_PATH=/custom/path/wrapper.sh network-namespace.sh <cmd> ...
+# ---------------------------------------------------------------------------
+_SELF="$(readlink -f "$0" 2>/dev/null \
+         || realpath "$0" 2>/dev/null \
+         || echo "$0")"
+DEFAULT_SCRIPT_PATH="${_SELF}"
+
+# Derive the log file name from this script's own basename so that a renamed
+# deployment (e.g. "my-extension.sh") writes to its own log file instead of
+# a hardcoded "network-namespace.log".
+_SCRIPT_BASENAME="$(basename "${_SELF}" .sh)"
+LOG_FILE="/var/log/cloudstack/management/${_SCRIPT_BASENAME}.log"
 TMPDIR_BASE=/tmp
 
 # ---------------------------------------------------------------------------
@@ -264,15 +282,18 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         die "ensure-network-device: no hosts configured. Set 'hosts' in registerExtension details." 1
     fi
 
-    # Namespace: VPC networks share one namespace per VPC (cs-net-<vpcId>);
+    # Namespace names must match those used by the wrapper on the KVM host.
+    # VPC networks share one namespace per VPC (cs-vpc-<vpcId>);
     # standalone isolated networks get their own namespace (cs-net-<networkId>).
     if [ -n "${VPC_ID}" ]; then
-        NAMESPACE="cs-net-${VPC_ID}"
+        NAMESPACE="cs-vpc-${VPC_ID}"
     else
         NAMESPACE="cs-net-${NETWORK_ID}"
     fi
 
-    # Try the previously selected host first (from --current-details or --network-extension-details)
+    # ---- Step 1: honour the previously selected host (sticky assignment) ----
+    # This preserves the host–namespace binding across API calls once a network
+    # has been implemented on a particular KVM host.
     CURRENT_HOST=$(json_get "${CURRENT_DETAILS}" "host")
     [ -z "${CURRENT_HOST}" ] && CURRENT_HOST=$(json_get "${EXTENSION_DETAILS}" "host")
 
@@ -298,24 +319,45 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         done
     fi
 
-    # Select a new reachable host from the list
-    for h in "${HOST_LIST[@]}"; do
-        h="${h// /}"
-        if host_reachable "${h}"; then
-            log "ensure-network-device: network=${NETWORK_ID} selected host=${h}"
-            if [ -n "${VPC_ID}" ]; then
-                printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
-                    "${h}" "${NAMESPACE}" "${VPC_ID}"
-            else
-                printf '{"host":"%s","namespace":"%s"}\n' "${h}" "${NAMESPACE}"
-            fi
-            exit 0
-        else
-            log "ensure-network-device: host ${h} not reachable, trying next"
+    # ---- Step 2: stable hash-based host selection for new / failed-over networks ----
+    #
+    # For VPC networks ALL tiers must land on the same KVM host (they share one
+    # namespace).  Using VPC_ID as the hash key guarantees every tier in a VPC
+    # hashes to the same preferred index even when its own details are not yet
+    # stored.  For isolated networks the NETWORK_ID is used.
+    #
+    # Algorithm: CRC32 of the routing key (via cksum) modulo the host count
+    # gives a stable preferred index.  We probe hosts starting from that index,
+    # wrapping around, until a reachable one is found.  This distributes
+    # different networks evenly across KVM hosts while remaining deterministic.
+    _ROUTE_KEY="${VPC_ID:-${NETWORK_ID}}"
+    _HOST_COUNT="${#HOST_LIST[@]}"
+    _PREFERRED_IDX=$(printf '%s' "${_ROUTE_KEY}" | cksum | awk -v n="${_HOST_COUNT}" '{print ($1 % n)}')
+
+    _SELECTED_HOST=""
+    _PROBE=0
+    while [ "${_PROBE}" -lt "${_HOST_COUNT}" ]; do
+        _IDX=$(( (_PREFERRED_IDX + _PROBE) % _HOST_COUNT ))
+        _H="${HOST_LIST[$_IDX]// /}"
+        if host_reachable "${_H}"; then
+            _SELECTED_HOST="${_H}"
+            log "ensure-network-device: network=${NETWORK_ID} hash-selected host=${_SELECTED_HOST} (key=${_ROUTE_KEY}, idx=${_IDX})"
+            break
         fi
+        log "ensure-network-device: host ${_H} not reachable, trying next"
+        _PROBE=$(( _PROBE + 1 ))
     done
 
-    die "ensure-network-device: no reachable host found in list: ${HOSTS_CSV:-${SINGLE_HOST}}" 1
+    [ -z "${_SELECTED_HOST}" ] && \
+        die "ensure-network-device: no reachable host found in list: ${HOSTS_CSV:-${SINGLE_HOST}}" 1
+
+    if [ -n "${VPC_ID}" ]; then
+        printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
+            "${_SELECTED_HOST}" "${NAMESPACE}" "${VPC_ID}"
+    else
+        printf '{"host":"%s","namespace":"%s"}\n' "${_SELECTED_HOST}" "${NAMESPACE}"
+    fi
+    exit 0
 fi
 
 # ---------------------------------------------------------------------------

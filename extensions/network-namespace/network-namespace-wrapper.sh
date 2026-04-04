@@ -929,10 +929,14 @@ cmd_assign_ip() {
     # After a network restart the veth is recreated with a new MAC address.
     # Without a gratuitous ARP the upstream gateway retains the stale ARP entry
     # for the old MAC and packets cannot reach the new veth.
-    if command -v arping >/dev/null 2>&1; then
-        ip netns exec "${NAMESPACE}" arping -c 3 -U -I "${pveth_n}" "${PUBLIC_IP}" \
+    # Use _find_arping to locate the binary in PATH and common sbin locations.
+    local _arping_bin; _arping_bin=$(_find_arping) || true
+    if [ -n "${_arping_bin}" ]; then
+        ip netns exec "${NAMESPACE}" "${_arping_bin}" -c 3 -U -I "${pveth_n}" "${PUBLIC_IP}" \
             >/dev/null 2>&1 || true
         log "assign-ip: sent gratuitous ARP for ${PUBLIC_IP} on ${pveth_n}"
+    else
+        log "assign-ip: arping not available — skipping gratuitous ARP for ${PUBLIC_IP}"
     fi
 
     # ---- Default route inside namespace toward upstream gateway ----
@@ -1324,6 +1328,19 @@ _apache2_user() {
     echo "nobody"
 }
 
+# Locate the arping binary; checks PATH first, then common sbin paths.
+# Prints the path and returns 0 on success, returns 1 when not found.
+_find_arping() {
+    local bin
+    for bin in arping /usr/bin/arping /usr/sbin/arping /sbin/arping; do
+        if command -v "${bin}" >/dev/null 2>&1 || [ -x "${bin}" ]; then
+            echo "${bin}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 ##############################################################################
 # Helpers: dnsmasq  (DHCP + DNS via the same process)
 ##############################################################################
@@ -1520,8 +1537,6 @@ _svc_stop_haproxy() {
 # Helpers: apache2  (userdata / metadata HTTP service)
 #
 # apache2 runs inside the namespace, listening on <EXTENSION_IP>:80.
-# An iptables DNAT rule inside the namespace redirects requests destined for
-# 169.254.169.254:80 to <EXTENSION_IP>:80 so VMs can use the standard metadata URL.
 # EXTENSION_IP equals the network gateway when SourceNat/Gateway is enabled,
 # or a dedicated placeholder IP otherwise.  Falls back to GATEWAY when absent.
 #
@@ -1648,21 +1663,13 @@ _svc_start_or_reload_apache2() {
         fi
     fi
 
-    # DNAT 169.254.169.254:80 → EXTENSION_IP:80  (idempotent)
-    # Use EXTENSION_IP as the metadata server address; fall back to GATEWAY.
-    local meta_ip; meta_ip="${EXTENSION_IP:-${GATEWAY}}"
-    ip netns exec "${NAMESPACE}" iptables -t nat \
-        -C PREROUTING -d 169.254.169.254/32 -p tcp --dport 80 \
-        -j DNAT --to-destination "${meta_ip}:80" 2>/dev/null || \
-    ip netns exec "${NAMESPACE}" iptables -t nat \
-        -A PREROUTING -d 169.254.169.254/32 -p tcp --dport 80 \
-        -j DNAT --to-destination "${meta_ip}:80"
-
-    # Allow metadata traffic inbound to the namespace (INPUT)
-    ip netns exec "${NAMESPACE}" iptables -t filter \
-        -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
-    ip netns exec "${NAMESPACE}" iptables -t filter \
-        -A INPUT -p tcp --dport 80 -j ACCEPT
+    # Allow metadata traffic inbound to the namespace (INPUT) from guest subnet only.
+    if [ -n "${CIDR}" ]; then
+        ip netns exec "${NAMESPACE}" iptables -t filter \
+            -C INPUT -p tcp -s "${CIDR}" --dport 80 -j ACCEPT 2>/dev/null || \
+        ip netns exec "${NAMESPACE}" iptables -t filter \
+            -A INPUT -p tcp -s "${CIDR}" --dport 80 -j ACCEPT
+    fi
 }
 
 _svc_stop_apache2() {
@@ -1782,26 +1789,28 @@ server.serve_forever()
 PYEOF
     chmod +x "${script_f}"
 
-    # Skip restart if already running
+    # Only start if not already running; the iptables rule is (re-)applied regardless
+    # so that it is always present in the current namespace after a cleanup restart.
     if [ -f "${pid_f}" ] && kill -0 "$(cat "${pid_f}")" 2>/dev/null; then
         log "passwd-server: already running (pid=$(cat "${pid_f}"))"
-        return 0
+    else
+        # Use EXTENSION_IP as the listen address; fall back to GATEWAY when absent.
+        local listen_ip; listen_ip="${EXTENSION_IP:-${GATEWAY}}"
+        log "passwd-server: starting in namespace ${NAMESPACE} on ${listen_ip}:8080"
+        ip netns exec "${NAMESPACE}" python3 "${script_f}" \
+            "${listen_ip}" "${passwd_f}" "${pid_f}" \
+            >> "${log_f}" 2>&1 &
+        # Brief pause to let the server write its PID
+        sleep 0.3
     fi
 
-    # Use EXTENSION_IP as the listen address; fall back to GATEWAY when absent.
-    local listen_ip; listen_ip="${EXTENSION_IP:-${GATEWAY}}"
-    log "passwd-server: starting in namespace ${NAMESPACE} on ${listen_ip}:8080"
-    ip netns exec "${NAMESPACE}" python3 "${script_f}" \
-        "${listen_ip}" "${passwd_f}" "${pid_f}" \
-        >> "${log_f}" 2>&1 &
-    # Brief pause to let the server write its PID
-    sleep 0.3
-
-    # Allow inbound connections to port 8080 inside the namespace
-    ip netns exec "${NAMESPACE}" iptables -t filter \
-        -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null || \
-    ip netns exec "${NAMESPACE}" iptables -t filter \
-        -A INPUT -p tcp --dport 8080 -j ACCEPT
+    # Always ensure the iptables INPUT rule is present (idempotent).
+    if [ -n "${CIDR}" ]; then
+        ip netns exec "${NAMESPACE}" iptables -t filter \
+            -C INPUT -p tcp -s "${CIDR}" --dport 8080 -j ACCEPT 2>/dev/null || \
+        ip netns exec "${NAMESPACE}" iptables -t filter \
+            -A INPUT -p tcp -s "${CIDR}" --dport 8080 -j ACCEPT
+    fi
 }
 
 _svc_stop_passwd_server() {
