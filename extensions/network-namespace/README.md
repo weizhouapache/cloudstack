@@ -69,7 +69,6 @@ required**.
 │      ▼                                                   │
 │  /etc/cloudstack/extensions/<ext-name>/                  │
 │      network-namespace.sh                                │
-│  (this directory, deployed during installation)          │
 └──────────────────────┬───────────────────────────────────┘
                        │ SSH (host : port from extension details)
                        │ credentials from extension_resource_map_details

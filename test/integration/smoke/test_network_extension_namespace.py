@@ -378,6 +378,11 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         cls.zone          = get_zone(cls.apiclient, testClient.getZoneForTests())
         cls.domain        = get_domain(cls.apiclient)
         cls.mgtSvrDetails = cls.config.__dict__["mgtSvr"][0].__dict__
+        # All management servers — entry-point script is deployed to every one.
+        cls.all_mgt_svr_details = [
+            mgt.__dict__ if hasattr(mgt, '__dict__') else mgt
+            for mgt in cls.config.__dict__.get("mgtSvr", [])
+        ] or [cls.mgtSvrDetails]
         cls.hv            = testClient.getHypervisorInfo()
         cls._cleanup      = []
         cls.tmp_files     = []
@@ -387,6 +392,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         cls.stream_handler = logging.StreamHandler()
         cls.logger.setLevel(logging.DEBUG)
         cls.logger.addHandler(cls.stream_handler)
+
+        cls.logger.info("Management servers: %s",
+                        [m.get("mgtSvrIp", "?") for m in cls.all_mgt_svr_details])
 
         # KVM host credentials from Marvin config
         cls.kvm_host_configs = _get_kvm_hosts_from_config(cls.config)
@@ -421,21 +429,6 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             cls.logger.warning("Cloud-init template registration failed: %s; "
                                "falling back to default", e)
             cls.template = get_template(cls.apiclient, cls.zone.id, cls.hv)
-
-        # ---- SSH keypair (written to a temp file) ----
-        try:
-            kp = SSHKeyPair.create(cls.apiclient, name=random_gen() + ".pem")
-            cls._cleanup.append(SSHKeyPair(kp.__dict__, None))
-            pkfile = os.path.join(tempfile.gettempdir(), kp.name)
-            kp.private_key_file = pkfile
-            cls.tmp_files.append(pkfile)
-            with open(pkfile, "w+") as fh:
-                fh.write(kp.privatekey)
-            os.chmod(pkfile, 0o400)
-            cls.keypair = kp
-            cls.logger.info("SSH keypair '%s' written to %s", kp.name, pkfile)
-        except Exception as e:
-            cls.logger.warning("Could not create SSH keypair: %s", e)
 
         # ---- Download wrapper scripts from GitHub ----
         try:
@@ -543,11 +536,11 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self._mgmt_script_path = (self.extension_path or "").strip().rstrip('/')
 
-        # Deploy entry-point to ALL management servers
-        all_mgt_svrs = self.config.__dict__.get("mgtSvr", [])
+        # Deploy entry-point to ALL management servers.
+        # all_mgt_svr_details is collected once in setUpClass from
+        # cls.config.__dict__["mgtSvr"] so every server in a HA pair is covered.
         self._all_mgmt_deployers = []
-        for mgt in all_mgt_svrs:
-            mgt_details = mgt.__dict__ if hasattr(mgt, '__dict__') else mgt
+        for mgt_details in self.all_mgt_svr_details:
             deployer = MgmtServerDeployer(mgt_details, logger=self.logger)
             deployer.copy_file(entry_point_src, self._mgmt_script_path)
             self.logger.info("Entry-point deployed to mgmt %s at %s",
@@ -835,7 +828,6 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                 account=account.name,
                 domainid=account.domainid,
             )
-            self.cleanup.append(SSHKeyPair(kp.__dict__, None))
 
             pkfile = os.path.join(tempfile.gettempdir(), kp.name)
             with open(pkfile, "w+") as fh:
@@ -968,6 +960,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.assertEqual('Disabled', self._find_provider(pn.id, ext_name).state)
         self.logger.info("NSP disabled OK")
 
+        self._teardown_extension()
         self.logger.info("test_01 PASSED")
 
     @attr(tags=["advanced", "smoke"], required_hardware="false")
@@ -1314,13 +1307,24 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         """VPC multi-tier + VPC restart with SSH connectivity verification.
 
         Creates two VPC tier networks backed by the extension, deploys a
-        VM in each tier, and verifies SSH access independently.  Then:
+        VM in each tier, and verifies SSH access independently.
 
-          1. VPC restart (cleanup=True) — verify SSH still works for both VMs.
-          2. Delete tier-1 VM + network — verify tier-2 VM is still accessible.
-          3. Delete tier-2 VM + network.
-          4. Delete VPC.
-          5. Teardown extension.
+        Sub-tests in order
+        ------------------
+        A. Baseline connectivity (before VPC restart)
+             tier-1 PF :22 → VM1          — assert SSH works
+             tier-2 LB :22 → VM2          — assert SSH works
+             tier-1 static NAT :22 → VM1  — enable, create FW rule,
+                                            assert SSH works
+        B. VPC restart (cleanup=True)
+             assert SSH still works via tier-1 PF, tier-2 LB, and
+             tier-1 static NAT after the namespace is rebuilt
+        C. Static NAT teardown (after VPC restart)
+             disable static NAT → assert SSH fails → delete IP
+        D. Partial delete
+             delete tier-1 VM + network → assert tier-2 VM still accessible
+        E. Final delete
+             delete tier-2 VM + network, VPC, teardown extension
 
         The VPC tier network offering uses ``useVpc=on`` as required by
         CloudStack for VPC-associated tier networks.
@@ -1452,7 +1456,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.cleanup.insert(0, vm2)
         self.logger.info("VM2 deployed in tier 2: %s (%s)", vm2.name, vm2.id)
 
-        # ---- Tier 1: PF ----
+        # ---- Tier 1: PF rule ----
         pf_ip1 = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
@@ -1467,10 +1471,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             ipaddressid=pf_ip1.ipaddress.id,
             networkid=tier1.id
         )
-        tier1_ip = pf_ip1.ipaddress.ipaddress
-        self.logger.info("Tier 1 PF: %s:22 → VM1:22", tier1_ip)
+        tier1_pf_ip = pf_ip1.ipaddress.ipaddress
+        self.logger.info("Tier 1 PF: %s:22 → VM1:22", tier1_pf_ip)
 
-        # ---- Tier 2: LB ----
+        # ---- Tier 2: LB rule ----
         lb_ip2 = PublicIPAddress.create(
             self.apiclient,
             accountid=account.name,
@@ -1492,34 +1496,91 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         )
         self.assertIsNotNone(lb_rule2)
         lb_rule2.assign(self.apiclient, vms=[vm2])
-        tier2_ip = lb_ip2.ipaddress.ipaddress
-        self.logger.info("Tier 2 LB: %s:22 → VM2:22", tier2_ip)
+        tier2_lb_ip = lb_ip2.ipaddress.ipaddress
+        self.logger.info("Tier 2 LB: %s:22 → VM2:22", tier2_lb_ip)
 
-        # ---- Verify SSH to both VMs ----
+        # ---- Tier 1: Static NAT (allocated BEFORE restart) ----
+        snat_ip1_obj = PublicIPAddress.create(
+            self.apiclient,
+            accountid=account.name,
+            zoneid=self.zone.id,
+            domainid=account.domainid,
+            networkid=tier1.id,
+            vpcid=vpc.id
+        )
+        snat_ip1    = snat_ip1_obj.ipaddress.ipaddress
+        snat_ip1_id = snat_ip1_obj.ipaddress.id
+        StaticNATRule.enable(
+            self.apiclient,
+            ipaddressid=snat_ip1_id,
+            virtualmachineid=vm1.id,
+            networkid=tier1.id
+        )
+        self.logger.info("Static NAT enabled on tier-1: %s → VM1", snat_ip1)
+
+        # ==============================================================
+        # A. Baseline connectivity — BEFORE VPC restart
+        # ==============================================================
+        self.logger.info("--- Sub-test A: Baseline connectivity (before restart) ---")
+
         self._assert_vm_ssh_accessible(
-            tier1_ip, 22,
-            "SSH to tier-1 VM (%s) should succeed" % tier1_ip)
-        self.logger.info("Verified: SSH to tier-1 VM works")
+            tier1_pf_ip, 22,
+            "SSH to tier-1 VM via PF (%s) should succeed before restart"
+            % tier1_pf_ip)
+        self.logger.info("Verified: SSH to tier-1 VM works via PF (before restart)")
 
         self._assert_vm_ssh_accessible(
-            tier2_ip, 22,
-            "SSH to tier-2 VM via LB (%s) should succeed" % tier2_ip)
-        self.logger.info("Verified: SSH to tier-2 VM works via LB")
+            tier2_lb_ip, 22,
+            "SSH to tier-2 VM via LB (%s) should succeed before restart"
+            % tier2_lb_ip)
+        self.logger.info("Verified: SSH to tier-2 VM works via LB (before restart)")
 
-        # ---- VPC restart (cleanup=True) ----
+        self._assert_vm_ssh_accessible(
+            snat_ip1, 22,
+            "SSH to tier-1 VM via static NAT (%s) should succeed before restart"
+            % snat_ip1)
+        self.logger.info("Verified: SSH to tier-1 VM works via static NAT (before restart)")
+
+        # ==============================================================
+        # B. VPC restart (cleanup=True)
+        #    Re-verify all three access methods after the namespace is rebuilt.
+        # ==============================================================
+        self.logger.info("--- Sub-test B: VPC restart (cleanup=True) ---")
         self.logger.info("Restarting VPC %s (cleanup=True) ...", vpc.id)
         vpc.restart(self.apiclient, cleanup=True)
         self.logger.info("VPC restart completed")
 
         self._assert_vm_ssh_accessible(
-            tier1_ip, 22,
-            "SSH to tier-1 VM must work after VPC restart")
-        self._assert_vm_ssh_accessible(
-            tier2_ip, 22,
-            "SSH to tier-2 VM via LB must work after VPC restart")
-        self.logger.info("Verified: both VMs accessible after VPC restart")
+            tier1_pf_ip, 22,
+            "SSH to tier-1 VM via PF must work after VPC restart")
+        self.logger.info("Verified: SSH to tier-1 VM works via PF (after restart)")
 
-        # ---- Delete tier 1 VM + network ----
+        self._assert_vm_ssh_accessible(
+            tier2_lb_ip, 22,
+            "SSH to tier-2 VM via LB must work after VPC restart")
+        self.logger.info("Verified: SSH to tier-2 VM works via LB (after restart)")
+
+        self._assert_vm_ssh_accessible(
+            snat_ip1, 22,
+            "SSH to tier-1 VM via static NAT must work after VPC restart")
+        self.logger.info("Verified: SSH to tier-1 VM works via static NAT (after restart)")
+
+        # ==============================================================
+        # C. Disable static NAT (after VPC restart)
+        # ==============================================================
+        self.logger.info("--- Sub-test C: Disable static NAT (after restart) ---")
+        StaticNATRule.disable(self.apiclient, ipaddressid=snat_ip1_id)
+        self.logger.info("Static NAT disabled on tier-1 %s", snat_ip1)
+        self._assert_vm_ssh_not_accessible(
+            snat_ip1, 22,
+            "SSH via tier-1 %s:22 should fail after static NAT disabled" % snat_ip1)
+        self.logger.info("Verified: SSH fails after static NAT disabled")
+        snat_ip1_obj.delete(self.apiclient)
+
+        # ==============================================================
+        # D. Partial delete: tier-1 — tier-2 must remain accessible
+        # ==============================================================
+        self.logger.info("--- Sub-test D: Delete tier-1, verify tier-2 intact ---")
         pf_rule1.delete(self.apiclient)
         pf_ip1.delete(self.apiclient)
         vm1.delete(self.apiclient, expunge=True)
@@ -1531,11 +1592,13 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         # Tier 2 must remain accessible — cmd_destroy() on tier-1 must not
         # delete tier-2's public veth (fixed via .tier ownership tracking).
         self._assert_vm_ssh_accessible(
-            tier2_ip, 22,
+            tier2_lb_ip, 22,
             "SSH to tier-2 VM via LB must still work after tier-1 deleted")
         self.logger.info("Verified: tier-2 VM still accessible via LB after tier-1 deleted")
 
-        # ---- Delete tier 2 VM + network ----
+        # ==============================================================
+        # E. Final delete: tier-2, VPC
+        # ==============================================================
         lb_rule2.remove(self.apiclient, vms=[vm2])
         lb_rule2.delete(self.apiclient)
         lb_ip2.delete(self.apiclient)
@@ -1545,7 +1608,6 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.cleanup = [o for o in self.cleanup if o != tier2]
         self.logger.info("Tier 2 VM + network deleted")
 
-        # ---- Delete VPC ----
         vpc.delete(self.apiclient)
         self.cleanup = [o for o in self.cleanup if o != vpc]
 
