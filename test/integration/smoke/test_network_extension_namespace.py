@@ -70,8 +70,10 @@ from nose.plugins.attrib import attr
 
 _multiprocess_shared_ = True
 
-# Directory on KVM agents where network-namespace scripts are installed
-EXTENSIONS_DIR        = '/etc/cloudstack/extensions/network-namespace'
+# Base directory on KVM agents where wrapper scripts are installed.
+# The actual per-extension subdirectory is derived at runtime from the
+# extension name: /etc/cloudstack/extensions/<ext-name>/
+EXTENSIONS_BASE_DIR   = '/etc/cloudstack/extensions'
 SCRIPT_FILENAME       = 'network-namespace-wrapper.sh'
 ENTRY_POINT_FILENAME  = 'network-namespace.sh'
 
@@ -306,9 +308,10 @@ class KvmHostDeployer:
     """Copies the KVM wrapper script to all KVM hosts via SSH.
 
     *dest_path* is the absolute path on each KVM host where the wrapper
-    script is installed.  It must be identical to the management-server
-    extension path so that both the entry-point and the wrapper share the
-    same directory and filename on their respective machines.
+    script is installed.  This path differs from the management-server
+    entry-point path:
+      management server: /usr/share/cloudstack-management/extensions/<name>/<name>.sh
+      KVM host (wrapper): /etc/cloudstack/extensions/<name>/<name>-wrapper.sh
     """
 
     def __init__(self, config_hosts=None, logger=None, dest_path=None):
@@ -459,6 +462,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.extension_path    = None
         self.mgmt_deployer     = None
         self._mgmt_script_path = None
+        self._all_mgmt_deployers = []
         self.kvm_deployer      = None
         self._ssh_private_key_file = None
 
@@ -520,40 +524,70 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
     # ------------------------------------------------------------------
 
     def _deploy_scripts(self):
-        """Deploy scripts to management server and all KVM hosts.
+        """Deploy scripts to all management servers and all KVM hosts.
 
-        Both the entry-point (network-namespace.sh) and the KVM wrapper
-        (network-namespace-wrapper.sh) are deployed to the **same path**:
-        ``self.extension_path``.  The management server receives the
-        entry-point script; each KVM host receives the wrapper script — both
-        under the same directory and filename so that the entry-point can call
-        the wrapper via its own ``$0`` path without any hard-coded name.
+        The entry-point (network-namespace.sh) is deployed to every management
+        server at ``self.extension_path`` (the path CloudStack assigned to the
+        extension, e.g.
+        ``/usr/share/cloudstack-management/extensions/<name>/<name>.sh``).
+
+        The KVM wrapper (network-namespace-wrapper.sh) is deployed to each KVM
+        host at a *different* path derived from the extension name:
+        ``/etc/cloudstack/extensions/<name>/<name>-wrapper.sh``
+
+        The entry-point script uses the same derivation at runtime (see
+        DEFAULT_SCRIPT_PATH in network-namespace.sh) so that it always calls
+        the correct wrapper on the remote KVM host.
         """
         wrapper_src, entry_point_src = _ensure_scripts_downloaded()
 
-        self.mgmt_deployer = MgmtServerDeployer(self.mgtSvrDetails,
-                                                logger=self.logger)
         self._mgmt_script_path = (self.extension_path or "").strip().rstrip('/')
-        self.mgmt_deployer.copy_file(entry_point_src, self._mgmt_script_path)
-        self.logger.info("Entry-point script deployed to mgmt at %s",
-                         self._mgmt_script_path)
 
-        # Deploy the wrapper to KVM hosts at the SAME path as the management
-        # server entry-point so that both scripts share the same directory and
-        # filename on their respective hosts.
+        # Deploy entry-point to ALL management servers
+        all_mgt_svrs = self.config.__dict__.get("mgtSvr", [])
+        self._all_mgmt_deployers = []
+        for mgt in all_mgt_svrs:
+            mgt_details = mgt.__dict__ if hasattr(mgt, '__dict__') else mgt
+            deployer = MgmtServerDeployer(mgt_details, logger=self.logger)
+            deployer.copy_file(entry_point_src, self._mgmt_script_path)
+            self.logger.info("Entry-point deployed to mgmt %s at %s",
+                             mgt_details.get("mgtSvrIp", "?"),
+                             self._mgmt_script_path)
+            self._all_mgmt_deployers.append(deployer)
+
+        # Keep mgmt_deployer pointing at the primary server for backward-compat
+        self.mgmt_deployer = (self._all_mgmt_deployers[0]
+                              if self._all_mgmt_deployers
+                              else MgmtServerDeployer(self.mgtSvrDetails,
+                                                      logger=self.logger))
+
+        # Derive the wrapper destination path on KVM hosts from the extension path:
+        #   mgmt:  .../extensions/<name>/<name>.sh
+        #   kvm:   /etc/cloudstack/extensions/<name>/<name>-wrapper.sh
+        ext_dir_name   = os.path.basename(os.path.dirname(self._mgmt_script_path))
+        script_basename = os.path.splitext(
+            os.path.basename(self._mgmt_script_path))[0]
+        kvm_wrapper_path = "/etc/cloudstack/extensions/%s/%s-wrapper.sh" % (
+            ext_dir_name, script_basename)
+
         self.kvm_deployer = KvmHostDeployer(
             config_hosts=self.kvm_host_configs,
             logger=self.logger,
-            dest_path=self._mgmt_script_path,
+            dest_path=kvm_wrapper_path,
         )
         deployed = self.kvm_deployer.deploy()
         self.logger.info(
             "KVM wrapper deployed to %d host(s) at %s: %s",
-            len(deployed), self._mgmt_script_path, deployed)
+            len(deployed), kvm_wrapper_path, deployed)
 
     def _cleanup_mgmt_script(self):
-        if self.mgmt_deployer and self._mgmt_script_path:
-            self.mgmt_deployer.remove_file(self._mgmt_script_path)
+        if self._mgmt_script_path:
+            all_deployers = getattr(self, '_all_mgmt_deployers', None) or []
+            if all_deployers:
+                for deployer in all_deployers:
+                    deployer.remove_file(self._mgmt_script_path)
+            elif self.mgmt_deployer:
+                self.mgmt_deployer.remove_file(self._mgmt_script_path)
             self._mgmt_script_path = None
 
     # ------------------------------------------------------------------
