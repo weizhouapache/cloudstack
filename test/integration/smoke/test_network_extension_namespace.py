@@ -43,6 +43,7 @@ import urllib.parse
 from marvin.cloudstackTestCase import cloudstackTestCase
 from marvin.cloudstackAPI import (listPhysicalNetworks,
                                   listTrafficTypes,
+                                  listManagementServers,
                                   listNetworkServiceProviders,
                                   updateNetworkServiceProvider,
                                   deleteNetworkServiceProvider,
@@ -393,8 +394,35 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         cls.logger.setLevel(logging.DEBUG)
         cls.logger.addHandler(cls.stream_handler)
 
-        cls.logger.info("Management servers: %s",
-                        [m.get("mgtSvrIp", "?") for m in cls.all_mgt_svr_details])
+        cls.logger.info("Management servers (from config): %s",
+                         [m.get("mgtSvrIp", "?") for m in cls.all_mgt_svr_details])
+
+        # Supplement / override management server list via listManagementServers API.
+        # All mgmt servers are assumed to share the same SSH credentials as the
+        # first entry in the Marvin config (mgtSvr[0]).
+        try:
+            ms_cmd = listManagementServers.listManagementServersCmd()
+            api_mgmt_servers = cls.apiclient.listManagementServers(ms_cmd)
+            if api_mgmt_servers:
+                base_creds = dict(cls.mgtSvrDetails)
+                api_mgt_details = []
+                for ms in api_mgmt_servers:
+                    ip = (getattr(ms, 'ipaddress', None)
+                          or getattr(ms, 'ip', None)
+                          or getattr(ms, 'hostname', None))
+                    if ip:
+                        entry = dict(base_creds)
+                        entry['mgtSvrIp'] = ip
+                        api_mgt_details.append(entry)
+                if api_mgt_details:
+                    cls.all_mgt_svr_details = api_mgt_details
+                    cls.logger.info(
+                        "Management servers (from listManagementServers API): %s",
+                        [d.get('mgtSvrIp') for d in api_mgt_details])
+        except Exception as _ms_err:
+            cls.logger.warning(
+                "Could not retrieve management servers via listManagementServers "
+                "API (%s); using config-provided list", _ms_err)
 
         # KVM host credentials from Marvin config
         cls.kvm_host_configs = _get_kvm_hosts_from_config(cls.config)
@@ -700,6 +728,71 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         except Exception as e:
             self.logger.warning("_get_source_nat_ip(%s): %s", network_id, e)
         return None
+
+    # ------------------------------------------------------------------
+    # KVM host prerequisite check (test_04 / test_05 / test_06)
+    # ------------------------------------------------------------------
+
+    def _check_kvm_host_prerequisites(self, tools=None):
+        """Verify that each configured KVM host has the required tools installed.
+
+        Checks for the presence of every tool in *tools* (default:
+        ``['arping', 'dnsmasq', 'haproxy']``) on each host in
+        ``self.kvm_host_configs`` via SSH.  The test is skipped (via
+        ``skipTest``) if any tool is absent from any reachable host.
+
+        Hosts that cannot be reached over SSH are logged as warnings and
+        excluded from the check — the connectivity failure will surface
+        naturally when the test later tries to deploy scripts.
+        """
+        if tools is None:
+            tools = ['arping', 'dnsmasq', 'haproxy']
+        if not self.kvm_host_configs:
+            # No KVM hosts — _setup_extension_nsp_offering will skipTest.
+            return
+
+        missing_per_host = {}
+        for h in self.kvm_host_configs:
+            ip = h.get('ip', '')
+            if not ip:
+                continue
+            username = h.get('username', 'root')
+            password = h.get('password', '')
+            try:
+                ssh = SshClient(ip, 22, username, password)
+                missing_tools = []
+                for tool in tools:
+                    # Try both `command -v` (bash built-in) and `which`
+                    out = ssh.execute(
+                        "command -v {t} 2>/dev/null || which {t} 2>/dev/null"
+                        " || echo MISSING_{t}".format(t=tool))
+                    found = any(
+                        line.strip() and 'MISSING_' + tool not in line
+                        for line in out
+                    )
+                    if not found:
+                        missing_tools.append(tool)
+                if missing_tools:
+                    missing_per_host[ip] = missing_tools
+                    self.logger.warning(
+                        "KVM host %s is missing prerequisite(s): %s",
+                        ip, ', '.join(missing_tools))
+                else:
+                    self.logger.info(
+                        "KVM host %s: all prerequisites present (%s)",
+                        ip, ', '.join(tools))
+            except Exception as e:
+                self.logger.warning(
+                    "Could not check prerequisites on KVM host %s: %s", ip, e)
+
+        if missing_per_host:
+            detail = "; ".join(
+                "%s missing %s" % (ip, ', '.join(t))
+                for ip, t in missing_per_host.items()
+            )
+            self.skipTest(
+                "Skipping test — required tools not installed on KVM host(s): "
+                + detail)
 
     # ------------------------------------------------------------------
     # Extension + NSP + offering setup helper (shared by tests 04-06)
@@ -1062,6 +1155,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
           3. Assert VM state == Running.
           4. Teardown.
         """
+        self._check_kvm_host_prerequisites(['arping', 'dnsmasq', 'haproxy'])
         svc = "Dhcp,Dns,UserData"
         nw_offering, _ext_name = self._setup_extension_nsp_offering(
             "extnet-dhcp", supported_services=svc, guestiptype="Shared")
@@ -1117,6 +1211,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
              → restartNetwork(cleanup=True)
              → assert SSH works (namespace rebuilt, rules reapplied)
         """
+        self._check_kvm_host_prerequisites(['arping', 'dnsmasq', 'haproxy'])
         # ---- Setup ----
         svc = "SourceNat,StaticNat,PortForwarding,Firewall,Lb,UserData,Dhcp,Dns"
         nw_offering, _ext_name = self._setup_extension_nsp_offering(
@@ -1329,6 +1424,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         The VPC tier network offering uses ``useVpc=on`` as required by
         CloudStack for VPC-associated tier networks.
         """
+        self._check_kvm_host_prerequisites(['arping', 'dnsmasq', 'haproxy'])
         # ---- Setup: extension + NSP only (no isolated offering for VPC tests) ----
         svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
         _nw_offering, ext_name = self._setup_extension_nsp_offering(
