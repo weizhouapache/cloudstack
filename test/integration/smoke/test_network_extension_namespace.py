@@ -181,46 +181,44 @@ def _ensure_scripts_downloaded():
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      '..', '..', '..'))
 
-    if not os.path.exists(WRAPPER_SCRIPT_LOCAL):
-        try:
-            _download_script(WRAPPER_SCRIPT_URL, WRAPPER_SCRIPT_LOCAL)
-        except Exception:
-            # Offline fallback: deploy the source-tree implementation.
-            _local_impl = os.path.join(
-                _src_root, 'extensions', 'network-namespace',
-                'network-namespace-wrapper.sh')
-            if os.path.exists(_local_impl):
-                os.makedirs(os.path.dirname(WRAPPER_SCRIPT_LOCAL),
-                            exist_ok=True)
-                shutil.copy2(_local_impl, WRAPPER_SCRIPT_LOCAL)
-                os.chmod(WRAPPER_SCRIPT_LOCAL,
-                         stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP |
-                         stat.S_IROTH | stat.S_IXOTH)
-                logging.getLogger('cs-extnet').info(
-                    "Offline fallback: using local %s as %s",
-                    _local_impl, WRAPPER_SCRIPT_LOCAL)
-            else:
-                raise
+    try:
+        _download_script(WRAPPER_SCRIPT_URL, WRAPPER_SCRIPT_LOCAL)
+    except Exception:
+        # Offline fallback: deploy the source-tree implementation.
+        _local_impl = os.path.join(
+            _src_root, 'extensions', 'network-namespace',
+            'network-namespace-wrapper.sh')
+        if os.path.exists(_local_impl):
+            os.makedirs(os.path.dirname(WRAPPER_SCRIPT_LOCAL),
+                        exist_ok=True)
+            shutil.copy2(_local_impl, WRAPPER_SCRIPT_LOCAL)
+            os.chmod(WRAPPER_SCRIPT_LOCAL,
+                     stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP |
+                     stat.S_IROTH | stat.S_IXOTH)
+            logging.getLogger('cs-extnet').info(
+                "Offline fallback: using local %s as %s",
+                _local_impl, WRAPPER_SCRIPT_LOCAL)
+        else:
+            raise
 
-    if not os.path.exists(ENTRY_POINT_SCRIPT_LOCAL):
-        try:
-            _download_script(ENTRY_POINT_SCRIPT_URL, ENTRY_POINT_SCRIPT_LOCAL)
-        except Exception:
-            _local_ep = os.path.join(
-                _src_root, 'extensions', 'network-namespace',
-                'network-namespace.sh')
-            if os.path.exists(_local_ep):
-                os.makedirs(os.path.dirname(ENTRY_POINT_SCRIPT_LOCAL),
-                            exist_ok=True)
-                shutil.copy2(_local_ep, ENTRY_POINT_SCRIPT_LOCAL)
-                os.chmod(ENTRY_POINT_SCRIPT_LOCAL,
-                         stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP |
-                         stat.S_IROTH | stat.S_IXOTH)
-                logging.getLogger('cs-extnet').info(
-                    "Offline fallback: using local %s as %s",
-                    _local_ep, ENTRY_POINT_SCRIPT_LOCAL)
-            else:
-                raise
+    try:
+        _download_script(ENTRY_POINT_SCRIPT_URL, ENTRY_POINT_SCRIPT_LOCAL)
+    except Exception:
+        _local_ep = os.path.join(
+            _src_root, 'extensions', 'network-namespace',
+            'network-namespace.sh')
+        if os.path.exists(_local_ep):
+            os.makedirs(os.path.dirname(ENTRY_POINT_SCRIPT_LOCAL),
+                        exist_ok=True)
+            shutil.copy2(_local_ep, ENTRY_POINT_SCRIPT_LOCAL)
+            os.chmod(ENTRY_POINT_SCRIPT_LOCAL,
+                     stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP |
+                     stat.S_IROTH | stat.S_IXOTH)
+            logging.getLogger('cs-extnet').info(
+                "Offline fallback: using local %s as %s",
+                _local_ep, ENTRY_POINT_SCRIPT_LOCAL)
+        else:
+            raise
 
     return WRAPPER_SCRIPT_LOCAL, ENTRY_POINT_SCRIPT_LOCAL
 

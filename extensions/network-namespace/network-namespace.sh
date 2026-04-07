@@ -155,6 +155,7 @@ VPC_ID=""
 VM_DATA_FILE=""
 FW_RULES_FILE=""
 RESTORE_DATA_FILE=""
+ACL_RULES_FILE=""
 FORWARD_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -181,6 +182,9 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --fw-rules-file)
             FW_RULES_FILE="${2:-}"
+            shift 2 ;;
+        --acl-rules-file)
+            ACL_RULES_FILE="${2:-}"
             shift 2 ;;
         --restore-data-file)
             RESTORE_DATA_FILE="${2:-}"
@@ -313,7 +317,7 @@ upload_file_to_remote() {
 # ---------------------------------------------------------------------------
 
 if [ "${COMMAND}" = "ensure-network-device" ]; then
-    [ -z "${NETWORK_ID}" ] && die "ensure-network-device: missing --network-id" 1
+    [ -z "${NETWORK_ID}" ] && [ -z "${VPC_ID}" ] && die "ensure-network-device: missing --network-id or --vpc-id" 1
 
     if [ ${#HOST_LIST[@]} -eq 0 ]; then
         die "ensure-network-device: no hosts configured. Set 'hosts' in registerExtension details." 1
@@ -339,7 +343,7 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
             h="${h// /}"
             if [ "${h}" = "${CURRENT_HOST}" ]; then
                 if host_reachable "${CURRENT_HOST}"; then
-                    log "ensure-network-device: network=${NETWORK_ID} keeping current host=${CURRENT_HOST}"
+                    log "ensure-network-device: ${NETWORK_ID:+network=${NETWORK_ID} }${VPC_ID:+vpc=${VPC_ID} }keeping current host=${CURRENT_HOST}"
                     if [ -n "${VPC_ID}" ]; then
                         printf '{"host":"%s","namespace":"%s","vpc_id":"%s"}\n' \
                             "${CURRENT_HOST}" "${NAMESPACE}" "${VPC_ID}"
@@ -378,7 +382,7 @@ if [ "${COMMAND}" = "ensure-network-device" ]; then
         _H="${HOST_LIST[$_IDX]// /}"
         if host_reachable "${_H}"; then
             _SELECTED_HOST="${_H}"
-            log "ensure-network-device: network=${NETWORK_ID} hash-selected host=${_SELECTED_HOST} (key=${_ROUTE_KEY}, idx=${_IDX})"
+            log "ensure-network-device: ${NETWORK_ID:+network=${NETWORK_ID} }${VPC_ID:+vpc=${VPC_ID} }hash-selected host=${_SELECTED_HOST} (key=${_ROUTE_KEY}, idx=${_IDX})"
             break
         fi
         log "ensure-network-device: host ${_H} not reachable, trying next"
@@ -424,6 +428,11 @@ if [ -n "${FW_RULES_FILE}" ]; then
     REMOTE_FW_RULES_FILE=$(upload_file_to_remote "${REMOTE_HOST}" "${FW_RULES_FILE}" "fw-rules")
     REMOTE_PAYLOAD_FILES+=("${REMOTE_FW_RULES_FILE}")
     remote_args+=("'--fw-rules-file'" "'${REMOTE_FW_RULES_FILE//"'"/"'\\''"}'")
+fi
+if [ -n "${ACL_RULES_FILE}" ]; then
+    REMOTE_ACL_RULES_FILE=$(upload_file_to_remote "${REMOTE_HOST}" "${ACL_RULES_FILE}" "acl-rules")
+    REMOTE_PAYLOAD_FILES+=("${REMOTE_ACL_RULES_FILE}")
+    remote_args+=("'--acl-rules-file'" "'${REMOTE_ACL_RULES_FILE//"'"/"'\\''"}'")
 fi
 if [ -n "${RESTORE_DATA_FILE}" ]; then
     REMOTE_RESTORE_DATA_FILE=$(upload_file_to_remote "${REMOTE_HOST}" "${RESTORE_DATA_FILE}" "restore-data")

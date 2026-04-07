@@ -61,6 +61,7 @@ import com.cloud.network.dao.IPAddressDao;
 import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkServiceMapDao;
+import com.cloud.network.vpc.dao.VpcDao;
 import com.cloud.network.element.AggregatedCommandExecutor;
 import com.cloud.network.element.DhcpServiceProvider;
 import com.cloud.network.element.DnsServiceProvider;
@@ -117,6 +118,7 @@ import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationSe
 import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.extension.NetworkCustomActionProvider;
+import org.apache.cloudstack.resourcedetail.dao.VpcDetailsDao;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -261,6 +263,10 @@ public class NetworkExtensionElement extends AdapterBase implements
     private FirewallRulesDao firewallRulesDao;
     @Inject
     private IPAddressDao ipAddressDao;
+    @Inject
+    private VpcDao vpcDao;
+    @Inject
+    private VpcDetailsDao vpcDetailsDao;
 
     // ---- Script argument names ----
 
@@ -313,6 +319,8 @@ public class NetworkExtensionElement extends AdapterBase implements
         copy.accountService                 = this.accountService;
         copy.firewallRulesDao               = this.firewallRulesDao;
         copy.ipAddressDao                   = this.ipAddressDao;
+        copy.vpcDao                         = this.vpcDao;
+        copy.vpcDetailsDao                  = this.vpcDetailsDao;
         copy.providerName                   = providerName;
 
         logger.debug("NetworkExtensionElement initialised with provider name '{}'", providerName);
@@ -446,37 +454,34 @@ public class NetworkExtensionElement extends AdapterBase implements
         implArgs.add("--extension-ip"); implArgs.add(safeStr(extensionIp));
         implArgs.addAll(vpcArgs);
 
-        boolean result = executeScript(network, "implement", implArgs.toArray(new String[0]));
+        boolean result = executeScript(network, "implement-network", implArgs.toArray(new String[0]));
 
         if (!result) {
             return false;
         }
 
-        // Step 3: Configure source NAT.
+        // Step 3: Configure source NAT for both VPC and non-VPC networks for
+        // compatibility (other network-element providers may also implement VPC tiers).
+        // When this is a VPC tier, the script's assign-ip does nothing for source-nat
+        // because VPC source NAT is managed at the VPC level by implementVpc().
         if (canHandle(network, Service.SourceNat)) {
-            if (network.getVpcId() == null) {
-                // Isolated network: apply the network's own source NAT IP.
-                try {
+            try {
+                if (network.getVpcId() == null) {
+                    // Isolated network: apply the network's own source NAT IP.
                     Account owner = accountService.getAccount(network.getAccountId());
                     PublicIpAddress existingIp = networkModel.getSourceNatIpAddressForGuestNetwork(owner, network);
                     if (existingIp != null) {
                         applyIps(network, List.of(existingIp), Set.of(Service.SourceNat));
                     }
-                } catch (Exception e) {
-                    logger.warn("Failed to configure source NAT IP for network {}: {}", network.getId(), e.getMessage(), e);
-                }
-            } else {
-                // VPC tier: apply the VPC-level source NAT IP.
-                // implementVpc() may have been called before any tier existed (no-op then),
-                // so we eagerly apply it here on every tier implement; the script is idempotent.
-                try {
+                } else {
+                    // VPC tier: apply the VPC-level source NAT IP (script is a no-op for SNAT).
                     final PublicIpAddress vpcSourceNatIp = getVpcSourceNatIp(network.getVpcId());
                     if (vpcSourceNatIp != null) {
                         applyIps(network, List.of(vpcSourceNatIp), Set.of(Service.SourceNat));
                     }
-                } catch (Exception e) {
-                    logger.warn("Failed to configure VPC source NAT IP for VPC tier network {}: {}", network.getId(), e.getMessage(), e);
                 }
+            } catch (Exception e) {
+                logger.warn("Failed to configure source NAT IP for network {}: {}", network.getId(), e.getMessage(), e);
             }
         }
 
@@ -520,7 +525,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
         args.addAll(getVpcIdArgs(network));
-        boolean result = executeScript(network, "shutdown", args.toArray(new String[0]));
+        boolean result = executeScript(network, "shutdown-network", args.toArray(new String[0]));
         if (result) {
             // Remove stored per-network extension details (e.g. namespace). For VPC-backed networks
             // the namespace is named cs-vpc-<vpcId>, stored in the extension details. Removing the
@@ -542,9 +547,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
         args.addAll(getVpcIdArgs(network));
-        // For VPC tiers, keep shared namespace until shutdownVpc() by using shutdown here.
-        final String action = network.getVpcId() == null ? "destroy" : "shutdown";
-        boolean result = executeScript(network, action, args.toArray(new String[0]));
+        // For both isolated and VPC tier networks, use destroy-network.
+        // For VPC tiers, the script preserves the shared namespace;
+        // the VPC namespace is removed only when shutdownVpc() calls shutdown-vpc.
+        boolean result = executeScript(network, "destroy-network", args.toArray(new String[0]));
         if (result) {
             cleanupPlaceholderNicIp(network, context);
             networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
@@ -629,12 +635,19 @@ public class NetworkExtensionElement extends AdapterBase implements
      * persisted in {@code network_details} and forwarded to all subsequent calls
      * via {@value #ARG_NETWORK_EXTENSION_DETAILS}.
      *
-     * <p>The script receives both JSON blobs as named CLI arguments
-     * ({@value #ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS} and
-     * {@value #ARG_NETWORK_EXTENSION_DETAILS}) plus {@code --current-details}
-     * so the script can short-circuit when the current host is healthy.</p>
+     * <p>For VPC tier networks the extension details are inherited from the VPC-level
+     * details (stored in {@code vpc_details}) so all tiers in the same VPC share
+     * the same host/namespace binding.  The script's {@code ensure-network-device}
+     * is only called at the VPC level (see {@link #ensureExtensionDetails(Vpc)}).</p>
      */
     protected void ensureExtensionDetails(Network network) {
+        if (network.getVpcId() != null) {
+            Vpc vpc = vpcDao.findById(network.getVpcId());
+            ensureExtensionDetails(vpc);
+            return;
+        }
+
+        // Isolated network: run ensure-network-device to select / validate the host.
         Map<String, String> stored = networkDetailsDao.listDetailsKeyPairs(network.getId());
         String currentDetails = stored != null
                 ? stored.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
@@ -917,7 +930,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         ensureExtensionDetails(network);
 
         String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
-        String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
+        String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network);
 
         // Log the JSON blobs so we can diagnose missing-argument issues in runtime logs
         logger.debug("Physical network details JSON: {}", physicalNetworkDetailsJson);
@@ -1038,10 +1051,14 @@ public class NetworkExtensionElement extends AdapterBase implements
      * Reads the per-network JSON blob from {@code network_details}
      * (returns {@code {}} if not yet set).
      */
-    private String getNetworkExtensionDetailsJson(long networkId) {
-        Map<String, String> networkDetails = networkDetailsDao.listDetailsKeyPairs(networkId);
-        return networkDetails != null
-                ? networkDetails.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
+    private String getNetworkExtensionDetailsJson(Network network) {
+        if (network.getVpcId() != null) {
+            return getVpcExtensionDetailsJson(network.getVpcId());
+        } else {
+            Map<String, String> networkDetails = networkDetailsDao.listDetailsKeyPairs(network.getId());
+            return networkDetails != null
+                    ? networkDetails.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
+        }
     }
 
 
@@ -1084,7 +1101,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         File scriptFile = resolveScriptFile(network, extension);
 
         String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(network.getPhysicalNetworkId(), extension);
-        String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network.getId());
+        String networkExtensionDetailsJson = getNetworkExtensionDetailsJson(network);
         String actionParamsJson = buildActionParamsJson(parameters);
 
         List<String> cmdLine = new ArrayList<>();
@@ -2162,18 +2179,197 @@ public class NetworkExtensionElement extends AdapterBase implements
 
     // ---- VpcProvider ----
 
-    protected Network findVpcAnchorNetwork(long vpcId) {
-        final List<? extends Network> networks = networkModel.listNetworksByVpc(vpcId);
-        if (networks == null || networks.isEmpty()) {
+    /**
+     * Finds the extension + physical-network pair for the given VPC by scanning the
+     * physical networks in the VPC's zone for a registered NetworkOrchestrator extension.
+     * Returns {@code null} when no suitable extension is found.
+     */
+    protected Pair<Long, Extension> resolveExtensionForVpc(Vpc vpc) {
+        List<PhysicalNetworkVO> physNetworks = physicalNetworkDao.listByZone(vpc.getZoneId());
+        if (physNetworks == null || physNetworks.isEmpty()) {
             return null;
         }
-
-        for (final Network network : networks) {
-            if (canHandle(network, null)) {
-                return network;
+        for (PhysicalNetworkVO pn : physNetworks) {
+            Extension ext;
+            if (providerName != null && !providerName.isBlank()) {
+                ext = extensionHelper.getExtensionForPhysicalNetworkAndProvider(pn.getId(), providerName);
+            } else {
+                ext = extensionHelper.getExtensionForPhysicalNetwork(pn.getId());
+            }
+            if (ext != null) {
+                return new Pair<>(pn.getId(), ext);
             }
         }
         return null;
+    }
+
+    /**
+     * Resolves the script file for a VPC-level operation (no network object required).
+     */
+    protected File resolveScriptFileForVpc(Long physicalNetworkId, Extension extension) {
+        if (physicalNetworkId == null) {
+            throw new CloudRuntimeException("No physical network ID for VPC extension");
+        }
+        if (extension == null) {
+            throw new CloudRuntimeException("No extension found for physical network " + physicalNetworkId);
+        }
+        if (!Extension.Type.NetworkOrchestrator.equals(extension.getType())) {
+            throw new CloudRuntimeException("Extension " + extension.getName() + " is not of type NetworkOrchestrator");
+        }
+        if (!Extension.State.Enabled.equals(extension.getState())) {
+            throw new CloudRuntimeException("Extension " + extension.getName() + " is not enabled");
+        }
+        if (!extension.isPathReady()) {
+            throw new CloudRuntimeException("Extension " + extension.getName() + " path is not ready");
+        }
+        String extensionPath = extensionHelper.getExtensionScriptPath(extension);
+        if (extensionPath == null) {
+            throw new CloudRuntimeException("Could not resolve path for extension " + extension.getName());
+        }
+        File extensionDir = new File(extensionPath);
+        File namedScript = new File(extensionDir, extension.getName() + ".sh");
+        if (namedScript.exists() && namedScript.canExecute()) {
+            return namedScript;
+        }
+        if (extensionDir.isFile() && extensionDir.canExecute()) {
+            return extensionDir;
+        }
+        throw new CloudRuntimeException(
+                "No executable script found in extension path " + extensionPath
+                + ". Expected '" + extension.getName() + ".sh'.");
+    }
+
+    /**
+     * Calls {@code ensure-network-device} with VPC-level args (no {@code --network-id}).
+     * The returned JSON is persisted in {@code vpc_details} under key
+     * {@value #NETWORK_DETAIL_EXTENSION_DETAILS}.  VPC tier networks then inherit
+     * these details via {@link #ensureExtensionDetails(Network)}.
+     */
+    protected void ensureExtensionDetails(Vpc vpc) {
+        Map<String, String> stored = vpcDetailsDao.listDetailsKeyPairs(vpc.getId());
+        String currentDetails = stored != null
+                ? stored.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
+
+        logger.info("Ensuring extension device for VPC {} (current={})", vpc.getId(), currentDetails);
+
+        Pair<Long, Extension> physNetAndExt = resolveExtensionForVpc(vpc);
+        if (physNetAndExt == null) {
+            logger.warn("ensureExtensionDetails(vpc): no extension found for VPC {} zone {}",
+                    vpc.getId(), vpc.getZoneId());
+            return;
+        }
+        Long physicalNetworkId = physNetAndExt.first();
+        Extension extension = physNetAndExt.second();
+        File scriptFile = resolveScriptFileForVpc(physicalNetworkId, extension);
+        String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(physicalNetworkId, extension);
+
+        List<String> cmdLine = new ArrayList<>();
+        cmdLine.add(scriptFile.getAbsolutePath());
+        cmdLine.add("ensure-network-device");
+        cmdLine.add("--vpc-id");
+        cmdLine.add(String.valueOf(vpc.getId()));
+        cmdLine.add("--zone-id");
+        cmdLine.add(String.valueOf(vpc.getZoneId()));
+        cmdLine.add("--current-details");
+        cmdLine.add(currentDetails);
+        cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(physicalNetworkDetailsJson);
+        cmdLine.add(ARG_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(currentDetails);
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmdLine);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            String output = new String(process.getInputStream().readAllBytes()).trim();
+            int exitCode = process.waitFor();
+
+            if (exitCode != 0) {
+                logger.warn("ensure-network-device exited {} for VPC {} — keeping current details",
+                        exitCode, vpc.getId());
+                if ("{}".equals(currentDetails)) {
+                    vpcDetailsDao.addDetail(vpc.getId(), NETWORK_DETAIL_EXTENSION_DETAILS, "{}", false);
+                }
+                return;
+            }
+            if (output.isEmpty()) {
+                output = "{}".equals(currentDetails) ? "{}" : currentDetails;
+            }
+            if (!output.equals(currentDetails)) {
+                logger.info("VPC extension device updated for VPC {}: {}", vpc.getId(), output);
+                vpcDetailsDao.addDetail(vpc.getId(), NETWORK_DETAIL_EXTENSION_DETAILS, output, false);
+            } else {
+                logger.debug("VPC extension device unchanged for VPC {}: {}", vpc.getId(), output);
+            }
+        } catch (Exception e) {
+            logger.warn("Failed ensure-network-device for VPC {}: {}", vpc.getId(), e.getMessage());
+            if ("{}".equals(currentDetails)) {
+                vpcDetailsDao.addDetail(vpc.getId(), NETWORK_DETAIL_EXTENSION_DETAILS, "{}", false);
+            }
+        }
+    }
+
+    /**
+     * Returns the per-VPC extension-details JSON from {@code vpc_details}
+     * (returns {@code {}} if not yet set).
+     */
+    private String getVpcExtensionDetailsJson(long vpcId) {
+        Map<String, String> vpcDetails = vpcDetailsDao.listDetailsKeyPairs(vpcId);
+        return vpcDetails != null
+                ? vpcDetails.getOrDefault(NETWORK_DETAIL_EXTENSION_DETAILS, "{}") : "{}";
+    }
+
+    /**
+     * Executes the extension script for a VPC-level command (no tier network required).
+     * Uses VPC-level details from {@code vpc_details}.
+     */
+    protected boolean executeVpcScript(Vpc vpc, String command, String... args) {
+        Pair<Long, Extension> physNetAndExt = resolveExtensionForVpc(vpc);
+        if (physNetAndExt == null) {
+            logger.warn("executeVpcScript: no extension found for VPC {} zone {}", vpc.getId(), vpc.getZoneId());
+            return false;
+        }
+        Long physicalNetworkId = physNetAndExt.first();
+        Extension extension = physNetAndExt.second();
+        File scriptFile = resolveScriptFileForVpc(physicalNetworkId, extension);
+
+        String physicalNetworkDetailsJson = buildPhysicalNetworkDetailsJson(physicalNetworkId, extension);
+        String vpcExtDetailsJson = getVpcExtensionDetailsJson(vpc.getId());
+
+        logger.debug("Physical network details JSON: {}", physicalNetworkDetailsJson);
+        logger.debug("VPC extension details JSON: {}", vpcExtDetailsJson);
+
+        List<String> cmdLine = new ArrayList<>();
+        cmdLine.add(scriptFile.getAbsolutePath());
+        cmdLine.add(command);
+        cmdLine.addAll(Arrays.asList(args));
+        cmdLine.add(ARG_PHYSICAL_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(physicalNetworkDetailsJson);
+        cmdLine.add(ARG_NETWORK_EXTENSION_DETAILS);
+        cmdLine.add(vpcExtDetailsJson);
+
+        logger.debug("Executing VPC extension script: {}", String.join(" ", cmdLine));
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmdLine);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            byte[] output = process.getInputStream().readAllBytes();
+            int exitCode = process.waitFor();
+
+            String outputStr = new String(output).trim();
+            if (!outputStr.isEmpty()) {
+                logger.debug("Script output: {}", outputStr);
+            }
+            if (exitCode != 0) {
+                logger.error("VPC extension script {} failed with exit code {}: {}", command, exitCode, outputStr);
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            logger.error("Failed to execute VPC extension script {}: {}", command, e.getMessage(), e);
+            throw new CloudRuntimeException("Failed to execute VPC extension script: " + command, e);
+        }
     }
 
     protected PublicIpAddress getVpcSourceNatIp(long vpcId) {
@@ -2201,70 +2397,89 @@ public class NetworkExtensionElement extends AdapterBase implements
     }
 
     /**
-     * Creates the VPC namespace and applies VPC source NAT upfront.
+     * Implements the VPC by:
+     * <ol>
+     *   <li>Calling {@link #ensureExtensionDetails(Vpc)} to select a host and
+     *       save the VPC-level details (does not use any anchor tier network).</li>
+     *   <li>Calling the script's {@code implement-vpc} command to create the VPC
+     *       namespace and VPC-level networking state.</li>
+     *   <li>Applying VPC source NAT if a source-NAT IP already exists (the script's
+     *       {@code assign-ip} sets up the public veth + SNAT rule for the VPC CIDR).</li>
+     * </ol>
      */
     @Override
     public boolean implementVpc(Vpc vpc, DeployDestination dest, ReservationContext context)
             throws ConcurrentOperationException, ResourceUnavailableException, InsufficientCapacityException {
-        final Network anchorNetwork = findVpcAnchorNetwork(vpc.getId());
-        if (anchorNetwork == null) {
-            logger.debug("implementVpc: no VPC tier network found for vpc {}", vpc.getId());
-            return true;
+
+        // Step 1: Ensure a VPC extension device is selected and details saved at VPC level.
+        ensureExtensionDetails(vpc);
+
+        // Step 2: Create the VPC namespace (no anchor tier network needed).
+        List<String> implArgs = new ArrayList<>();
+        implArgs.add("--vpc-id");  implArgs.add(String.valueOf(vpc.getId()));
+        implArgs.add("--cidr");    implArgs.add(safeStr(vpc.getCidr()));
+
+        // Include source NAT IP if already allocated, so the script can set up the
+        // VPC-level SNAT rule for the entire VPC CIDR.
+        final PublicIpAddress sourceNatIp = getVpcSourceNatIp(vpc.getId());
+        if (sourceNatIp != null) {
+            implArgs.add("--public-ip");      implArgs.add(safeStr(sourceNatIp.getAddress().addr()));
+            implArgs.add("--public-vlan");    implArgs.add(safeStr(getPublicVlanTag(sourceNatIp.getId())));
+            implArgs.add("--public-gateway"); implArgs.add(safeStr(sourceNatIp.getGateway()));
+            implArgs.add("--public-cidr");    implArgs.add(safeStr(getPublicCidr(sourceNatIp.getId())));
+            implArgs.add("--source-nat");     implArgs.add("true");
         }
 
-        ensureExtensionDetails(anchorNetwork);
-        final String extensionIp = ensureExtensionIp(anchorNetwork);
-
-        final List<String> args = new ArrayList<>();
-        args.add("--network-id");   args.add(String.valueOf(anchorNetwork.getId()));
-        args.add("--vlan");         args.add(safeStr(getVlanId(anchorNetwork)));
-        args.add("--gateway");      args.add(safeStr(anchorNetwork.getGateway()));
-        args.add("--cidr");         args.add(safeStr(anchorNetwork.getCidr()));
-        args.add("--extension-ip"); args.add(safeStr(extensionIp));
-        args.addAll(getVpcIdArgs(anchorNetwork));
-
-        if (!executeScript(anchorNetwork, "implement", args.toArray(new String[0]))) {
+        if (!executeVpcScript(vpc, "implement-vpc", implArgs.toArray(new String[0]))) {
             return false;
-        }
-
-        if (canHandle(anchorNetwork, Service.SourceNat)) {
-            final PublicIpAddress sourceNatIp = getVpcSourceNatIp(vpc.getId());
-            if (sourceNatIp != null) {
-                applyIps(anchorNetwork, List.of(sourceNatIp), Set.of(Service.SourceNat));
-            }
         }
 
         return true;
     }
 
     /**
-     * Removes the shared VPC namespace by destroying all extension-backed VPC tiers.
+     * Shuts down the VPC by:
+     * <ol>
+     *   <li>Calling {@code destroy-network} for each extension-backed VPC tier (removes
+     *       tier resources but preserves the shared VPC namespace).</li>
+     *   <li>Calling {@code shutdown-vpc} to remove the VPC namespace and state after
+     *       all tiers have been cleaned up.</li>
+     * </ol>
      */
     @Override
     public boolean shutdownVpc(Vpc vpc, ReservationContext context)
             throws ConcurrentOperationException, ResourceUnavailableException {
         final List<? extends Network> networks = networkModel.listNetworksByVpc(vpc.getId());
-        if (networks == null || networks.isEmpty()) {
-            return true;
-        }
 
         boolean result = true;
-        for (final Network network : networks) {
-            if (!canHandle(network, null)) {
-                continue;
-            }
+        if (networks != null) {
+            for (final Network network : networks) {
+                if (!canHandle(network, null)) {
+                    continue;
+                }
 
-            final List<String> args = new ArrayList<>();
-            args.add("--network-id"); args.add(String.valueOf(network.getId()));
-            args.add("--vlan");       args.add(safeStr(getVlanId(network)));
-            args.addAll(getVpcIdArgs(network));
+                final List<String> args = new ArrayList<>();
+                args.add("--network-id"); args.add(String.valueOf(network.getId()));
+                args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+                args.addAll(getVpcIdArgs(network));
 
-            final boolean tierResult = executeScript(network, "destroy", args.toArray(new String[0]));
-            if (tierResult) {
-                networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
+                final boolean tierResult = executeScript(network, "destroy-network", args.toArray(new String[0]));
+                result = result && tierResult;
             }
-            result = result && tierResult;
         }
+
+        // Remove the VPC namespace and VPC-level details regardless of tier result.
+        List<String> vpcArgs = new ArrayList<>();
+        vpcArgs.add("--vpc-id"); vpcArgs.add(String.valueOf(vpc.getId()));
+        boolean vpcResult = executeVpcScript(vpc, "shutdown-vpc", vpcArgs.toArray(new String[0]));
+        if (vpcResult) {
+            try {
+                vpcDetailsDao.removeDetail(vpc.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
+            } catch (Exception e) {
+                logger.warn("Failed to remove VPC extension details for VPC {}: {}", vpc.getId(), e.getMessage());
+            }
+        }
+        result = result && vpcResult;
 
         return result;
     }
@@ -2302,17 +2517,135 @@ public class NetworkExtensionElement extends AdapterBase implements
         return true;
     }
 
+    /**
+     * Applies VPC network ACL rules for a VPC tier network via the script's
+     * {@code apply-network-acl} command.  Rules are serialised as a Base64-encoded
+     * JSON array and passed via a temporary payload file.
+     *
+     * <p>Script command: {@code apply-network-acl}</p>
+     */
     @Override
-    public boolean applyNetworkACLs(Network config, List<? extends NetworkACLItem> rules) throws ResourceUnavailableException {
+    public boolean applyNetworkACLs(Network config, List<? extends NetworkACLItem> rules)
+            throws ResourceUnavailableException {
         if (!canHandle(config, Service.NetworkACL)) {
             return true;
         }
-        // ACL semantics for this extension are handled by script policy/rule processing.
+
+        // Rebuild the ACL chain from all non-revoked rules.
+        List<? extends NetworkACLItem> activeRules = rules == null ? List.of() :
+                rules.stream()
+                     .filter(r -> r.getState() != NetworkACLItem.State.Revoke)
+                     .collect(Collectors.toList());
+
+        logger.info("applyNetworkACLs: network={} activeRules={}", config.getId(), activeRules.size());
+
+        String aclRulesBase64 = buildAclRulesBase64(activeRules);
+
+        List<String> args = new ArrayList<>();
+        args.add("--network-id"); args.add(String.valueOf(config.getId()));
+        args.add("--vlan");       args.add(safeStr(getVlanId(config)));
+        args.add("--gateway");    args.add(safeStr(config.getGateway()));
+        args.add("--cidr");       args.add(safeStr(config.getCidr()));
+        args.addAll(getVpcIdArgs(config));
+
+        boolean result = executeScriptWithFilePayload(config, "apply-network-acl",
+                "--acl-rules-file", aclRulesBase64, args.toArray(new String[0]));
+        if (!result) {
+            throw new ResourceUnavailableException(
+                    "Failed to apply network ACL rules for network " + config.getId(),
+                    Network.class, config.getId());
+        }
         return true;
     }
 
+    /**
+     * Re-applies ACL rules for all extension-backed networks in a VPC after a rule reorder.
+     * Calls {@code apply-network-acl} for each affected network with the full ACL item list.
+     */
     @Override
-    public boolean reorderAclRules(Vpc vpc, List<? extends Network> networks, List<? extends NetworkACLItem> networkACLItems) {
-        return true;
+    public boolean reorderAclRules(Vpc vpc, List<? extends Network> networks,
+            List<? extends NetworkACLItem> networkACLItems) {
+        if (networks == null || networks.isEmpty()) {
+            return true;
+        }
+
+        List<? extends NetworkACLItem> activeRules = networkACLItems == null ? List.of() :
+                networkACLItems.stream()
+                               .filter(r -> r.getState() != NetworkACLItem.State.Revoke)
+                               .collect(Collectors.toList());
+
+        boolean result = true;
+        for (Network network : networks) {
+            if (!canHandle(network, Service.NetworkACL)) {
+                continue;
+            }
+            try {
+                String aclRulesBase64 = buildAclRulesBase64(activeRules);
+
+                List<String> args = new ArrayList<>();
+                args.add("--network-id"); args.add(String.valueOf(network.getId()));
+                args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+                args.add("--gateway");    args.add(safeStr(network.getGateway()));
+                args.add("--cidr");       args.add(safeStr(network.getCidr()));
+                args.addAll(getVpcIdArgs(network));
+
+                boolean r = executeScriptWithFilePayload(network, "apply-network-acl",
+                        "--acl-rules-file", aclRulesBase64, args.toArray(new String[0]));
+                result = result && r;
+            } catch (Exception e) {
+                logger.warn("reorderAclRules: failed for network {}: {}", network.getId(), e.getMessage());
+                result = false;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Serialises a list of {@link NetworkACLItem}s to a Base64-encoded JSON array
+     * suitable for passing to the {@code apply-network-acl} script command.
+     * Rules are sorted by their number (priority order).
+     */
+    private String buildAclRulesBase64(List<? extends NetworkACLItem> rules) {
+        StringBuilder json = new StringBuilder("[");
+        boolean first = true;
+        List<? extends NetworkACLItem> sorted = rules.stream()
+                .sorted(java.util.Comparator.comparingInt(NetworkACLItem::getNumber))
+                .collect(Collectors.toList());
+        for (NetworkACLItem rule : sorted) {
+            if (!first) json.append(",");
+            first = false;
+            json.append("{");
+            json.append("\"number\":").append(rule.getNumber()).append(",");
+            json.append("\"action\":\"").append(rule.getAction().name().toLowerCase()).append("\",");
+            json.append("\"trafficType\":\"").append(rule.getTrafficType().name().toLowerCase()).append("\",");
+            json.append("\"protocol\":\"").append(jsonEscape(safeStr(rule.getProtocol()))).append("\"");
+            if (rule.getSourcePortStart() != null) {
+                json.append(",\"portStart\":").append(rule.getSourcePortStart());
+            }
+            if (rule.getSourcePortEnd() != null) {
+                json.append(",\"portEnd\":").append(rule.getSourcePortEnd());
+            }
+            if (rule.getIcmpType() != null) {
+                json.append(",\"icmpType\":").append(rule.getIcmpType());
+            }
+            if (rule.getIcmpCode() != null) {
+                json.append(",\"icmpCode\":").append(rule.getIcmpCode());
+            }
+            json.append(",\"sourceCidrs\":[");
+            List<String> sourceCidrs = rule.getSourceCidrList();
+            if (sourceCidrs != null && !sourceCidrs.isEmpty()) {
+                boolean firstCidr = true;
+                for (String cidr : sourceCidrs) {
+                    if (!firstCidr) json.append(",");
+                    firstCidr = false;
+                    json.append("\"").append(jsonEscape(cidr)).append("\"");
+                }
+            }
+            json.append("]");
+            json.append("}");
+        }
+        json.append("]");
+        return Base64.getEncoder().encodeToString(
+                json.toString().getBytes(StandardCharsets.UTF_8));
     }
 }
