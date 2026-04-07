@@ -2267,6 +2267,7 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     }
 
     public List<VpcProvider> getVpcElements() {
+        // Static providers (VPCVirtualRouter, JuniperContrailVpcRouter) are initialized once.
         if (vpcElements == null) {
             vpcElements = new ArrayList<VpcProvider>();
             final NetworkElement vpcVirtualRouter = _ntwkModel.getElementImplementingProvider(Provider.VPCVirtualRouter.getName());
@@ -2278,22 +2279,20 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
             if (contrailVpcRouter instanceof VpcProvider) {
                 vpcElements.add((VpcProvider) contrailVpcRouter);
             }
+        }
 
-            // Add extension-backed network orchestrators that can serve as VPC providers.
-            for (final Extension extension : extensionHelper.listExtensionsByType(Extension.Type.NetworkOrchestrator)) {
-                final String providerName = extension.getName();
-                final NetworkElement element = _ntwkModel.getElementImplementingProvider(providerName);
-                if (element instanceof VpcProvider) {
-                    vpcElements.add((VpcProvider) element);
-                }
+        // Extension-backed providers are re-fetched every call so that dynamically
+        // registered extensions are picked up without requiring a server restart.
+        final List<VpcProvider> result = new ArrayList<>(vpcElements);
+        for (final Extension extension : extensionHelper.listExtensionsByType(Extension.Type.NetworkOrchestrator)) {
+            final String providerName = extension.getName();
+            final NetworkElement element = _ntwkModel.getElementImplementingProvider(providerName);
+            if (element instanceof VpcProvider) {
+                result.add((VpcProvider) element);
             }
         }
 
-        if (vpcElements == null) {
-            throw new CloudRuntimeException("Failed to initialize vpc elements");
-        }
-
-        return vpcElements;
+        return result;
     }
 
     @Override
