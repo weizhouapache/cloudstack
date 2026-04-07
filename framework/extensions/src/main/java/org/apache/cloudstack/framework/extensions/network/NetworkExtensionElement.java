@@ -452,17 +452,31 @@ public class NetworkExtensionElement extends AdapterBase implements
             return false;
         }
 
-        // Step 3: Configure source NAT for non-VPC networks.
-        // VPC source NAT is managed at implementVpc().
-        if (network.getVpcId() == null && canHandle(network, Service.SourceNat)) {
-            try {
-                Account owner = accountService.getAccount(network.getAccountId());
-                PublicIpAddress existingIp = networkModel.getSourceNatIpAddressForGuestNetwork(owner, network);
-                if (existingIp != null) {
-                    applyIps(network, List.of(existingIp), Set.of(Service.SourceNat));
+        // Step 3: Configure source NAT.
+        if (canHandle(network, Service.SourceNat)) {
+            if (network.getVpcId() == null) {
+                // Isolated network: apply the network's own source NAT IP.
+                try {
+                    Account owner = accountService.getAccount(network.getAccountId());
+                    PublicIpAddress existingIp = networkModel.getSourceNatIpAddressForGuestNetwork(owner, network);
+                    if (existingIp != null) {
+                        applyIps(network, List.of(existingIp), Set.of(Service.SourceNat));
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to configure source NAT IP for network {}: {}", network.getId(), e.getMessage(), e);
                 }
-            } catch (Exception e) {
-                logger.warn("Failed to configure source NAT IP for network {}: {}", network.getId(), e.getMessage(), e);
+            } else {
+                // VPC tier: apply the VPC-level source NAT IP.
+                // implementVpc() may have been called before any tier existed (no-op then),
+                // so we eagerly apply it here on every tier implement; the script is idempotent.
+                try {
+                    final PublicIpAddress vpcSourceNatIp = getVpcSourceNatIp(network.getVpcId());
+                    if (vpcSourceNatIp != null) {
+                        applyIps(network, List.of(vpcSourceNatIp), Set.of(Service.SourceNat));
+                    }
+                } catch (Exception e) {
+                    logger.warn("Failed to configure VPC source NAT IP for VPC tier network {}: {}", network.getId(), e.getMessage(), e);
+                }
             }
         }
 
