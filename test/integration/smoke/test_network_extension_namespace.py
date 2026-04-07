@@ -348,6 +348,25 @@ class KvmHostDeployer:
         """Return comma-separated IP list of all configured hosts."""
         return ','.join(h.get('ip', '') for h in self.config_hosts if h.get('ip'))
 
+    def remove_file(self, remote_path):
+        """Remove wrapper script from all deployed KVM hosts."""
+        if not self._deployed_hosts:
+            self.logger.debug("No KVM hosts deployed — skipping remove_file")
+            return
+        for h in self.config_hosts:
+            ip       = h.get('ip', '')
+            username = h.get('username', 'root')
+            password = h.get('password', '')
+            if not ip or ip not in self._deployed_hosts:
+                continue
+            try:
+                SshClient(ip, 22, username, password).execute(
+                    "rm -f '%s'" % remote_path)
+                self.logger.info("Removed %s from KVM host %s", remote_path, ip)
+            except Exception as e:
+                self.logger.warning("Could not remove %s from %s: %s",
+                                   remote_path, ip, e)
+
 
 # ---------------------------------------------------------------------------
 # Test class
@@ -485,10 +504,6 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.kvm_deployer      = None
         self._ssh_private_key_file = None
 
-        # Skip every test when no KVM hosts are available in the Marvin config.
-        if not self.kvm_host_configs:
-            self.skipTest("No KVM hosts configured — skipping")
-
     def tearDown(self):
         #self._safe_teardown()
         try:
@@ -613,6 +628,11 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                 self.mgmt_deployer.remove_file(self._mgmt_script_path)
             self._mgmt_script_path = None
 
+    def _cleanup_kvm_script(self):
+        """Remove KVM wrapper script from all deployed KVM hosts."""
+        if self.kvm_deployer and self.kvm_deployer._dest_path:
+            self.kvm_deployer.remove_file(self.kvm_deployer._dest_path)
+
     # ------------------------------------------------------------------
     # Teardown helper
     # ------------------------------------------------------------------
@@ -643,6 +663,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                 pass
             self.extension = None
         self._cleanup_mgmt_script()
+        self._cleanup_kvm_script()
 
     # ------------------------------------------------------------------
     # SSH helpers (provider-agnostic — no KVM namespace checks)
@@ -1014,6 +1035,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.extension        = None
         self.physical_network = None
         self._cleanup_mgmt_script()
+        self._cleanup_kvm_script()
 
     # ------------------------------------------------------------------
     # Tests — API-only (no KVM / no SSH)

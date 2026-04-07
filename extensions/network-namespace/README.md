@@ -743,6 +743,56 @@ Actions (superset of shutdown):
 > are NOT removed on destroy — they may still be used by other networks or for
 > VM connectivity.
 
+### VPC lifecycle commands: `implement-vpc`, `shutdown-vpc`, `destroy-vpc`
+
+These commands manage VPC-level state. Called by `NetworkExtensionElement` when
+implementing, shutting down, or destroying a VPC (before or after per-tier
+network operations).
+
+#### `implement-vpc`
+
+```
+network-namespace-wrapper.sh implement-vpc \
+    --vpc-id <vpc-id> \
+    --cidr <vpc-cidr>
+```
+
+Actions:
+1. Create the shared VPC namespace `cs-vpc-<vpc-id>`.
+2. Enable IP forwarding inside the namespace.
+3. Create iptables chains for NAT and filter rules.
+4. Save VPC metadata (CIDR, gateway) to state files under `/var/lib/cloudstack/<ext-name>/vpc-<vpc-id>/`.
+
+> This command runs **before** any tier networks are implemented. Tier networks
+> inherit the same namespace and host assignment.
+
+#### `shutdown-vpc`
+
+```
+network-namespace-wrapper.sh shutdown-vpc \
+    --vpc-id <vpc-id>
+```
+
+Actions:
+1. Flush all iptables rules (ingress, egress, NAT chains inside the namespace).
+2. Stop all services (dnsmasq, haproxy, apache2, password-server) for all tiers.
+3. Keep the namespace and tier veths intact (tiers may restart).
+
+> Called when the VPC is shut down; tier networks may be restarted later.
+
+#### `destroy-vpc`
+
+```
+network-namespace-wrapper.sh destroy-vpc \
+    --vpc-id <vpc-id>
+```
+
+Actions:
+1. Remove the entire namespace `cs-vpc-<vpc-id>` (deletes all interfaces inside).
+2. Remove VPC-wide state directory `/var/lib/cloudstack/<ext-name>/vpc-<vpc-id>/`.
+
+> This is the final cleanup step; after this, the VPC namespace is gone.
+
 ### `assign-ip`
 
 Called when a public IP is associated with the network (including source NAT).
@@ -928,6 +978,55 @@ iptables design (two independent parts, both inside the namespace):
   Inserted at position 1 of `CS_EXTNET_FWD_<networkId>`.  Applies the
   `default_egress_allow` policy (allow-by-default or deny-by-default) to VM
   outbound traffic on `-i vn-<vlan>-<id>`.
+
+### `apply-network-acl`
+
+Apply Network ACL (Access Control List) rules for VPC networks.
+
+```
+network-namespace-wrapper.sh apply-network-acl \
+    --network-id <id> \
+    --vlan <vlan-id> \
+    --acl-rules <base64-json> \
+    [--vpc-id <vpc-id>]
+```
+
+The `--acl-rules` value is a Base64-encoded JSON array of ACL rule objects:
+```json
+[
+  {
+    "id": 1,
+    "number": 100,
+    "trafficType": "Ingress",
+    "action": "Allow",
+    "protocol": "tcp",
+    "portStart": 80,
+    "portEnd": 80,
+    "sourceCidrs": ["0.0.0.0/0"]
+  },
+  {
+    "id": 2,
+    "number": 200,
+    "trafficType": "Egress",
+    "action": "Allow",
+    "protocol": "all",
+    "destCidrs": ["0.0.0.0/0"]
+  }
+]
+```
+
+iptables design:
+
+* **Ingress rules** (filter FORWARD, chain `CS_EXTNET_ACL_IN_<networkId>`):
+  Matches `-i vn-<vlan>-<id>` (traffic entering the VM namespace),
+  ordered by rule number.  Actions: ACCEPT or DROP.
+
+* **Egress rules** (filter FORWARD, chain `CS_EXTNET_ACL_OUT_<networkId>`):
+  Matches `-o vn-<vlan>-<id>` (traffic leaving the VM namespace),
+  ordered by rule number.  Actions: ACCEPT or DROP.
+
+Both chains are inserted at position 1 of `CS_EXTNET_FWD_<networkId>` so ACL rules
+take precedence over the catch-all ACCEPT rules.
 
 ### `config-dhcp-subnet` / `remove-dhcp-subnet`
 
@@ -1226,6 +1325,23 @@ argument; hook scripts should parse the JSON argument as needed.
 
 ## Developer / testing notes
 
+### VPC Support
+
+The extension now supports **VPC (Virtual Private Cloud)** networks in addition to
+isolated networks.  Key differences from isolated networks:
+
+* **Namespace sharing**: All tiers of a VPC share a single namespace (`cs-vpc-<vpcId>`)
+  instead of each network getting its own (`cs-net-<networkId>`).
+* **Host affinity**: All tiers of a VPC land on the same KVM host via stable hash-based
+  selection using the VPC ID as the routing key.
+* **VPC-level operations**: `implement-vpc`, `shutdown-vpc`, `destroy-vpc` commands
+  manage VPC-wide state (namespace creation/teardown).
+* **VPC tier operations**: `implement-network`, `shutdown-network`, `destroy-network`
+  commands manage per-tier bridges and routes; the namespace is preserved across
+  tier lifecycle operations.
+
+### Integration tests
+
 The integration smoke test at
 `test/integration/smoke/test_network_extension_namespace.py`
 exercises the full lifecycle against real KVM hosts in the zone.
@@ -1248,10 +1364,12 @@ The test covers:
 * Create / list / update / delete external network device.
 * Full network lifecycle: implement → assign-ip (source NAT) → static NAT →
   port forwarding → firewall rules → DHCP/DNS → shutdown / destroy.
+* VPC multi-tier networks with shared namespace and automatic host affinity.
 * NSP state transitions: Disabled → Enabled → Disabled → Deleted.
 * Tests `test_04`, `test_05`, `test_06` (DHCP, DNS, LB) require `arping`,
   `dnsmasq`, and `haproxy` on the KVM hosts; the test skips them automatically
   if these tools are not installed.
+* Script cleanup on both management server and KVM hosts after each test.
 
 Run the test:
 ```bash
