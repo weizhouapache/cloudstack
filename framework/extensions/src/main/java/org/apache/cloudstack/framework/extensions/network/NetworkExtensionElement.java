@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
 
 import javax.inject.Inject;
 import javax.naming.ConfigurationException;
@@ -933,6 +934,34 @@ public class NetworkExtensionElement extends AdapterBase implements
         }
     }
 
+    /**
+     * Writes a potentially large payload to a temporary file and passes the file path
+     * to the extension script via {@code payloadArgName}. This avoids argv size limits
+     * for multi-MB payloads.
+     */
+    protected boolean executeScriptWithFilePayload(Network network, String command,
+            String payloadArgName, String payload, String... args) {
+        File payloadFile = null;
+        try {
+            payloadFile = File.createTempFile("cs-extnet-" + command + "-", ".payload");
+            Files.writeString(payloadFile.toPath(), payload != null ? payload : "", StandardCharsets.UTF_8);
+
+            List<String> cmdArgs = new ArrayList<>();
+            cmdArgs.addAll(Arrays.asList(args));
+            cmdArgs.add(payloadArgName);
+            cmdArgs.add(payloadFile.getAbsolutePath());
+
+            return executeScript(network, command, cmdArgs.toArray(new String[0]));
+        } catch (Exception e) {
+            throw new CloudRuntimeException(
+                    String.format("Failed preparing payload file for command %s", command), e);
+        } finally {
+            if (payloadFile != null && payloadFile.exists() && !payloadFile.delete()) {
+                payloadFile.deleteOnExit();
+            }
+        }
+    }
+
     // ---- Detail helpers ----
 
     /**
@@ -1502,10 +1531,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id");   args.add(String.valueOf(network.getId()));
         args.add("--ip");           args.add(safeStr(nicIpAddress));
         args.add("--gateway");      args.add(safeStr(nic.getIPv4Gateway()));
-        args.add("--vm-data");      args.add(vmDataArg);
         args.add("--extension-ip"); args.add(safeStr(ensureExtensionIp(network)));
         args.addAll(getVpcIdArgs(network));
-        return executeScript(network, "save-vm-data", args.toArray(new String[0]));
+        return executeScriptWithFilePayload(network, "save-vm-data", "--vm-data-file",
+                vmDataArg, args.toArray(new String[0]));
     }
 
     @Override
@@ -1840,10 +1869,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--vlan");        args.add(safeStr(getVlanId(network)));
         args.add("--gateway");     args.add(safeStr(network.getGateway()));
         args.add("--cidr");        args.add(safeStr(network.getCidr()));
-        args.add("--fw-rules");    args.add(rulesBase64);
         args.addAll(getVpcIdArgs(network));
 
-        boolean result = executeScript(network, "apply-fw-rules", args.toArray(new String[0]));
+        boolean result = executeScriptWithFilePayload(network, "apply-fw-rules", "--fw-rules-file",
+                rulesBase64, args.toArray(new String[0]));
         if (!result) {
             throw new ResourceUnavailableException(
                     "Failed to apply firewall rules for network " + network.getId(),
@@ -1919,10 +1948,10 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--extension-ip");  args.add(safeStr(extensionIp));
         args.add("--dns");           args.add(safeStr(getNetworkDns(network)));
         args.add("--domain");        args.add(safeStr(network.getNetworkDomain()));
-        args.add("--restore-data");  args.add(restoreDataBase64);
         args.addAll(getVpcIdArgs(network));
 
-        return executeScript(network, "restore-network", args.toArray(new String[0]));
+        return executeScriptWithFilePayload(network, "restore-network", "--restore-data-file",
+                restoreDataBase64, args.toArray(new String[0]));
     }
 
     /**

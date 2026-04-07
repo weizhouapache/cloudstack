@@ -460,10 +460,13 @@ parse_args() {
     LB_RULES_JSON="[]"
     DEFAULT_NIC="true"
     VM_DATA=""
+    VM_DATA_FILE=""
     DOMAIN=""
     EXTENSION_IP=""
     RESTORE_DATA=""
+    RESTORE_DATA_FILE=""
     FW_RULES_JSON=""
+    FW_RULES_FILE=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -495,10 +498,13 @@ parse_args() {
             --lb-rules)            LB_RULES_JSON="$2";       shift 2 ;;
             --default-nic)         DEFAULT_NIC="$2";         shift 2 ;;
             --vm-data)             VM_DATA="$2";             shift 2 ;;
+            --vm-data-file)        VM_DATA_FILE="$2";        shift 2 ;;
             --domain)              DOMAIN="$2";              shift 2 ;;
             --extension-ip)        EXTENSION_IP="$2";        shift 2 ;;
             --restore-data)        RESTORE_DATA="$2";        shift 2 ;;
+            --restore-data-file)   RESTORE_DATA_FILE="$2";   shift 2 ;;
             --fw-rules)            FW_RULES_JSON="$2";       shift 2 ;;
+            --fw-rules-file)       FW_RULES_FILE="$2";       shift 2 ;;
             # consumed by _pre_scan_args — skip silently
             --physical-network-extension-details|--network-extension-details)
                                    shift 2 ;;
@@ -2231,20 +2237,36 @@ cmd_save_vm_data() {
     acquire_lock "${NETWORK_ID}"
     log "save-vm-data: network=${NETWORK_ID} ip=${VM_IP}"
     [ -z "${VM_IP}" ]   && die "save-vm-data: missing --ip"
-    [ -z "${VM_DATA}" ] && die "save-vm-data: missing --vm-data"
+
+    local vm_data_file="${VM_DATA_FILE}"
+    local cleanup_vm_data_file="false"
+    if [ -z "${vm_data_file}" ]; then
+        [ -z "${VM_DATA}" ] && die "save-vm-data: missing --vm-data or --vm-data-file"
+        vm_data_file=$(mktemp /tmp/cs-extnet-vm-data-XXXXXX)
+        cleanup_vm_data_file="true"
+        printf '%s' "${VM_DATA}" > "${vm_data_file}"
+    fi
+    [ -f "${vm_data_file}" ] || die "save-vm-data: payload file not found: ${vm_data_file}"
 
     local meta_dir; meta_dir=$(_metadata_dir)
     local passwd_f; passwd_f=$(_passwd_file)
     mkdir -p "${meta_dir}" "$(dirname "${passwd_f}")"
     touch "${passwd_f}"
 
-    python3 - "${VM_IP}" "${meta_dir}" "${passwd_f}" "${VM_DATA}" << 'PYEOF'
+    python3 - "${VM_IP}" "${meta_dir}" "${passwd_f}" "${vm_data_file}" << 'PYEOF'
 import base64, json, os, sys
 
 vm_ip      = sys.argv[1]
 meta_dir   = sys.argv[2]
 passwd_f   = sys.argv[3]
-data_b64   = sys.argv[4]
+data_file  = sys.argv[4]
+
+try:
+    with open(data_file, 'r', encoding='utf-8') as f:
+        data_b64 = f.read().strip()
+except Exception as e:
+    print(f"save-vm-data: failed to read vm-data file: {e}", file=sys.stderr)
+    sys.exit(1)
 
 # Decode the outer base64 wrapper, then parse the JSON array
 try:
@@ -2321,6 +2343,10 @@ if password_written:
 print(f"save-vm-data: wrote {len(entries)} entries for {vm_ip}")
 PYEOF
 
+    if [ "${cleanup_vm_data_file}" = "true" ]; then
+        rm -f "${vm_data_file}" 2>/dev/null || true
+    fi
+
     _write_apache2_conf
     _svc_start_or_reload_apache2
     _svc_start_or_reload_passwd_server
@@ -2389,6 +2415,15 @@ cmd_apply_fw_rules() {
     acquire_lock "${NETWORK_ID}"
     log "apply-fw-rules: network=${NETWORK_ID} ns=${NAMESPACE}"
 
+    local fw_rules_file="${FW_RULES_FILE}"
+    local cleanup_fw_rules_file="false"
+    if [ -z "${fw_rules_file}" ]; then
+        fw_rules_file=$(mktemp /tmp/cs-extnet-fw-rules-XXXXXX)
+        cleanup_fw_rules_file="true"
+        printf '%s' "${FW_RULES_JSON:-}" > "${fw_rules_file}"
+    fi
+    [ -f "${fw_rules_file}" ] || die "apply-fw-rules: payload file not found: ${fw_rules_file}"
+
     local veth_n fchain fw_chain
     veth_n=$(veth_ns_name "${VLAN}" "${CHOSEN_ID}")
     fchain=$(filter_chain "${NETWORK_ID}")
@@ -2406,14 +2441,21 @@ cmd_apply_fw_rules() {
     ip netns exec "${NAMESPACE}" iptables -t filter -N "${fw_chain}"
 
     # ---- 4. Build iptables rules via Python ----
-    python3 - "${NAMESPACE}" "${FW_RULES_JSON:-}" "${veth_n}" \
+    python3 - "${NAMESPACE}" "${fw_rules_file}" "${veth_n}" \
               "${fw_chain}" << 'PYEOF'
 import base64, json, re, subprocess, sys
 
 namespace = sys.argv[1]
-rules_b64 = sys.argv[2]
+rules_file = sys.argv[2]
 veth_n    = sys.argv[3]
 fw_chain  = sys.argv[4]   # filter table egress chain (CS_EXTNET_FWRULES_<N>)
+
+try:
+    with open(rules_file, 'r', encoding='utf-8') as f:
+        rules_b64 = f.read().strip()
+except Exception as e:
+    print(f"apply-fw-rules: failed to read rules file: {e}", file=sys.stderr)
+    sys.exit(1)
 
 # Prefix for per-public-IP ingress chains in the mangle table.
 # e.g. CS_EXTNET_FWI_10.0.56.20
@@ -2592,6 +2634,11 @@ print(f"apply-fw-rules: built {n_in} ingress rule(s) across {len(pub_ip_rules)} 
 PYEOF
 
     local py_exit=$?
+
+    if [ "${cleanup_fw_rules_file}" = "true" ]; then
+        rm -f "${fw_rules_file}" 2>/dev/null || true
+    fi
+
     if [ ${py_exit} -ne 0 ]; then
         # Python script failed — leave chain empty but continue so that the
         # fchain catch-all rules remain effective (fail-open for existing traffic).
@@ -2768,7 +2815,16 @@ cmd_restore_network() {
     _load_state
     acquire_lock "${NETWORK_ID}"
     log "restore-network: network=${NETWORK_ID} ns=${NAMESPACE}"
-    [ -z "${RESTORE_DATA}" ] && die "restore-network: missing --restore-data"
+
+    local restore_data_file="${RESTORE_DATA_FILE}"
+    local cleanup_restore_data_file="false"
+    if [ -z "${restore_data_file}" ]; then
+        [ -z "${RESTORE_DATA}" ] && die "restore-network: missing --restore-data or --restore-data-file"
+        restore_data_file=$(mktemp /tmp/cs-extnet-restore-data-XXXXXX)
+        cleanup_restore_data_file="true"
+        printf '%s' "${RESTORE_DATA}" > "${restore_data_file}"
+    fi
+    [ -f "${restore_data_file}" ] || die "restore-network: payload file not found: ${restore_data_file}"
 
     local dhcp_hosts; dhcp_hosts=$(_dnsmasq_dhcp_hosts)
     local dhcp_opts;  dhcp_opts=$(_dnsmasq_dhcp_opts)
@@ -2780,18 +2836,25 @@ cmd_restore_network() {
     touch "${dhcp_hosts}" "${dhcp_opts}" "${dns_hosts}" "${passwd_f}"
 
     python3 - \
-        "${RESTORE_DATA}" \
+        "${restore_data_file}" \
         "${dhcp_hosts}" "${dhcp_opts}" "${dns_hosts}" \
         "${meta_dir}" "${passwd_f}" \
         << 'PYEOF'
 import base64, json, os, sys
 
-restore_b64  = sys.argv[1]
+restore_file = sys.argv[1]
 dhcp_hosts_f = sys.argv[2]
 dhcp_opts_f  = sys.argv[3]
 dns_hosts_f  = sys.argv[4]
 meta_dir     = sys.argv[5]
 passwd_f     = sys.argv[6]
+
+try:
+    with open(restore_file, 'r', encoding='utf-8') as f:
+        restore_b64 = f.read().strip()
+except Exception as e:
+    print(f"restore-network: failed to read restore-data file: {e}", file=sys.stderr)
+    sys.exit(1)
 
 # ---- Decode the outer base64, then parse JSON ----
 try:
@@ -2938,16 +3001,16 @@ print("restore-network: done")
 PYEOF
 
     # ------------------------------------------------------------------
-    # Decode dhcp_enabled / dns_enabled from RESTORE_DATA so we can
+    # Decode dhcp_enabled / dns_enabled from restore_data_file so we can
     # reconfigure dnsmasq correctly even when the namespace (and therefore
-    # dnsmasq.conf) was deleted and recreated.  RESTORE_DATA is passed as
-    # a positional argument to avoid shell-quoting issues with base64 data.
+    # dnsmasq.conf) was deleted and recreated.
     # ------------------------------------------------------------------
     local _r_flags
-    _r_flags=$(python3 - "${RESTORE_DATA}" 2>/dev/null << 'PYFLAGSEOF'
-import base64, json, sys
+    _r_flags=$(python3 - "${restore_data_file}" 2>/dev/null << 'PYFLAGSEOF'
+import base64, json, sys, pathlib
 try:
-    d = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+    b64_data = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip()
+    d = json.loads(base64.b64decode(b64_data).decode('utf-8'))
     dhcp = 'true' if d.get('dhcp_enabled', False) else 'false'
     dns  = 'true' if d.get('dns_enabled',  False) else 'false'
     print(dhcp + ' ' + dns)
@@ -2955,6 +3018,10 @@ except Exception:
     print('false false')
 PYFLAGSEOF
 )
+
+    if [ "${cleanup_restore_data_file}" = "true" ]; then
+        rm -f "${restore_data_file}" 2>/dev/null || true
+    fi
     local _r_dhcp _r_dns
     _r_dhcp="${_r_flags%% *}"; _r_dhcp="${_r_dhcp:-false}"
     _r_dns="${_r_flags##* }";  _r_dns="${_r_dns:-false}"

@@ -152,6 +152,9 @@ EXTENSION_DETAILS="{}"
 NETWORK_ID=""
 CURRENT_DETAILS="{}"
 VPC_ID=""
+VM_DATA_FILE=""
+FW_RULES_FILE=""
+RESTORE_DATA_FILE=""
 FORWARD_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -172,6 +175,15 @@ while [ $# -gt 0 ]; do
             shift 2 ;;
         --current-details)
             CURRENT_DETAILS="${2:-{}}"
+            shift 2 ;;
+        --vm-data-file)
+            VM_DATA_FILE="${2:-}"
+            shift 2 ;;
+        --fw-rules-file)
+            FW_RULES_FILE="${2:-}"
+            shift 2 ;;
+        --restore-data-file)
+            RESTORE_DATA_FILE="${2:-}"
             shift 2 ;;
         *)
             FORWARD_ARGS+=("$1")
@@ -280,6 +292,22 @@ ssh_exec() {
     fi
 }
 
+upload_file_to_remote() {
+    local host="$1" local_file="$2" tag="$3"
+    [ -f "${local_file}" ] || die "Missing local payload file: ${local_file}" 1
+
+    local remote_tmp
+    remote_tmp=$(ssh_exec "${host}" "mktemp /tmp/cs-extnet-${tag}-XXXXXX") || \
+        die "Failed to create remote temp file for ${tag}" 2
+    remote_tmp=$(printf '%s' "${remote_tmp}" | tr -d '\r\n')
+    [ -n "${remote_tmp}" ] || die "Failed to resolve remote temp file for ${tag}" 2
+
+    cat "${local_file}" | ssh_exec "${host}" "cat > '${remote_tmp}' && chmod 600 '${remote_tmp}'" || \
+        die "Failed to upload payload file for ${tag}" 2
+
+    printf '%s' "${remote_tmp}"
+}
+
 # ---------------------------------------------------------------------------
 # ensure-network-device
 # ---------------------------------------------------------------------------
@@ -386,6 +414,23 @@ for arg in "${FORWARD_ARGS[@]}"; do
     remote_args+=("'${arg//"'"/"'\\''"}'" )
 done
 
+REMOTE_PAYLOAD_FILES=()
+if [ -n "${VM_DATA_FILE}" ]; then
+    REMOTE_VM_DATA_FILE=$(upload_file_to_remote "${REMOTE_HOST}" "${VM_DATA_FILE}" "vm-data")
+    REMOTE_PAYLOAD_FILES+=("${REMOTE_VM_DATA_FILE}")
+    remote_args+=("'--vm-data-file'" "'${REMOTE_VM_DATA_FILE//"'"/"'\\''"}'")
+fi
+if [ -n "${FW_RULES_FILE}" ]; then
+    REMOTE_FW_RULES_FILE=$(upload_file_to_remote "${REMOTE_HOST}" "${FW_RULES_FILE}" "fw-rules")
+    REMOTE_PAYLOAD_FILES+=("${REMOTE_FW_RULES_FILE}")
+    remote_args+=("'--fw-rules-file'" "'${REMOTE_FW_RULES_FILE//"'"/"'\\''"}'")
+fi
+if [ -n "${RESTORE_DATA_FILE}" ]; then
+    REMOTE_RESTORE_DATA_FILE=$(upload_file_to_remote "${REMOTE_HOST}" "${RESTORE_DATA_FILE}" "restore-data")
+    REMOTE_PAYLOAD_FILES+=("${REMOTE_RESTORE_DATA_FILE}")
+    remote_args+=("'--restore-data-file'" "'${REMOTE_RESTORE_DATA_FILE//"'"/"'\\''"}'")
+fi
+
 PHYS_ESCAPED="${PHYS_DETAILS//\'/\'\\\'\'}"
 EXT_ESCAPED="${EXTENSION_DETAILS//\'/\'\\\'\'}"
 REMOTE_CMD="'${REMOTE_SCRIPT}' '${COMMAND}' ${remote_args[*]} --physical-network-extension-details '${PHYS_ESCAPED}' --network-extension-details '${EXT_ESCAPED}'"
@@ -394,6 +439,12 @@ log "Remote: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_PORT} cmd=${COMMAND}"
 
 RC=0
 ssh_exec "${REMOTE_HOST}" "${REMOTE_CMD}" || RC=$?
+
+if [ ${#REMOTE_PAYLOAD_FILES[@]} -gt 0 ]; then
+    for _rf in "${REMOTE_PAYLOAD_FILES[@]}"; do
+        ssh_exec "${REMOTE_HOST}" "rm -f '${_rf}'" >/dev/null 2>&1 || true
+    done
+fi
 
 if [ ${RC} -ne 0 ]; then
     if [ ${RC} -eq 255 ]; then
