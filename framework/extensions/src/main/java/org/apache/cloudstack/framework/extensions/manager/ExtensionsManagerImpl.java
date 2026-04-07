@@ -963,7 +963,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
     }
 
     @Override
-    @ActionEvent(eventType = EventTypes.EVENT_EXTENSION_RESOURCE_REGISTER, eventDescription = "updating extension resource")
+    @ActionEvent(eventType = EventTypes.EVENT_EXTENSION_RESOURCE_UPDATE, eventDescription = "updating extension resource")
     public Extension updateRegisteredExtensionWithResource(UpdateRegisteredExtensionCmd cmd) {
         final String resourceId = cmd.getResourceId();
         final Long extensionId = cmd.getExtensionId();
@@ -1023,7 +1023,30 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             extensionResourceMapDetailsDao.removeDetails(targetMapping.getId());
         }
         if (MapUtils.isNotEmpty(details)) {
-            updateExtensionResourceMapDetails(targetMapping.getId(), details);
+            // For sensitive keys (password, sshkey): if the caller explicitly
+            // passes a non-blank value → update; passes null/blank → remove the
+            // stored entry; omits the key entirely → leave existing value intact.
+            Map<String, String> nonSensitive = new HashMap<>();
+            for (Map.Entry<String, String> entry : details.entrySet()) {
+                String key = entry.getKey();
+                String value = entry.getValue();
+                if (SENSITIVE_DETAIL_KEYS.contains(key.toLowerCase())) {
+                    if (StringUtils.isNotBlank(value)) {
+                        // Explicit non-blank value: update the stored secret.
+                        extensionResourceMapDetailsDao.addDetail(
+                                targetMapping.getId(), key, value, false);
+                    } else {
+                        // Explicit null / blank value: remove the stored secret.
+                        extensionResourceMapDetailsDao.removeDetail(
+                                targetMapping.getId(), key);
+                    }
+                } else {
+                    nonSensitive.put(key, value);
+                }
+            }
+            if (MapUtils.isNotEmpty(nonSensitive)) {
+                updateExtensionResourceMapDetails(targetMapping.getId(), nonSensitive);
+            }
         }
 
         return extensionDao.findById(extensionId);

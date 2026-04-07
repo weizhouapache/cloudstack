@@ -83,8 +83,8 @@ KVM_STATE_DIR = '/var/lib/cloudstack/network-namespace'
 
 # Remote URLs to download the scripts from
 _GITHUB_BASE = (
-    'https://raw.githubusercontent.com/weizhouapache/cloudstack'
-    '/refs/heads/4.22.0.0-ext/extensions/network-namespace'
+    'https://raw.githubusercontent.com/apache/cloudstack-extensions'
+    '/refs/heads/network-namespace/Network-Namespace'
 )
 WRAPPER_SCRIPT_URL     = _GITHUB_BASE + '/network-namespace-wrapper.sh'
 ENTRY_POINT_SCRIPT_URL = _GITHUB_BASE + '/network-namespace.sh'
@@ -487,6 +487,10 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.kvm_deployer      = None
         self._ssh_private_key_file = None
 
+        # Skip every test when no KVM hosts are available in the Marvin config.
+        if not self.kvm_host_configs:
+            self.skipTest("No KVM hosts configured — skipping")
+
     def tearDown(self):
         #self._safe_teardown()
         try:
@@ -748,8 +752,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         if tools is None:
             tools = ['arping', 'dnsmasq', 'haproxy']
         if not self.kvm_host_configs:
-            # No KVM hosts — _setup_extension_nsp_offering will skipTest.
-            return
+            self.skipTest("No KVM hosts configured — skipping prerequisite check")
 
         missing_per_host = {}
         for h in self.kvm_host_configs:

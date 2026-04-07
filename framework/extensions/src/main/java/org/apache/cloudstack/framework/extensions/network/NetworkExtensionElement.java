@@ -274,7 +274,7 @@ public class NetworkExtensionElement extends AdapterBase implements
      * command and may contain any fields the script needs (e.g. selected host,
      * namespace name, VRF ID, …).
      */
-    public static final String NETWORK_DETAIL_EXTENSION_DETAILS = "ext.details";
+    public static final String NETWORK_DETAIL_EXTENSION_DETAILS = "extension.details";
 
     public String getProviderName() {
         return providerName;
