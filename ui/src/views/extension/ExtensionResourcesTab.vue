@@ -35,6 +35,14 @@
         </template>
         <template v-if="column.key === 'actions'">
           <span style="margin-right: 5px">
+            <tooltip-button
+              v-if="'updateRegisteredExtension' in $store.getters.apis"
+              :tooltip="$t('label.action.update.extension.resource')"
+              type="default"
+              icon="edit-outlined"
+              @onClick="openUpdateModal(record)" />
+          </span>
+          <span style="margin-right: 5px">
             <a-popconfirm
               v-if="'unregisterExtension' in $store.getters.apis"
               placement="topRight"
@@ -59,6 +67,19 @@
           :data-map="record.details" />
       </template>
     </a-table>
+    <a-modal
+      v-if="updateModalVisible"
+      :visible="updateModalVisible"
+      :title="$t('label.action.update.extension.resource')"
+      :closable="true"
+      :footer="null"
+      @cancel="closeUpdateModal">
+      <update-registered-extension
+        :resource="resource"
+        :extension-resource="selectedResource"
+        @refresh-data="$emit('refresh-data')"
+        @close-action="closeUpdateModal" />
+    </a-modal>
   </div>
 </template>
 
@@ -67,12 +88,14 @@ import { postAPI } from '@/api'
 import eventBus from '@/config/eventBus'
 import ObjectListTable from '@/components/view/ObjectListTable.vue'
 import TooltipButton from '@/components/widgets/TooltipButton'
+import UpdateRegisteredExtension from '@/views/extension/UpdateRegisteredExtension'
 
 export default {
   name: 'ExtensionResourcesTab',
   components: {
     ObjectListTable,
-    TooltipButton
+    TooltipButton,
+    UpdateRegisteredExtension
   },
   props: {
     resource: {
@@ -103,7 +126,9 @@ export default {
           title: this.$t('label.actions')
         }
       ],
-      unregisterLoading: false
+      unregisterLoading: false,
+      updateModalVisible: false,
+      selectedResource: null
     }
   },
   computed: {
@@ -112,13 +137,22 @@ export default {
     }
   },
   methods: {
+    openUpdateModal (record) {
+      this.selectedResource = record
+      this.updateModalVisible = true
+    },
+    closeUpdateModal () {
+      this.updateModalVisible = false
+      this.selectedResource = null
+    },
     unregisterExtension (record) {
       const params = {
         extensionid: this.resource.id,
         resourceid: record.id,
         resourcetype: record.type
       }
-      postAPI('unregisterExtension', params).then(json => {
+      this.unregisterLoading = true
+      postAPI('unregisterExtension', params).then(() => {
         eventBus.emit('async-job-complete', null)
         this.$notification.success({
           message: this.$t('label.unregister.extension'),
@@ -127,7 +161,7 @@ export default {
       }).catch(error => {
         this.$notifyError(error)
       }).finally(() => {
-        this.deleteLoading = false
+        this.unregisterLoading = false
       })
     }
   }

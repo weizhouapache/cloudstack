@@ -84,6 +84,7 @@ import org.apache.cloudstack.api.command.user.vpc.RestartVPCCmd;
 import org.apache.cloudstack.api.command.user.vpc.UpdateVPCCmd;
 import org.apache.cloudstack.context.CallContext;
 import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
+import org.apache.cloudstack.extension.Extension;
 import org.apache.cloudstack.extension.ExtensionHelper;
 import org.apache.cloudstack.framework.config.ConfigKey;
 import org.apache.cloudstack.framework.config.Configurable;
@@ -2268,8 +2269,24 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
     public List<VpcProvider> getVpcElements() {
         if (vpcElements == null) {
             vpcElements = new ArrayList<VpcProvider>();
-            vpcElements.add((VpcProvider) _ntwkModel.getElementImplementingProvider(Provider.VPCVirtualRouter.getName()));
-            vpcElements.add((VpcProvider) _ntwkModel.getElementImplementingProvider(Provider.JuniperContrailVpcRouter.getName()));
+            final NetworkElement vpcVirtualRouter = _ntwkModel.getElementImplementingProvider(Provider.VPCVirtualRouter.getName());
+            if (vpcVirtualRouter instanceof VpcProvider) {
+                vpcElements.add((VpcProvider) vpcVirtualRouter);
+            }
+
+            final NetworkElement contrailVpcRouter = _ntwkModel.getElementImplementingProvider(Provider.JuniperContrailVpcRouter.getName());
+            if (contrailVpcRouter instanceof VpcProvider) {
+                vpcElements.add((VpcProvider) contrailVpcRouter);
+            }
+
+            // Add extension-backed network orchestrators that can serve as VPC providers.
+            for (final Extension extension : extensionHelper.listExtensionsByType(Extension.Type.NetworkOrchestrator)) {
+                final String providerName = extension.getName();
+                final NetworkElement element = _ntwkModel.getElementImplementingProvider(providerName);
+                if (element instanceof VpcProvider) {
+                    vpcElements.add((VpcProvider) element);
+                }
+            }
         }
 
         if (vpcElements == null) {

@@ -67,11 +67,17 @@ import com.cloud.network.element.DnsServiceProvider;
 import com.cloud.network.element.FirewallServiceProvider;
 import com.cloud.network.element.IpDeployer;
 import com.cloud.network.element.LoadBalancingServiceProvider;
+import com.cloud.network.element.NetworkACLServiceProvider;
 import com.cloud.network.element.NetworkElement;
 import com.cloud.network.element.PortForwardingServiceProvider;
 import com.cloud.network.element.SourceNatServiceProvider;
 import com.cloud.network.element.StaticNatServiceProvider;
 import com.cloud.network.element.UserDataServiceProvider;
+import com.cloud.network.element.VpcProvider;
+import com.cloud.network.vpc.NetworkACLItem;
+import com.cloud.network.vpc.PrivateGateway;
+import com.cloud.network.vpc.StaticRouteProfile;
+import com.cloud.network.vpc.Vpc;
 import com.cloud.network.lb.LoadBalancingRule;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.FirewallRuleVO;
@@ -204,7 +210,7 @@ public class NetworkExtensionElement extends AdapterBase implements
         PortForwardingServiceProvider, IpDeployer, NetworkCustomActionProvider,
         DhcpServiceProvider, DnsServiceProvider, FirewallServiceProvider,
         UserDataServiceProvider, LoadBalancingServiceProvider,
-        AggregatedCommandExecutor {
+        VpcProvider, NetworkACLServiceProvider, AggregatedCommandExecutor {
 
     private static final Map<Service, Map<Capability, String>> DEFAULT_CAPABILITIES = new HashMap<>();
 
@@ -446,11 +452,11 @@ public class NetworkExtensionElement extends AdapterBase implements
             return false;
         }
 
-        // Step 3: Configure source NAT if supported.
-        if (canHandle(network, Service.SourceNat)) {
+        // Step 3: Configure source NAT for non-VPC networks.
+        // VPC source NAT is managed at implementVpc().
+        if (network.getVpcId() == null && canHandle(network, Service.SourceNat)) {
             try {
                 Account owner = accountService.getAccount(network.getAccountId());
-                PublicIp sourceNatIp = null;
                 PublicIpAddress existingIp = networkModel.getSourceNatIpAddressForGuestNetwork(owner, network);
                 if (existingIp != null) {
                     applyIps(network, List.of(existingIp), Set.of(Service.SourceNat));
@@ -522,7 +528,9 @@ public class NetworkExtensionElement extends AdapterBase implements
         args.add("--network-id"); args.add(String.valueOf(network.getId()));
         args.add("--vlan");       args.add(safeStr(getVlanId(network)));
         args.addAll(getVpcIdArgs(network));
-        boolean result = executeScript(network, "destroy", args.toArray(new String[0]));
+        // For VPC tiers, keep shared namespace until shutdownVpc() by using shutdown here.
+        final String action = network.getVpcId() == null ? "destroy" : "shutdown";
+        boolean result = executeScript(network, action, args.toArray(new String[0]));
         if (result) {
             cleanupPlaceholderNicIp(network, context);
             networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
@@ -2136,5 +2144,161 @@ public class NetworkExtensionElement extends AdapterBase implements
         json.append("}"); // root
 
         return Base64.getEncoder().encodeToString(json.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    // ---- VpcProvider ----
+
+    protected Network findVpcAnchorNetwork(long vpcId) {
+        final List<? extends Network> networks = networkModel.listNetworksByVpc(vpcId);
+        if (networks == null || networks.isEmpty()) {
+            return null;
+        }
+
+        for (final Network network : networks) {
+            if (canHandle(network, null)) {
+                return network;
+            }
+        }
+        return null;
+    }
+
+    protected PublicIpAddress getVpcSourceNatIp(long vpcId) {
+        final List<IPAddressVO> ips = ipAddressDao.listByAssociatedVpc(vpcId, true);
+        if (ips == null || ips.isEmpty()) {
+            return null;
+        }
+        IPAddressVO selected = null;
+        for (final IPAddressVO ip : ips) {
+            if (ip.getState() != IpAddress.State.Releasing) {
+                selected = ip;
+                break;
+            }
+        }
+        if (selected == null) {
+            selected = ips.get(0);
+        }
+
+        final VlanVO vlan = vlanDao.findById(selected.getVlanId());
+        if (vlan == null) {
+            logger.warn("No VLAN found for VPC source NAT IP {} (vpc={})", selected.getAddress(), vpcId);
+            return null;
+        }
+        return PublicIp.createFromAddrAndVlan(selected, vlan);
+    }
+
+    /**
+     * Creates the VPC namespace and applies VPC source NAT upfront.
+     */
+    @Override
+    public boolean implementVpc(Vpc vpc, DeployDestination dest, ReservationContext context)
+            throws ConcurrentOperationException, ResourceUnavailableException, InsufficientCapacityException {
+        final Network anchorNetwork = findVpcAnchorNetwork(vpc.getId());
+        if (anchorNetwork == null) {
+            logger.debug("implementVpc: no VPC tier network found for vpc {}", vpc.getId());
+            return true;
+        }
+
+        ensureExtensionDetails(anchorNetwork);
+        final String extensionIp = ensureExtensionIp(anchorNetwork);
+
+        final List<String> args = new ArrayList<>();
+        args.add("--network-id");   args.add(String.valueOf(anchorNetwork.getId()));
+        args.add("--vlan");         args.add(safeStr(getVlanId(anchorNetwork)));
+        args.add("--gateway");      args.add(safeStr(anchorNetwork.getGateway()));
+        args.add("--cidr");         args.add(safeStr(anchorNetwork.getCidr()));
+        args.add("--extension-ip"); args.add(safeStr(extensionIp));
+        args.addAll(getVpcIdArgs(anchorNetwork));
+
+        if (!executeScript(anchorNetwork, "implement", args.toArray(new String[0]))) {
+            return false;
+        }
+
+        if (canHandle(anchorNetwork, Service.SourceNat)) {
+            final PublicIpAddress sourceNatIp = getVpcSourceNatIp(vpc.getId());
+            if (sourceNatIp != null) {
+                applyIps(anchorNetwork, List.of(sourceNatIp), Set.of(Service.SourceNat));
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Removes the shared VPC namespace by destroying all extension-backed VPC tiers.
+     */
+    @Override
+    public boolean shutdownVpc(Vpc vpc, ReservationContext context)
+            throws ConcurrentOperationException, ResourceUnavailableException {
+        final List<? extends Network> networks = networkModel.listNetworksByVpc(vpc.getId());
+        if (networks == null || networks.isEmpty()) {
+            return true;
+        }
+
+        boolean result = true;
+        for (final Network network : networks) {
+            if (!canHandle(network, null)) {
+                continue;
+            }
+
+            final List<String> args = new ArrayList<>();
+            args.add("--network-id"); args.add(String.valueOf(network.getId()));
+            args.add("--vlan");       args.add(safeStr(getVlanId(network)));
+            args.addAll(getVpcIdArgs(network));
+
+            final boolean tierResult = executeScript(network, "destroy", args.toArray(new String[0]));
+            if (tierResult) {
+                networkDetailsDao.removeDetail(network.getId(), NETWORK_DETAIL_EXTENSION_DETAILS);
+            }
+            result = result && tierResult;
+        }
+
+        return result;
+    }
+
+    /** Private gateways are not supported by the network extension element. */
+    @Override
+    public boolean createPrivateGateway(PrivateGateway gateway)
+            throws ConcurrentOperationException, ResourceUnavailableException {
+        return true;
+    }
+
+    /** Private gateways are not supported by the network extension element. */
+    @Override
+    public boolean deletePrivateGateway(PrivateGateway gateway)
+            throws ConcurrentOperationException, ResourceUnavailableException {
+        return true;
+    }
+
+    /** Static routes are not supported by the network extension element. */
+    @Override
+    public boolean applyStaticRoutes(Vpc vpc, List<StaticRouteProfile> routes)
+            throws ResourceUnavailableException {
+        return true;
+    }
+
+    /** ACL items on private gateways are not supported by the network extension element. */
+    @Override
+    public boolean applyACLItemsToPrivateGw(PrivateGateway gateway, List<? extends NetworkACLItem> rules)
+            throws ResourceUnavailableException {
+        return true;
+    }
+
+    @Override
+    public boolean updateVpcSourceNatIp(Vpc vpc, IpAddress address) {
+        return true;
+    }
+
+    @Override
+    public boolean applyNetworkACLs(Network config, List<? extends NetworkACLItem> rules) throws ResourceUnavailableException {
+        if (!canHandle(config, Service.NetworkACL)) {
+            return true;
+        }
+        // ACL semantics for this extension are handled by script policy/rule processing.
+        return true;
+    }
+
+    @Override
+    public boolean reorderAclRules(Vpc vpc, List<? extends Network> networks, List<? extends NetworkACLItem> networkACLItems) {
+        return true;
     }
 }
