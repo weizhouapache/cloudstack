@@ -36,7 +36,6 @@
         <template v-if="column.key === 'actions'">
           <span style="margin-right: 5px">
             <tooltip-button
-              v-if="'updateRegisteredExtension' in $store.getters.apis"
               :tooltip="$t('label.action.update.extension.resource')"
               type="default"
               icon="edit-outlined"
@@ -70,6 +69,7 @@
     <a-modal
       v-if="updateModalVisible"
       :visible="updateModalVisible"
+      :width="600"
       :title="$t('label.action.update.extension.resource')"
       :closable="true"
       :footer="null"

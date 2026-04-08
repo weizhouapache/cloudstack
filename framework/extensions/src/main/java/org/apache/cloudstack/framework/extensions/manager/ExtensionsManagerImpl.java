@@ -2260,6 +2260,7 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         cmds.add(UpdateExtensionCmd.class);
         cmds.add(RegisterExtensionCmd.class);
         cmds.add(UnregisterExtensionCmd.class);
+        cmds.add(UpdateRegisteredExtensionCmd.class);
         return cmds;
     }
 
