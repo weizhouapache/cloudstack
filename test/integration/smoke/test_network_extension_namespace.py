@@ -71,23 +71,17 @@ from nose.plugins.attrib import attr
 
 _multiprocess_shared_ = True
 
-# Base directory on KVM agents where wrapper scripts are installed.
-# The actual per-extension subdirectory is derived at runtime from the
-# extension name: /etc/cloudstack/extensions/<ext-name>/
-EXTENSIONS_BASE_DIR   = '/etc/cloudstack/extensions'
+# The file names of the scripts to deploy on the management server and KVM hosts.
 SCRIPT_FILENAME       = 'network-namespace-wrapper.sh'
 ENTRY_POINT_FILENAME  = 'network-namespace.sh'
-
-# State directory used by network-namespace-wrapper.sh on KVM hosts
-KVM_STATE_DIR = '/var/lib/cloudstack/network-namespace'
 
 # Remote URLs to download the scripts from
 _GITHUB_BASE = (
     'https://raw.githubusercontent.com/apache/cloudstack-extensions'
-    '/refs/heads/network-namespace/Network-Namespace'
+    '/refs/heads/network-namespace/Network-Namespace/'
 )
-WRAPPER_SCRIPT_URL     = _GITHUB_BASE + '/network-namespace-wrapper.sh'
-ENTRY_POINT_SCRIPT_URL = _GITHUB_BASE + '/network-namespace.sh'
+WRAPPER_SCRIPT_URL     = _GITHUB_BASE + SCRIPT_FILENAME
+ENTRY_POINT_SCRIPT_URL = _GITHUB_BASE + ENTRY_POINT_FILENAME
 
 # Local cache paths (downloaded once, reused across test methods)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))

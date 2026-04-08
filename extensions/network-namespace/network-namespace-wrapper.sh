@@ -1397,7 +1397,7 @@ dhcp-option=3,${GATEWAY}
 dhcp-hostsfile=${dhcp_hosts}
 addn-hosts=${hosts}
 dhcp-optsfile=${dhcp_opts}
-log-facility=/var/log/cloudstack/network-namespace-dnsmasq-${NETWORK_ID}.log
+log-facility=/var/log/cloudstack/extensions/${_WRAPPER_EXT_DIR}/dnsmasq-${NETWORK_ID}.log
 EOF
     # Add DHCP option 15 (domain-search) when provided by the caller
     if [ -n "${DOMAIN}" ]; then
@@ -1649,7 +1649,7 @@ ${unixd_line}
 ${authz_line}
 
 DocumentRoot ${www}
-ErrorLog /var/log/cloudstack/network-namespace-apache2-${NETWORK_ID}.log
+ErrorLog /var/log/cloudstack/extensions/${_WRAPPER_EXT_DIR}/apache2-${NETWORK_ID}.log
 
 <VirtualHost ${listen_ip}:80>
     ServerName metadata
@@ -1718,7 +1718,7 @@ _svc_start_or_reload_passwd_server() {
     local script_f; script_f=$(_passwd_server_script)
     local pid_f;    pid_f=$(_passwd_server_pid)
     local passwd_f; passwd_f=$(_passwd_file)
-    local log_f;    log_f="/var/log/cloudstack/network-namespace-passwd-${NETWORK_ID}.log"
+    local log_f;    log_f="/var/log/cloudstack/extensions/${_WRAPPER_EXT_DIR}/passwd-${NETWORK_ID}.log"
 
     mkdir -p "$(dirname "${script_f}")"
     touch "${passwd_f}"
