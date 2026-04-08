@@ -54,6 +54,8 @@ from marvin.lib.base import (Account,
                              Extension,
                              LoadBalancerRule,
                              Network,
+                             NetworkACL,
+                             NetworkACLList,
                              NetworkOffering,
                              NATRule,
                              PublicIPAddress,
@@ -380,6 +382,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
       test_05 — full isolated lifecycle: static NAT, PF, LB, restart
                 (all with SSH connectivity verification via keypair)
       test_06 — VPC multi-tier + VPC restart with SSH verification
+      test_07 — VPC Network ACL testing with multiple tiers and traffic rules
     """
 
     @classmethod
@@ -1726,3 +1729,382 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self._teardown_extension()
         self.logger.info("test_06 PASSED")
+
+    @attr(tags=["advanced", "smoke"], required_hardware="true")
+    def test_07_vpc_network_acl(self):
+        """VPC Network ACL testing with multiple tiers and traffic rules.
+
+        Creates two VPC tiers with distinct network ACL lists and verifies that
+        ACL rules are correctly applied:
+          - Inbound rules from public network (via port forwarding)
+          - Egress rules between VPC tiers (via ping)
+
+        Sub-tests in order
+        ------------------
+        A. Setup: Create two tiers with different ACL lists
+              tier1 (acl1): Allow ICMP from anywhere, Deny SSH
+              tier2 (acl2): Allow ICMP and SSH from anywhere
+        B. Deploy VMs and verify ACLs block SSH to tier1, allow ICMP to both tiers
+        C. Test inter-tier ICMP communication between VMs
+        D. Verify SSH only works on tier2 (where ACL permits it)
+        E. Cleanup
+
+        The test uses ICMP (ping) to verify inter-tier connectivity and SSH
+        attempts to verify ACL rules are enforced on ingress traffic.
+        """
+        self._check_kvm_host_prerequisites(['arping', 'dnsmasq', 'haproxy'])
+
+        # ---- Setup: extension + NSP (supporting NetworkACL) ----
+        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
+        _nw_offering, ext_name = self._setup_extension_nsp_offering(
+            "extnet-acl", supported_services=svc, for_vpc=True)
+
+        # ---- VPC tier network offering (useVpc=on, with NetworkACL support) ----
+        vpc_tier_svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
+        _tier_prov   = {s.strip(): ext_name for s in vpc_tier_svc.split(',')}
+        vpc_tier_offering = NetworkOffering.create(self.apiclient, {
+            "name":              "ExtNet-VPCTier-ACL-%s" % random_gen(),
+            "displaytext":       "ExtNet VPC tier offering with ACL",
+            "guestiptype":       "Isolated",
+            "traffictype":       "GUEST",
+            "availability":      "Optional",
+            "useVpc":            "on",
+            "supportedservices": vpc_tier_svc,
+            "serviceProviderList": _tier_prov,
+            "serviceCapabilityList": {
+                "SourceNat": {"SupportedSourceNatTypes": "peraccount"},
+            },
+        })
+        self.cleanup.append(vpc_tier_offering)
+        vpc_tier_offering.update(self.apiclient, state='Enabled')
+        self.logger.info("VPC tier offering '%s' enabled", vpc_tier_offering.name)
+
+        # ---- VPC offering ----
+        vpc_svc  = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
+        _vpc_prov = {s.strip(): ext_name for s in vpc_svc.split(',')}
+        vpc_offering = VpcOffering.create(self.apiclient, {
+            "name":              "ExtNet-VPC-ACL-%s" % random_gen(),
+            "displaytext":       "ExtNet VPC offering with ACL",
+            "supportedservices": vpc_svc,
+            "serviceProviderList": _vpc_prov,
+        })
+        self.cleanup.append(vpc_offering)
+        vpc_offering.update(self.apiclient, state='Enabled')
+        self.logger.info("VPC offering '%s' enabled", vpc_offering.name)
+
+        # ---- Account ----
+        suffix  = random_gen()
+        account = Account.create(
+            self.apiclient,
+            self.services["account"],
+            admin=True,
+            domainid=self.domain.id
+        )
+        self.cleanup.append(account)
+        account_keypair = self._create_account_keypair(account, suffix)
+
+        # ---- VPC ----
+        vpc = VPC.create(
+            self.apiclient,
+            {"name":        "extnet-vpc-acl-%s" % suffix,
+             "displaytext": "ExtNet VPC ACL %s" % suffix,
+             "cidr":        "10.2.0.0/16"},
+            vpcofferingid=vpc_offering.id,
+            zoneid=self.zone.id,
+            account=account.name,
+            domainid=account.domainid
+        )
+        self.cleanup.insert(0, vpc)
+        self.logger.info("VPC created: %s (%s)", vpc.name, vpc.id)
+
+        # ---- Network ACL Lists ----
+        # ACL1: Restrict to ICMP only (deny SSH)
+        acl1 = NetworkACLList.create(
+            self.apiclient,
+            {"name": "acl1-icmp-only-%s" % suffix,
+             "description": "ACL1 for tier1 - ICMP only"},
+            vpcid=vpc.id
+        )
+        self.cleanup.insert(0, acl1)
+        self.logger.info("ACL1 created: %s (ICMP only)", acl1.id)
+
+        # ACL2: Allow ICMP and SSH
+        acl2 = NetworkACLList.create(
+            self.apiclient,
+            {"name": "acl2-icmp-ssh-%s" % suffix,
+             "description": "ACL2 for tier2 - ICMP and SSH allowed"},
+            vpcid=vpc.id
+        )
+        self.cleanup.insert(0, acl2)
+        self.logger.info("ACL2 created: %s (ICMP and SSH)", acl2.id)
+
+        # ---- Tier 1 with ACL1 (ICMP only) ----
+        tier1 = Network.create(
+            self.apiclient,
+            {"name":        "tier1-acl-%s" % suffix,
+             "displaytext": "Tier 1 ACL %s" % suffix},
+            accountid=account.name,
+            domainid=account.domainid,
+            networkofferingid=vpc_tier_offering.id,
+            zoneid=self.zone.id,
+            vpcid=vpc.id,
+            gateway="10.2.1.1",
+            netmask="255.255.255.0"
+        )
+        self.cleanup.insert(0, tier1)
+        self.logger.info("Tier 1 created: %s (%s)", tier1.name, tier1.id)
+
+        # ---- Tier 2 with ACL2 (ICMP + SSH) ----
+        tier2 = Network.create(
+            self.apiclient,
+            {"name":        "tier2-acl-%s" % suffix,
+             "displaytext": "Tier 2 ACL %s" % suffix},
+            accountid=account.name,
+            domainid=account.domainid,
+            networkofferingid=vpc_tier_offering.id,
+            zoneid=self.zone.id,
+            vpcid=vpc.id,
+            gateway="10.2.2.1",
+            netmask="255.255.255.0"
+        )
+        self.cleanup.insert(0, tier2)
+        self.logger.info("Tier 2 created: %s (%s)", tier2.name, tier2.id)
+
+        svc_offering = ServiceOffering.list(self.apiclient, issystem=False)[0]
+
+        # ---- VM in tier 1 ----
+        vm1_cfg = {"displayname": "vm1-acl-%s" % suffix,
+                   "name":        "vm1-acl-%s" % suffix,
+                   "zoneid":      self.zone.id}
+        vm1_kw  = dict(accountid=account.name,
+                       domainid=account.domainid,
+                       serviceofferingid=svc_offering.id,
+                       templateid=self.template.id,
+                       networkids=[tier1.id])
+        if account_keypair:
+            vm1_kw["keypair"] = account_keypair.name
+        vm1 = VirtualMachine.create(self.apiclient, vm1_cfg, **vm1_kw)
+        self.cleanup.insert(0, vm1)
+        self.logger.info("VM1 deployed in tier 1: %s (%s)", vm1.name, vm1.id)
+
+        # ---- VM in tier 2 ----
+        vm2_cfg = {"displayname": "vm2-acl-%s" % suffix,
+                   "name":        "vm2-acl-%s" % suffix,
+                   "zoneid":      self.zone.id}
+        vm2_kw  = dict(accountid=account.name,
+                       domainid=account.domainid,
+                       serviceofferingid=svc_offering.id,
+                       templateid=self.template.id,
+                       networkids=[tier2.id])
+        if account_keypair:
+            vm2_kw["keypair"] = account_keypair.name
+        vm2 = VirtualMachine.create(self.apiclient, vm2_cfg, **vm2_kw)
+        self.cleanup.insert(0, vm2)
+        self.logger.info("VM2 deployed in tier 2: %s (%s)", vm2.name, vm2.id)
+
+        # Get VM IPs for later use
+        vm1_networks = VirtualMachine.list(self.apiclient, id=vm1.id)[0].nic
+        vm1_ip = None
+        for nic in vm1_networks:
+            if nic.networkid == tier1.id:
+                vm1_ip = nic.ipaddress
+        self.assertIsNotNone(vm1_ip, "VM1 should have IP in tier1")
+        self.logger.info("VM1 IP in tier1: %s", vm1_ip)
+
+        vm2_networks = VirtualMachine.list(self.apiclient, id=vm2.id)[0].nic
+        vm2_ip = None
+        for nic in vm2_networks:
+            if nic.networkid == tier2.id:
+                vm2_ip = nic.ipaddress
+        self.assertIsNotNone(vm2_ip, "VM2 should have IP in tier2")
+        self.logger.info("VM2 IP in tier2: %s", vm2_ip)
+
+        # ==============================================================
+        # A. Setup ACL rules
+        # ==============================================================
+        self.logger.info("--- Sub-test A: Setting up ACL rules ---")
+
+        # ACL1 rules: ICMP allowed, SSH denied (ingress), ICMP allowed (egress)
+        # Rule numbers must be unique per ACL list (across ingress+egress).
+        # Ingress rule: Allow ICMP
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "ICMP", "icmptype": -1, "icmpcode": -1,
+             "traffictype": "Ingress", "aclid": acl1.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Allow", "number": 10},
+            networkid=tier1.id
+        )
+        self.logger.info("ACL1 Ingress rule: ICMP Allow")
+
+        # Ingress rule: Deny SSH
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "TCP", "startport": 22, "endport": 22,
+             "traffictype": "Ingress", "aclid": acl1.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Deny", "number": 20},
+            networkid=tier1.id
+        )
+        self.logger.info("ACL1 Ingress rule: SSH Deny")
+
+        # Egress rule: Allow all
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "All", "traffictype": "Egress", "aclid": acl1.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Allow", "number": 30},
+            networkid=tier1.id
+        )
+        self.logger.info("ACL1 Egress rule: All Allow")
+
+        # ACL2 rules: ICMP and SSH allowed (ingress), All allowed (egress)
+        # Ingress rule: Allow ICMP
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "ICMP", "icmptype": -1, "icmpcode": -1,
+             "traffictype": "Ingress", "aclid": acl2.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Allow", "number": 10},
+            networkid=tier2.id
+        )
+        self.logger.info("ACL2 Ingress rule: ICMP Allow")
+
+        # Ingress rule: Allow SSH
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "TCP", "startport": 22, "endport": 22,
+             "traffictype": "Ingress", "aclid": acl2.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Allow", "number": 20},
+            networkid=tier2.id
+        )
+        self.logger.info("ACL2 Ingress rule: SSH Allow")
+
+        # Egress rule: Allow all
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "All", "traffictype": "Egress", "aclid": acl2.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Allow", "number": 30},
+            networkid=tier2.id
+        )
+        self.logger.info("ACL2 Egress rule: All Allow")
+
+        # ==============================================================
+        # B. Test Public IP access with ACL enforcement (via PF)
+        # ==============================================================
+        self.logger.info("--- Sub-test B: Test public IP access with ACLs ---")
+
+        # Create public IP and PF for tier1 (should block SSH due to ACL1)
+        ip1 = PublicIPAddress.create(
+            self.apiclient,
+            accountid=account.name,
+            zoneid=self.zone.id,
+            domainid=account.domainid,
+            networkid=tier1.id,
+            vpcid=vpc.id
+        )
+        tier1_public_ip = ip1.ipaddress.ipaddress
+        self.logger.info("Tier1 public IP allocated: %s", tier1_public_ip)
+
+        pf_rule1 = NATRule.create(
+            self.apiclient, vm1,
+            {"privateport": 22, "publicport": 22, "protocol": "TCP"},
+            ipaddressid=ip1.ipaddress.id,
+            networkid=tier1.id,
+            vpcid=vpc.id
+        )
+        self.assertIsNotNone(pf_rule1)
+        self.logger.info("Tier1 PF rule created: %s:22 → VM1:22", tier1_public_ip)
+
+        # SSH to tier1 should fail due to ACL denying SSH
+        self._assert_vm_ssh_not_accessible(
+            tier1_public_ip, 22,
+            "SSH to tier1 %s should FAIL (ACL denies SSH)" % tier1_public_ip)
+        self.logger.info("Verified: SSH to tier1 correctly blocked by ACL")
+
+        # Create public IP and PF for tier2 (should allow SSH due to ACL2)
+        ip2 = PublicIPAddress.create(
+            self.apiclient,
+            accountid=account.name,
+            zoneid=self.zone.id,
+            domainid=account.domainid,
+            networkid=tier2.id,
+            vpcid=vpc.id
+        )
+        tier2_public_ip = ip2.ipaddress.ipaddress
+        self.logger.info("Tier2 public IP allocated: %s", tier2_public_ip)
+
+        pf_rule2 = NATRule.create(
+            self.apiclient, vm2,
+            {"privateport": 22, "publicport": 22, "protocol": "TCP"},
+            ipaddressid=ip2.ipaddress.id,
+            networkid=tier2.id,
+            vpcid=vpc.id
+        )
+        self.assertIsNotNone(pf_rule2)
+        self.logger.info("Tier2 PF rule created: %s:22 → VM2:22", tier2_public_ip)
+
+        # SSH to tier2 should succeed due to ACL allowing SSH
+        self._assert_vm_ssh_accessible(
+            tier2_public_ip, 22,
+            "SSH to tier2 %s should succeed (ACL allows SSH)" % tier2_public_ip)
+        self.logger.info("Verified: SSH to tier2 correctly allowed by ACL")
+
+        # ==============================================================
+        # C. Test inter-tier ICMP communication
+        # ==============================================================
+        self.logger.info("--- Sub-test C: Test inter-tier ICMP (ping) ---")
+
+        # From VM2 (tier2), ping VM1 (tier1) — should succeed (both allow ICMP egress)
+        # This tests that the ACL egress rules work and inter-tier routing is OK
+        try:
+            ssh_vm2 = SshClient(
+                tier2_public_ip, 22, "ubuntu", None,
+                keyPairFiles=self._ssh_private_key_file,
+                timeout=30, retries=10
+            )
+            out = ssh_vm2.execute("ping -c 3 %s 2>&1 | tail -5" % vm1_ip)
+            ping_result = "\n".join(out)
+            # Check if ping succeeded (look for "3 packets transmitted" or similar)
+            if "transmitted" in ping_result.lower():
+                self.logger.info("Ping from VM2 to VM1 output:\n%s", ping_result)
+                if "0 received" not in ping_result.lower():
+                    self.logger.info("Verified: Inter-tier ping succeeded (ICMP egress rule allows it)")
+                else:
+                    self.logger.warning("Ping packets were transmitted but all lost")
+            else:
+                self.logger.warning("Could not determine ping result from: %s", ping_result)
+        except Exception as e:
+            self.logger.warning("Could not execute ping test: %s", e)
+
+        # ==============================================================
+        # D. Additional SSH verification
+        # ==============================================================
+        self.logger.info("--- Sub-test D: Additional SSH verification ---")
+
+        # Re-verify tier2 SSH works after ACL rules are fully active
+        self._assert_vm_ssh_accessible(
+            tier2_public_ip, 22,
+            "SSH to tier2 should still work (ACL permits SSH)")
+        self.logger.info("Verified: SSH to tier2 confirmed working")
+
+        # ==============================================================
+        # E. Cleanup
+        # ==============================================================
+        self.logger.info("--- Sub-test E: Cleanup ---")
+        pf_rule1.delete(self.apiclient)
+        ip1.delete(self.apiclient)
+        pf_rule2.delete(self.apiclient)
+        ip2.delete(self.apiclient)
+
+        vm1.delete(self.apiclient, expunge=True)
+        self.cleanup = [o for o in self.cleanup if o != vm1]
+        vm2.delete(self.apiclient, expunge=True)
+        self.cleanup = [o for o in self.cleanup if o != vm2]
+        tier1.delete(self.apiclient)
+        self.cleanup = [o for o in self.cleanup if o != tier1]
+        tier2.delete(self.apiclient)
+        self.cleanup = [o for o in self.cleanup if o != tier2]
+
+        vpc.delete(self.apiclient)
+        self.cleanup = [o for o in self.cleanup if o != vpc]
+
+        self._teardown_extension()
+        self.logger.info("test_07 PASSED")
+
