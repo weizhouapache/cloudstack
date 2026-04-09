@@ -87,12 +87,14 @@ import org.apache.cloudstack.framework.extensions.dao.ExtensionResourceMapDao;
 import org.apache.cloudstack.framework.extensions.dao.ExtensionResourceMapDetailsDao;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionCustomActionDetailsVO;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionCustomActionVO;
+import org.apache.cloudstack.framework.extensions.vo.ExtensionResourceMapDetailsVO;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionResourceMapVO;
 import org.apache.cloudstack.framework.extensions.vo.ExtensionVO;
 import org.apache.cloudstack.utils.identity.ManagementServerNode;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
@@ -1122,6 +1124,102 @@ public class ExtensionsManagerImplTest {
         assertEquals(extension, result);
         verify(extensionResourceMapDetailsDao, never()).removeDetails(anyLong());
         verify(extensionResourceMapDetailsDao).saveDetails(any());
+    }
+
+    @Test
+    public void updateRegisteredExtensionWithResourceCleanupDetailsFirstThenSaveRequested() {
+        UpdateRegisteredExtensionCmd cmd = mock(UpdateRegisteredExtensionCmd.class);
+        when(cmd.getResourceType()).thenReturn(ExtensionResourceMap.ResourceType.PhysicalNetwork.name());
+        when(cmd.getResourceId()).thenReturn("physnet-uuid");
+        when(cmd.getExtensionId()).thenReturn(1L);
+        when(cmd.getDetails()).thenReturn(Map.of("username", "root", "password", "secret"));
+        when(cmd.isCleanupDetails()).thenReturn(true);
+
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extensionDao.findById(1L)).thenReturn(extension);
+
+        PhysicalNetworkVO physicalNetwork = mock(PhysicalNetworkVO.class);
+        when(physicalNetwork.getId()).thenReturn(42L);
+        when(physicalNetworkDao.findByUuid("physnet-uuid")).thenReturn(physicalNetwork);
+
+        ExtensionResourceMapVO existing = mock(ExtensionResourceMapVO.class);
+        when(existing.getExtensionId()).thenReturn(1L);
+        when(existing.getId()).thenReturn(100L);
+        when(extensionResourceMapDao.listByResourceIdAndType(42L, ExtensionResourceMap.ResourceType.PhysicalNetwork))
+                .thenReturn(List.of(existing));
+
+        extensionsManager.updateRegisteredExtensionWithResource(cmd);
+
+        verify(extensionResourceMapDetailsDao).removeDetails(100L);
+        verify(extensionResourceMapDetailsDao, never()).saveDetails(any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void updateRegisteredExtensionWithResourceStoresSensitiveDetailsWithDisplayFalse() {
+        UpdateRegisteredExtensionCmd cmd = mock(UpdateRegisteredExtensionCmd.class);
+        when(cmd.getResourceType()).thenReturn(ExtensionResourceMap.ResourceType.PhysicalNetwork.name());
+        when(cmd.getResourceId()).thenReturn("physnet-uuid");
+        when(cmd.getExtensionId()).thenReturn(1L);
+        when(cmd.getDetails()).thenReturn(Map.of("username", "root", "password", "newSecret"));
+        when(cmd.isCleanupDetails()).thenReturn(false);
+
+        ExtensionVO extension = mock(ExtensionVO.class);
+        when(extensionDao.findById(1L)).thenReturn(extension);
+
+        PhysicalNetworkVO physicalNetwork = mock(PhysicalNetworkVO.class);
+        when(physicalNetwork.getId()).thenReturn(42L);
+        when(physicalNetworkDao.findByUuid("physnet-uuid")).thenReturn(physicalNetwork);
+
+        ExtensionResourceMapVO existing = mock(ExtensionResourceMapVO.class);
+        when(existing.getExtensionId()).thenReturn(1L);
+        when(existing.getId()).thenReturn(100L);
+        when(extensionResourceMapDao.listByResourceIdAndType(42L, ExtensionResourceMap.ResourceType.PhysicalNetwork))
+                .thenReturn(List.of(existing));
+        extensionsManager.updateRegisteredExtensionWithResource(cmd);
+
+        ArgumentCaptor<List<ExtensionResourceMapDetailsVO>> captor = ArgumentCaptor.forClass(List.class);
+        verify(extensionResourceMapDetailsDao).saveDetails(captor.capture());
+        verify(extensionResourceMapDetailsDao, never()).removeDetails(anyLong());
+        List<ExtensionResourceMapDetailsVO> savedDetails = captor.getValue();
+
+        ExtensionResourceMapDetailsVO passwordDetail = savedDetails.stream()
+                .filter(detail -> "password".equals(detail.getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(passwordDetail);
+        assertFalse(passwordDetail.isDisplay());
+        assertEquals("newSecret", passwordDetail.getValue());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void registerExtensionWithClusterStoresSensitiveDetailsWithDisplayFalse() {
+        Cluster cluster = mock(Cluster.class);
+        when(cluster.getId()).thenReturn(12L);
+        when(cluster.getName()).thenReturn("cluster-12");
+        when(cluster.getHypervisorType()).thenReturn(Hypervisor.HypervisorType.External);
+
+        Extension extension = mock(Extension.class);
+        when(extension.getId()).thenReturn(5L);
+
+        ExtensionResourceMapVO persistedMap = mock(ExtensionResourceMapVO.class);
+        when(persistedMap.getId()).thenReturn(120L);
+        when(extensionResourceMapDao.persist(any())).thenReturn(persistedMap);
+
+        extensionsManager.registerExtensionWithCluster(cluster, extension,
+                Map.of("username", "admin", "password", "s3cr3t"));
+
+        ArgumentCaptor<List<ExtensionResourceMapDetailsVO>> captor = ArgumentCaptor.forClass(List.class);
+        verify(extensionResourceMapDetailsDao).saveDetails(captor.capture());
+        List<ExtensionResourceMapDetailsVO> savedDetails = captor.getValue();
+
+        ExtensionResourceMapDetailsVO passwordDetail = savedDetails.stream()
+                .filter(detail -> "password".equals(detail.getName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(passwordDetail);
+        assertFalse(passwordDetail.isDisplay());
     }
 
     @Test

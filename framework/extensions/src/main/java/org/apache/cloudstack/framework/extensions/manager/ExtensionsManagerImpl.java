@@ -370,6 +370,39 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         return getResultFromAnswersString(answersStr, extension, msHost, "get path checksum");
     }
 
+    protected List<ExtensionResourceMapDetailsVO> buildExtensionResourceDetailsArray(long extensionResourceMapId,
+            Map<String, String> details) {
+        List<ExtensionResourceMapDetailsVO> detailsList = new ArrayList<>();
+        if (MapUtils.isEmpty(details)) {
+            return detailsList;
+        }
+        for (Map.Entry<String, String> entry : details.entrySet()) {
+            boolean display = !SENSITIVE_DETAIL_KEYS.contains(entry.getKey().toLowerCase());
+            detailsList.add(new ExtensionResourceMapDetailsVO(extensionResourceMapId, entry.getKey(),
+                    entry.getValue(), display));
+        }
+        return detailsList;
+    }
+
+    protected void appendHiddenExtensionResourceDetails(long extensionResourceMapId,
+            List<ExtensionResourceMapDetailsVO> detailsList) {
+        if (CollectionUtils.isEmpty(detailsList)) {
+            return;
+        }
+        Map<String, String> hiddenDetails = extensionResourceMapDetailsDao.listDetailsKeyPairs(extensionResourceMapId, false);
+        if (MapUtils.isEmpty(hiddenDetails)) {
+            return;
+        }
+        Set<String> requestedKeys = detailsList.stream()
+                .map(ExtensionResourceMapDetailsVO::getName)
+                .collect(Collectors.toSet());
+        hiddenDetails.forEach((key, value) -> {
+            if (!requestedKeys.contains(key)) {
+                detailsList.add(new ExtensionResourceMapDetailsVO(extensionResourceMapId, key, value, false));
+            }
+        });
+    }
+
     protected List<ExtensionCustomAction.Parameter> getParametersListFromMap(String actionName, Map parametersMap) {
         if (MapUtils.isEmpty(parametersMap)) {
             return Collections.emptyList();
@@ -1021,31 +1054,18 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
 
         if (Boolean.TRUE.equals(cleanupDetails)) {
             extensionResourceMapDetailsDao.removeDetails(targetMapping.getId());
-        }
-        if (MapUtils.isNotEmpty(details)) {
-            // For sensitive keys (password, sshkey): if the caller explicitly
-            // passes a non-blank value → update; passes null/blank → remove the
-            // stored entry; omits the key entirely → leave existing value intact.
-            Map<String, String> nonSensitive = new HashMap<>();
-            for (Map.Entry<String, String> entry : details.entrySet()) {
-                String key = entry.getKey();
-                String value = entry.getValue();
-                if (SENSITIVE_DETAIL_KEYS.contains(key.toLowerCase())) {
-                    if (StringUtils.isNotBlank(value)) {
-                        // Explicit non-blank value: update the stored secret.
-                        extensionResourceMapDetailsDao.addDetail(
-                                targetMapping.getId(), key, value, false);
-                    } else {
-                        // Explicit null / blank value: remove the stored secret.
-                        extensionResourceMapDetailsDao.removeDetail(
-                                targetMapping.getId(), key);
-                    }
-                } else {
-                    nonSensitive.put(key, value);
-                }
+        } else {
+            List<ExtensionResourceMapDetailsVO> detailsList = buildExtensionResourceDetailsArray(targetMapping.getId(), details);
+            if (CollectionUtils.isNotEmpty(detailsList)) {
+                appendHiddenExtensionResourceDetails(targetMapping.getId(), detailsList);
             }
-            if (MapUtils.isNotEmpty(nonSensitive)) {
-                updateExtensionResourceMapDetails(targetMapping.getId(), nonSensitive);
+            detailsList = detailsList.stream()
+                    .filter(detail -> detail.getValue() != null)
+                    .collect(Collectors.toList());
+            if (CollectionUtils.isNotEmpty(detailsList)) {
+                extensionResourceMapDetailsDao.saveDetails(detailsList);
+            } else {
+                extensionResourceMapDetailsDao.removeDetails(targetMapping.getId());
             }
         }
 
@@ -1080,8 +1100,9 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
             List<ExtensionResourceMapDetailsVO> detailsVOList = new ArrayList<>();
             if (MapUtils.isNotEmpty(details)) {
                 for (Map.Entry<String, String> entry : details.entrySet()) {
+                    boolean display = !SENSITIVE_DETAIL_KEYS.contains(entry.getKey().toLowerCase());
                     detailsVOList.add(new ExtensionResourceMapDetailsVO(savedExtensionMap.getId(),
-                            entry.getKey(), entry.getValue()));
+                            entry.getKey(), entry.getValue(), display));
                 }
                 extensionResourceMapDetailsDao.saveDetails(detailsVOList);
             }
@@ -2152,11 +2173,8 @@ public class ExtensionsManagerImpl extends ManagerBase implements ExtensionsMana
         if (MapUtils.isEmpty(details)) {
             return;
         }
-        List<ExtensionResourceMapDetailsVO> detailsList = new ArrayList<>();
-        for (Map.Entry<String, String> entry : details.entrySet()) {
-            detailsList.add(new ExtensionResourceMapDetailsVO(extensionResourceMapId, entry.getKey(),
-                    entry.getValue()));
-        }
+        List<ExtensionResourceMapDetailsVO> detailsList =
+                buildExtensionResourceDetailsArray(extensionResourceMapId, details);
         extensionResourceMapDetailsDao.saveDetails(detailsList);
     }
 

@@ -77,7 +77,7 @@
       <update-registered-extension
         :resource="resource"
         :extension-resource="selectedResource"
-        @refresh-data="$emit('refresh-data')"
+        @refresh-data="handleRefreshData"
         @close-action="closeUpdateModal" />
     </a-modal>
   </div>
@@ -97,6 +97,7 @@ export default {
     TooltipButton,
     UpdateRegisteredExtension
   },
+  inject: ['parentFetchData'],
   props: {
     resource: {
       type: Object,
@@ -144,6 +145,11 @@ export default {
     closeUpdateModal () {
       this.updateModalVisible = false
       this.selectedResource = null
+    },
+    handleRefreshData () {
+      if (this.parentFetchData) {
+        this.parentFetchData()
+      }
     },
     unregisterExtension (record) {
       const params = {
