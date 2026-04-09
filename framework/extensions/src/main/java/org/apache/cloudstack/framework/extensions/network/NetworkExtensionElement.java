@@ -1130,6 +1130,8 @@ public class NetworkExtensionElement extends AdapterBase implements
             int exitCode = process.waitFor();
             String outputStr = new String(output).trim();
 
+            logger.debug("Running custom action script: {}", String.join(" ", cmdLine));
+
             if (exitCode != 0) {
                 logger.error("Custom action '{}' failed (exit {}): {}", actionName, exitCode, outputStr);
                 return null;
@@ -2283,6 +2285,8 @@ public class NetworkExtensionElement extends AdapterBase implements
             Process process = pb.start();
             String output = new String(process.getInputStream().readAllBytes()).trim();
             int exitCode = process.waitFor();
+
+            logger.debug("Ensuring VPC network device script: {}", String.join(" ", cmdLine));
 
             if (exitCode != 0) {
                 logger.warn("ensure-network-device exited {} for VPC {} — keeping current details",

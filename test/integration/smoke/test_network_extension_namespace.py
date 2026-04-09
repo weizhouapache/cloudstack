@@ -52,6 +52,7 @@ from marvin.cloudstackAPI import (listPhysicalNetworks,
                                   listPublicIpAddresses)
 from marvin.lib.base import (Account,
                              Extension,
+                             ExtensionCustomAction,
                              LoadBalancerRule,
                              Network,
                              NetworkACL,
@@ -383,7 +384,20 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                 (all with SSH connectivity verification via keypair)
       test_06 — VPC multi-tier + VPC restart with SSH verification
       test_07 — VPC Network ACL testing with multiple tiers and traffic rules
+      test_08 — custom-action smoke for Policy-Based Routing (PBR) actions
     """
+
+    @staticmethod
+    def _custom_action_details(resp):
+        """Extract best-effort details text from runCustomAction response."""
+        if resp is None:
+            return ""
+        result = getattr(resp, 'result', None)
+        if isinstance(result, dict):
+            return result.get('details', '') or ''
+        if hasattr(result, '__dict__'):
+            return getattr(result, 'details', '') or ''
+        return ''
 
     @classmethod
     def setUpClass(cls):
@@ -2107,4 +2121,150 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
         self._teardown_extension()
         self.logger.info("test_07 PASSED")
+
+    @attr(tags=["advanced", "smoke"], required_hardware="true")
+    def test_08_custom_action_policy_based_routing(self):
+        """Custom-action smoke test for PBR lifecycle helpers.
+
+        Verifies that network custom actions can create/list/delete:
+          - routing tables
+          - routes per table
+          - policy rules
+        """
+        self._check_kvm_host_prerequisites(['ip', 'arping', 'dnsmasq', 'haproxy'])
+
+        svc = "SourceNat,PortForwarding,Dhcp,Dns,UserData"
+        nw_offering, _ext_name = self._setup_extension_nsp_offering(
+            "extnet-pbr", supported_services=svc)
+        _account, network, vm = self._create_account_network_vm(
+            nw_offering, name_suffix="pbr")
+
+        # Use a unique table name to avoid collisions with stale test state.
+        table_name = "app-%s" % random.randint(100, 999)
+        route_cidr = "172.30.%d.0/24" % random.randint(1, 200)
+
+        actions = []
+        try:
+            def _mk_action(name, parameters = []):
+                a = ExtensionCustomAction.create(
+                    self.apiclient,
+                    extensionid=self.extension.id,
+                    enabled=True,
+                    name=name,
+                    description="PBR smoke: %s" % name,
+                    resourcetype='Network',
+                    parameters=parameters
+                )
+                actions.append(a)
+                return a
+
+            act_create_table = _mk_action("pbr-create-table", parameters=[
+                {"name": "table-id", "type": "STRING", "required": True},
+                {"name": "table-name", "type": "STRING", "required": True},
+            ])
+            act_delete_table = _mk_action("pbr-delete-table", parameters=[
+                {"name": "table-name", "type": "STRING", "required": True},
+            ])
+            act_list_tables  = _mk_action("pbr-list-tables")
+            act_add_route    = _mk_action("pbr-add-route", parameters=[
+                {"name": "table", "type": "STRING", "required": True},
+                {"name": "route", "type": "STRING", "required": True},
+            ])
+            act_delete_route = _mk_action("pbr-delete-route", parameters=[
+                {"name": "table", "type": "STRING", "required": True},
+                {"name": "route", "type": "STRING", "required": True},
+            ])
+            act_list_routes  = _mk_action("pbr-list-routes", parameters=[
+                {"name": "table", "type": "STRING", "required": False},
+            ])
+            act_add_rule     = _mk_action("pbr-add-rule", parameters=[
+                {"name": "table", "type": "STRING", "required": True},
+                {"name": "rule", "type": "STRING", "required": True},
+            ])
+            act_delete_rule  = _mk_action("pbr-delete-rule", parameters=[
+                {"name": "table", "type": "STRING", "required": True},
+                {"name": "rule", "type": "STRING", "required": True},
+            ])
+            act_list_rules   = _mk_action("pbr-list-rules", parameters=[
+                {"name": "table", "type": "STRING", "required": False},
+            ])
+
+            # 1) Create and list routing table
+            out = act_create_table.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table-id": "100", "table-name": table_name}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-create-table should succeed")
+
+            out = act_list_tables.run(self.apiclient, resourceid=network.id)
+            self.assertTrue(getattr(out, 'success', False), "pbr-list-tables should succeed")
+            self.assertIn(table_name, self._custom_action_details(out))
+
+            # 2) Add and list route in table
+            out = act_add_route.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table": table_name, "route": "blackhole %s" % route_cidr}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-add-route should succeed")
+
+            out = act_list_routes.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table": table_name}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-list-routes should succeed")
+            self.assertIn(route_cidr, self._custom_action_details(out))
+
+            # 3) Add and list policy rule
+            out = act_add_rule.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table": table_name, "rule": "to %s" % route_cidr}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-add-rule should succeed")
+
+            out = act_list_rules.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table": table_name}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-list-rules should succeed")
+            self.assertIn(table_name, self._custom_action_details(out))
+
+            # 4) Delete policy rule, route, and table
+            out = act_delete_rule.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table": table_name, "rule": "to %s" % route_cidr}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-delete-rule should succeed")
+
+            out = act_delete_route.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table": table_name, "route": "blackhole %s" % route_cidr}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-delete-route should succeed")
+
+            out = act_delete_table.run(
+                self.apiclient,
+                resourceid=network.id,
+                parameters=[{"table-name": table_name}],
+            )
+            self.assertTrue(getattr(out, 'success', False), "pbr-delete-table should succeed")
+
+            self.logger.info("test_08 PASSED")
+        finally:
+            for action in actions:
+                try:
+                    action.delete(self.apiclient)
+                except Exception:
+                    pass
+            vm.delete(self.apiclient, expunge=True)
+            self.cleanup = [o for o in self.cleanup if o != vm]
+            network.delete(self.apiclient)
+            self.cleanup = [o for o in self.cleanup if o != network]
+            self._teardown_extension()
 

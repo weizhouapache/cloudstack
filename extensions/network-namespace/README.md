@@ -1206,6 +1206,37 @@ Built-in actions:
 |--------|-------------|
 | `reboot-device` | Bounces the guest veth pair (`vh-<vlan>-<id>` down → up) |
 | `dump-config` | Prints namespace IP addresses, iptables rules, and per-network state to stdout |
+| `pbr-create-table` | Create or update a routing-table entry in `/etc/iproute2/rt_tables` |
+| `pbr-delete-table` | Remove a routing-table entry from `/etc/iproute2/rt_tables` |
+| `pbr-list-tables` | List non-comment routing-table entries from `/etc/iproute2/rt_tables` |
+| `pbr-add-route` | Add/replace an `ip route` entry in a specific routing table inside the namespace |
+| `pbr-delete-route` | Delete an `ip route` entry from a specific routing table inside the namespace |
+| `pbr-list-routes` | List routes from one table (or all tables) inside the namespace |
+| `pbr-add-rule` | Add an `ip rule` policy rule mapped to a specific routing table inside the namespace |
+| `pbr-delete-rule` | Delete an `ip rule` policy rule mapped to a specific routing table inside the namespace |
+| `pbr-list-rules` | List policy rules (or only rules for one table) inside the namespace |
+
+PBR action parameter keys (`--action-params` JSON):
+
+| Action | Required keys | Optional keys |
+|--------|---------------|---------------|
+| `pbr-create-table` | `table-id` (or `id`), `table-name` (or `table`) | — |
+| `pbr-delete-table` | `table-id` or `table-name` | — |
+| `pbr-list-tables` | — | — |
+| `pbr-add-route` | `table`, `route` | — |
+| `pbr-delete-route` | `table`, `route` | — |
+| `pbr-list-routes` | — | `table` |
+| `pbr-add-rule` | `table`, `rule` | — |
+| `pbr-delete-rule` | `table`, `rule` | — |
+| `pbr-list-rules` | — | `table` |
+
+Examples (equivalent to direct Linux commands):
+
+* `{"table-id":"100","table-name":"isp1"}` → `100 isp1`
+* `{"table":"isp1","route":"default via 192.168.1.1 dev eth0"}`
+* `{"table":"vpn1","route":"default dev wg0"}`
+* `{"table":"isp1","rule":"from 10.10.1.0/24"}`
+* `{"table":"vpn1","rule":"to 10.10.2.0/24"}`
 
 To add custom actions, place an executable script at
 `${STATE_DIR}/hooks/custom-action-<name>.sh`
@@ -1304,6 +1335,34 @@ cmk runNetworkCustomAction \
     networkid=<network-uuid> \
     actionid=<custom-action-uuid> \
     "parameters[0].key=threshold" "parameters[0].value=90"
+```
+
+### PBR custom-action examples
+
+```bash
+# 1) Create action definitions (once per extension)
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-create-table resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-add-route    resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-add-rule     resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-list-tables  resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-list-routes  resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-list-rules   resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-delete-rule  resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-delete-route resourcetype=Network
+cmk addCustomAction extensionid=<ext-uuid> name=pbr-delete-table resourcetype=Network
+
+# 2) Execute against a network
+cmk runNetworkCustomAction networkid=<network-uuid> actionid=<pbr-create-table-id> \
+    "parameters[0].key=table-id" "parameters[0].value=100" \
+    "parameters[1].key=table-name" "parameters[1].value=isp1"
+
+cmk runNetworkCustomAction networkid=<network-uuid> actionid=<pbr-add-route-id> \
+    "parameters[0].key=table" "parameters[0].value=isp1" \
+    "parameters[1].key=route" "parameters[1].value=default via 192.168.1.1 dev eth0"
+
+cmk runNetworkCustomAction networkid=<network-uuid> actionid=<pbr-add-rule-id> \
+    "parameters[0].key=table" "parameters[0].value=isp1" \
+    "parameters[1].key=rule" "parameters[1].value=from 10.10.1.0/24"
 ```
 
 CloudStack calls `NetworkExtensionElement.runCustomAction()`, which issues:
