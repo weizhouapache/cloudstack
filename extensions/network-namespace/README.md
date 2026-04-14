@@ -808,7 +808,7 @@ Actions:
 > are NOT removed on destroy — they may still be used by other networks or for
 > VM connectivity.
 
-### VPC lifecycle commands: `implement-vpc`, `shutdown-vpc`, `destroy-vpc`
+### VPC lifecycle commands: `implement-vpc`, `update-vpc-source-nat-ip`, `shutdown-vpc`, `destroy-vpc`
 
 These commands manage VPC-level state. Called by `NetworkExtensionElement` when
 implementing, shutting down, or destroying a VPC (before or after per-tier
@@ -840,6 +840,35 @@ Actions:
 
 > This command runs **before** any tier networks are implemented. Tier networks
 > inherit the same namespace.
+
+#### `update-vpc-source-nat-ip`
+
+```
+network-namespace-wrapper.sh update-vpc-source-nat-ip \
+    --vpc-id <vpc-id> \
+    --public-ip <new-source-nat-ip> \
+    [--cidr <vpc-cidr>] \
+    [--public-vlan <pvlan>] \
+    [--public-gateway <gw>] \
+    [--public-cidr <cidr>] \
+    [--source-nat true|false]
+```
+
+Actions:
+1. Ensure the target public veth pair exists (`vph-<pvlan>-<vpc-id>` / `vpn-<pvlan>-<vpc-id>`) and assign the new public IP inside the VPC namespace.
+2. Update host and namespace routes for the new source NAT egress path:
+   * keep host route `<public-ip>/32` via `vph-<pvlan>-<vpc-id>`
+   * replace namespace default route via `--public-gateway` on `vpn-<pvlan>-<vpc-id>` when provided.
+3. Rebuild VPC SNAT chain `CS_EXTNET_<vpc-id>_VPC_POST` so exactly one SNAT rule remains:
+   * `-s <vpc-cidr> -o vpn-<pvlan>-<vpc-id> -j SNAT --to-source <public-ip>`.
+4. Reconcile persisted VPC IP markers under
+   `/var/lib/cloudstack/<ext-name>/vpc-<vpc-id>/ips/`:
+   * set the new source NAT IP file to `true`
+   * set all other VPC public IP marker files to `false`
+   * persist/update `<ip>.pvlan` for the new source NAT IP.
+
+> This command is used by `NetworkExtensionElement.updateVpcSourceNatIp()` when
+> `updateVPC` is called with `sourcenatipaddress`; it avoids full VPC restart.
 
 #### `shutdown-vpc`
 
@@ -1483,7 +1512,8 @@ isolated networks.  Key differences from isolated networks:
   instead of each network getting its own (`cs-net-<networkId>`).
 * **Host affinity**: All tiers of a VPC land on the same KVM host via stable hash-based
   selection using the VPC ID as the routing key.
-* **VPC-level operations**: `implement-vpc`, `shutdown-vpc`, `destroy-vpc` commands
+* **VPC-level operations**: `implement-vpc`, `update-vpc-source-nat-ip`,
+  `shutdown-vpc`, `destroy-vpc` commands
   manage VPC-wide state (namespace creation/teardown).
 * **VPC tier operations**: `implement-network`, `shutdown-network`, `destroy-network`
   commands manage per-tier bridges and routes; the namespace is preserved across
@@ -1514,6 +1544,8 @@ The test covers:
 * Full network lifecycle: implement → assign-ip (source NAT) → static NAT →
   port forwarding → firewall rules → DHCP/DNS → shutdown / destroy.
 * VPC multi-tier networks with shared namespace and automatic host affinity.
+* VPC source NAT IP update flow (`test_09_vpc_source_nat_ip_update`) including
+  source NAT flag flip from old public IP to new public IP.
 * NSP state transitions: Disabled → Enabled → Disabled → Deleted.
 * Tests `test_04`, `test_05`, `test_06` (DHCP, DNS, LB) require `arping`,
   `dnsmasq`, and `haproxy` on the KVM hosts; the test skips them automatically

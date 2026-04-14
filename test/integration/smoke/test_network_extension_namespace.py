@@ -38,6 +38,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.parse
 
 from marvin.cloudstackTestCase import cloudstackTestCase
@@ -385,6 +386,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
       test_06 — VPC multi-tier + VPC restart with SSH verification
       test_07 — VPC Network ACL testing with multiple tiers and traffic rules
       test_08 — custom-action smoke for Policy-Based Routing (PBR) actions
+      test_09 — VPC source NAT IP update without VPC restart
     """
 
     @staticmethod
@@ -761,6 +763,32 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
                 return result[0]
         except Exception as e:
             self.logger.warning("_get_source_nat_ip(%s): %s", network_id, e)
+        return None
+
+    def _list_vpc_public_ips(self, vpc_id):
+        """Return all public IP objects associated with *vpc_id*."""
+        cmd = listPublicIpAddresses.listPublicIpAddressesCmd()
+        cmd.vpcid = vpc_id
+        cmd.listall = True
+        try:
+            result = self.apiclient.listPublicIpAddresses(cmd)
+            if isinstance(result, list):
+                return result
+        except Exception as e:
+            self.logger.warning("_list_vpc_public_ips(%s): %s", vpc_id, e)
+        return []
+
+    def _wait_for_vpc_source_nat_ip(self, vpc_id, expected_ip=None,
+                                    retries=24, interval=5):
+        """Wait until one source-NAT IP exists for the VPC (and optionally matches expected_ip)."""
+        for _ in range(retries):
+            ips = self._list_vpc_public_ips(vpc_id)
+            src = [ip for ip in ips if getattr(ip, 'issourcenat', False)]
+            if len(src) == 1:
+                current_ip = getattr(src[0], 'ipaddress', None)
+                if expected_ip is None or current_ip == expected_ip:
+                    return src[0]
+            time.sleep(interval)
         return None
 
     # ------------------------------------------------------------------
@@ -1460,7 +1488,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         """
         self._check_kvm_host_prerequisites(['arping', 'dnsmasq', 'haproxy'])
         # ---- Setup: extension + NSP only (no isolated offering for VPC tests) ----
-        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns"
+        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
         _nw_offering, ext_name = self._setup_extension_nsp_offering(
             "extnet-vpc", supported_services=svc, for_vpc=True)
 
@@ -1999,6 +2027,12 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         )
         self.logger.info("ACL2 Egress rule: All Allow")
 
+        # Apply the ACL lists to the tier networks
+        tier1.replaceACLList(self.apiclient, acl1.id)
+        self.logger.info("Applied ACL1 (deny SSH) to tier1")
+        tier2.replaceACLList(self.apiclient, acl2.id)
+        self.logger.info("Applied ACL2 (allow SSH) to tier2")
+
         # ==============================================================
         # B. Test Public IP access with ACL enforcement (via PF)
         # ==============================================================
@@ -2267,4 +2301,289 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             network.delete(self.apiclient)
             self.cleanup = [o for o in self.cleanup if o != network]
             self._teardown_extension()
+
+    @attr(tags=["advanced", "smoke"], required_hardware="true")
+    def test_09_vpc_source_nat_ip_update(self):
+        """Update VPC source NAT IP and verify old/new source NAT flags flip correctly."""
+        self._check_kvm_host_prerequisites(['arping'])
+
+        svc = "SourceNat,StaticNat,PortForwarding,Lb,UserData,Dhcp,Dns,NetworkACL"
+        _nw_offering, ext_name = self._setup_extension_nsp_offering(
+            "extnet-vpc-snat-update", supported_services=svc, for_vpc=True)
+
+        suffix = random_gen()
+        account = None
+        vpc = None
+        tier = None
+        vm = None
+        ip1 = None
+        ip2 = None
+        pf_rule = None
+        lb_rule = None
+        static_nat_enabled = False
+        try:
+            # VPC tier network offering (useVpc=on)
+            _tier_prov = {s.strip(): ext_name for s in svc.split(',')}
+            vpc_tier_offering = NetworkOffering.create(self.apiclient, {
+                "name":              "ExtNet-VPCTier-SNAT-%s" % random_gen(),
+                "displaytext":       "ExtNet VPC tier offering for source NAT update",
+                "guestiptype":       "Isolated",
+                "traffictype":       "GUEST",
+                "availability":      "Optional",
+                "useVpc":            "on",
+                "supportedservices": svc,
+                "serviceProviderList": _tier_prov,
+                "serviceCapabilityList": {
+                    "SourceNat": {"SupportedSourceNatTypes": "peraccount"},
+                },
+            })
+            self.cleanup.append(vpc_tier_offering)
+            vpc_tier_offering.update(self.apiclient, state='Enabled')
+
+            # VPC offering
+            _vpc_prov = {s.strip(): ext_name for s in svc.split(',')}
+            vpc_offering = VpcOffering.create(self.apiclient, {
+                "name":              "ExtNet-VPC-SNAT-%s" % random_gen(),
+                "displaytext":       "ExtNet VPC offering for source NAT update",
+                "supportedservices": svc,
+                "serviceProviderList": _vpc_prov,
+            })
+            self.cleanup.append(vpc_offering)
+            vpc_offering.update(self.apiclient, state='Enabled')
+
+            account = Account.create(
+                self.apiclient,
+                self.services["account"],
+                admin=True,
+                domainid=self.domain.id
+            )
+            self.cleanup.append(account)
+            account_keypair = self._create_account_keypair(account, suffix)
+
+            vpc = VPC.create(
+                self.apiclient,
+                {"name":        "extnet-vpc-snat-%s" % suffix,
+                 "displaytext": "ExtNet VPC SNAT %s" % suffix,
+                 "cidr":        "10.3.0.0/16"},
+                vpcofferingid=vpc_offering.id,
+                zoneid=self.zone.id,
+                account=account.name,
+                domainid=account.domainid
+            )
+            self.cleanup.insert(0, vpc)
+
+            tier = Network.create(
+                self.apiclient,
+                {"name":        "tier-snat-%s" % suffix,
+                 "displaytext": "Tier SNAT %s" % suffix},
+                accountid=account.name,
+                domainid=account.domainid,
+                networkofferingid=vpc_tier_offering.id,
+                zoneid=self.zone.id,
+                vpcid=vpc.id,
+                gateway="10.3.1.1",
+                netmask="255.255.255.0"
+            )
+            self.cleanup.insert(0, tier)
+
+            # Create a vm instance in the tier, so that the vpc and tier are implemented on the backend and have their source NAT IPs allocated.
+            svc_offering = ServiceOffering.list(self.apiclient, issystem=False)[0]
+            vm_cfg = {"displayname": "vm-snat-%s" % suffix,
+                      "name":        "vm-snat-%s" % suffix,
+                      "zoneid":      self.zone.id}
+            vm_kw  = dict(accountid=account.name,
+                          domainid=account.domainid,
+                          serviceofferingid=svc_offering.id,
+                          templateid=self.template.id,
+                          networkids=[tier.id])
+            if account_keypair:
+                vm_kw["keypair"] = account_keypair.name
+            vm = VirtualMachine.create(self.apiclient, vm_cfg, **vm_kw)
+            self.cleanup.insert(0, vm)
+
+            # Wait for the VPC's auto-assigned source NAT IP (CloudStack assigns
+            # one automatically when the VPC is first used; it is NOT necessarily
+            # the first manually-allocated IP).
+            src_before = self._wait_for_vpc_source_nat_ip(vpc.id)
+            self.assertIsNotNone(src_before,
+                                 "A source NAT IP should already exist for the VPC")
+            src_before_addr = getattr(src_before, 'ipaddress', None)
+            self.logger.info("Initial source NAT IP: %s", src_before_addr)
+
+            # Allocate ip1 and ip2 as candidates for the updated source NAT.
+            ip1 = PublicIPAddress.create(
+                self.apiclient,
+                accountid=account.name,
+                zoneid=self.zone.id,
+                domainid=account.domainid,
+                networkid=tier.id,
+                vpcid=vpc.id
+            )
+            ip1_addr = ip1.ipaddress.ipaddress
+
+            ip2 = PublicIPAddress.create(
+                self.apiclient,
+                accountid=account.name,
+                zoneid=self.zone.id,
+                domainid=account.domainid,
+                networkid=tier.id,
+                vpcid=vpc.id
+            )
+            ip2_addr = ip2.ipaddress.ipaddress
+
+            # Use ip1 for static NAT (SSH/22) and verify ingress connectivity.
+            StaticNATRule.enable(
+                self.apiclient,
+                ip1.ipaddress.id,
+                vm.id,
+                networkid=tier.id
+            )
+            static_nat_enabled = True
+
+            # Use ip2 for both PF and LB on different public ports.
+            pf_port = 2222
+            lb_port = 2223
+            pf_rule = NATRule.create(
+                self.apiclient,
+                vm,
+                {"privateport": 22, "publicport": pf_port, "protocol": "TCP"},
+                ipaddressid=ip2.ipaddress.id,
+                networkid=tier.id,
+                vpcid=vpc.id
+            )
+            self.assertIsNotNone(pf_rule, "Port forwarding rule should be created on ip2")
+
+            lb_rule = LoadBalancerRule.create(
+                self.apiclient,
+                {
+                    "name": "lb-ssh-%s" % suffix,
+                    "alg": "roundrobin",
+                    "privateport": 22,
+                    "publicport": lb_port,
+                    "protocol": "TCP",
+                },
+                ipaddressid=ip2.ipaddress.id,
+                accountid=account.name,
+                domainid=account.domainid,
+                networkid=tier.id,
+                vpcid=vpc.id
+            )
+            self.assertIsNotNone(lb_rule, "Load balancer rule should be created on ip2")
+            lb_rule.assign(self.apiclient, [vm])
+
+            # Validate all inbound paths before source NAT migration.
+            self._assert_vm_ssh_accessible(
+                ip1_addr, 22,
+                "Static NAT SSH on ip1 should work before source NAT update")
+            self._assert_vm_ssh_accessible(
+                ip2_addr, pf_port,
+                "Port forwarding SSH on ip2 should work before source NAT update")
+            self._assert_vm_ssh_accessible(
+                ip2_addr, lb_port,
+                "Load balancer SSH on ip2 should work before source NAT update")
+
+            ip3 = PublicIPAddress.create(
+                self.apiclient,
+                accountid=account.name,
+                zoneid=self.zone.id,
+                domainid=account.domainid,
+                networkid=tier.id,
+                vpcid=vpc.id
+            )
+            ip3_addr = ip3.ipaddress.ipaddress
+
+            self.logger.info("Updating VPC source NAT IP to %s", ip3_addr)
+            update_resp = vpc.update(self.apiclient, sourcenatipaddress=ip3_addr)
+            self.assertIsNotNone(update_resp,
+                                 "updateVPC should return a response")
+
+            src_after = self._wait_for_vpc_source_nat_ip(vpc.id, expected_ip=ip3_addr)
+            self.assertIsNotNone(src_after,
+                                 "Updated source NAT IP should be %s" % ip3_addr)
+
+            all_vpc_ips = self._list_vpc_public_ips(vpc.id)
+            self.assertEqual(len(all_vpc_ips), 4,
+                                    "VPC should have four public IPs")
+
+            by_addr = {getattr(x, 'ipaddress', None): x for x in all_vpc_ips}
+            self.assertIn(src_before_addr, by_addr,
+                          "Original source NAT IP must remain allocated to VPC")
+            self.assertIn(ip1_addr, by_addr, "Static NAT IP must remain allocated to VPC")
+            self.assertIn(ip2_addr, by_addr, "New source NAT IP must remain allocated to VPC")
+
+            src_ips = [x for x in all_vpc_ips if getattr(x, 'issourcenat', False)]
+            self.assertEqual(1, len(src_ips),
+                             "Exactly one VPC public IP must be marked source NAT")
+            self.assertEqual(ip3_addr, getattr(src_ips[0], 'ipaddress', None),
+                             "Source NAT IP should switch to the requested IP")
+            self.assertFalse(getattr(by_addr[src_before_addr], 'issourcenat', False),
+                             "Original source NAT IP must be unset after update")
+            self.assertTrue(getattr(by_addr[ip3_addr], 'issourcenat', False),
+                            "Requested source NAT IP must be marked source NAT")
+
+            # Validate all inbound paths still work after source NAT migration.
+            self._assert_vm_ssh_accessible(
+                ip1_addr, 22,
+                "Static NAT SSH on ip1 should work after source NAT update")
+            self._assert_vm_ssh_accessible(
+                ip2_addr, pf_port,
+                "Port forwarding SSH on ip2 should work after source NAT update")
+            self._assert_vm_ssh_accessible(
+                ip2_addr, lb_port,
+                "Load balancer SSH on ip2 should work after source NAT update")
+
+            self.logger.info("test_09 PASSED")
+        finally:
+            try:
+                if lb_rule and vm:
+                    lb_rule.remove(self.apiclient, [vm])
+            except Exception:
+                pass
+            try:
+                if lb_rule:
+                    lb_rule.delete(self.apiclient)
+            except Exception:
+                pass
+            try:
+                if pf_rule:
+                    pf_rule.delete(self.apiclient)
+            except Exception:
+                pass
+            try:
+                if static_nat_enabled and ip1:
+                    StaticNATRule.disable(self.apiclient, ip1.ipaddress.id)
+            except Exception:
+                pass
+            try:
+                if ip1:
+                    ip1.delete(self.apiclient)
+            except Exception:
+                pass
+            try:
+                if ip2:
+                    ip2.delete(self.apiclient)
+            except Exception:
+                pass
+            try:
+                if vm:
+                    vm.delete(self.apiclient, expunge=True)
+                    self.cleanup = [o for o in self.cleanup if o != vm]
+            except Exception:
+                pass
+            try:
+                if tier:
+                    tier.delete(self.apiclient)
+                    self.cleanup = [o for o in self.cleanup if o != tier]
+            except Exception:
+                pass
+            try:
+                if vpc:
+                    vpc.delete(self.apiclient)
+                    self.cleanup = [o for o in self.cleanup if o != vpc]
+            except Exception:
+                pass
+            try:
+                self._teardown_extension()
+            except Exception:
+                pass
 

@@ -2488,37 +2488,56 @@ public class NetworkExtensionElement extends AdapterBase implements
         return result;
     }
 
-    /** Private gateways are not supported by the network extension element. */
     @Override
     public boolean createPrivateGateway(PrivateGateway gateway)
             throws ConcurrentOperationException, ResourceUnavailableException {
-        return true;
+        throw new UnsupportedOperationException("Private gateways are not supported by the network extension element.");
     }
 
     /** Private gateways are not supported by the network extension element. */
     @Override
     public boolean deletePrivateGateway(PrivateGateway gateway)
             throws ConcurrentOperationException, ResourceUnavailableException {
-        return true;
+        throw new UnsupportedOperationException("Private gateways are not supported by the network extension element.");
     }
 
     /** Static routes are not supported by the network extension element. */
     @Override
     public boolean applyStaticRoutes(Vpc vpc, List<StaticRouteProfile> routes)
             throws ResourceUnavailableException {
-        return true;
+        throw new UnsupportedOperationException("Static routes are not supported by the network extension element.");
     }
 
     /** ACL items on private gateways are not supported by the network extension element. */
     @Override
     public boolean applyACLItemsToPrivateGw(PrivateGateway gateway, List<? extends NetworkACLItem> rules)
             throws ResourceUnavailableException {
-        return true;
+        throw new UnsupportedOperationException("ACL items on private gateways are not supported by the network extension element.");
     }
 
     @Override
     public boolean updateVpcSourceNatIp(Vpc vpc, IpAddress address) {
-        return true;
+        if (vpc == null || address == null || address.getAddress() == null) {
+            logger.warn("updateVpcSourceNatIp: invalid input (vpc={}, address={})", vpc, address);
+            return false;
+        }
+
+        final List<String> args = new ArrayList<>();
+        final VlanVO vlan = vlanDao.findById(address.getVlanId());
+        args.add("--vpc-id");         args.add(String.valueOf(vpc.getId()));
+        args.add("--cidr");           args.add(safeStr(vpc.getCidr()));
+        args.add("--public-ip");      args.add(safeStr(address.getAddress().addr()));
+        args.add("--public-vlan");    args.add(safeStr(getPublicVlanTag(address.getId())));
+        args.add("--public-gateway"); args.add(vlan != null ? safeStr(vlan.getVlanGateway()) : "");
+        args.add("--public-cidr");    args.add(safeStr(getPublicCidr(address.getId())));
+        args.add("--source-nat");     args.add("true");
+
+        final boolean result = executeVpcScript(vpc, "update-vpc-source-nat-ip", args.toArray(new String[0]));
+        if (!result) {
+            logger.warn("updateVpcSourceNatIp: failed to update source NAT IP for VPC {} to {}",
+                    vpc.getId(), address.getAddress().addr());
+        }
+        return result;
     }
 
     /**

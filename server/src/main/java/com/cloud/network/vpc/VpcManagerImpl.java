@@ -1683,9 +1683,12 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
         if (! userIps.isEmpty()) {
             try {
                 _ipAddrMgr.updateSourceNatIpAddress(requestedIp, userIps);
-                if (isVpcForProvider(Provider.Nsx, vpc) || isVpcForProvider(Provider.Netris, vpc)) {
+                if (isVpcForProvider(Provider.Nsx, vpc) || isVpcForProvider(Provider.Netris, vpc)
+                        || isVpcForProvider(Provider.NetworkExtension, vpc)) {
                     boolean isForNsx = _vpcOffSvcMapDao.isProviderForVpcOffering(Provider.Nsx, vpc.getVpcOfferingId());
-                    String providerName = isForNsx ? Provider.Nsx.getName() : Provider.Netris.getName();
+                    boolean isForNetris = _vpcOffSvcMapDao.isProviderForVpcOffering(Provider.Netris, vpc.getVpcOfferingId());
+                    String providerName = isForNsx ? Provider.Nsx.getName()
+                            : (isForNetris ? Provider.Netris.getName() : Provider.NetworkExtension.getName());
                     VpcProvider providerElement = (VpcProvider) _ntwkModel.getElementImplementingProvider(providerName);
                     if (Objects.nonNull(providerElement)) {
                         providerElement.updateVpcSourceNatIp(vpc, requestedIp);
