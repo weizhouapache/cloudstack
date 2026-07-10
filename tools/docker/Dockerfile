@@ -34,7 +34,7 @@ RUN apt-get -y update && apt-get install -y \
     ipmitool \
     iproute2 \
     maven \
-    openjdk-11-jdk \
+    openjdk-17-jdk \
     python3-dev \
     python-is-python3 \
     python3-setuptools \
