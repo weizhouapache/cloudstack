@@ -62,11 +62,10 @@ RUN find /var/lib/mysql -type f -exec touch {} \; && \
     mvn -Pdeveloper -pl developer -Ddeploydb; \
     mvn -Pdeveloper -pl developer -Ddeploydb-simulator; \
     MARVIN_FILE=`find /root/tools/marvin/dist/ -name "Marvin*.tar.gz"`; \
-    rm -rf /usr/bin/x86_64-linux-gnu-gcc && \
-    ln -s /usr/bin/gcc-10 /usr/bin/x86_64-linux-gnu-gcc; \
-    pip3 install $MARVIN_FILE
+    pip3 install $MARVIN_FILE --break-system-packages
 
-RUN apt-get install -y nodejs; \
+RUN curl -sL https://deb.nodesource.com/setup_24.x | sudo -E bash -; \
+    apt-get install -y nodejs; \
     cd ui && npm rebuild node-sass && npm install
 
 VOLUME /var/lib/mysql
