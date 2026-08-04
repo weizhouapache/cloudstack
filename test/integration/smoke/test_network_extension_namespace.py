@@ -2205,6 +2205,23 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             "SSH to tier2 should still work (ACL permits SSH)")
         self.logger.info("Verified: SSH to tier2 confirmed working")
 
+        # Add an Allow SSH ingress rule to ACL1 (tier1), which currently
+        # denies SSH. After adding this rule, SSH to tier1 should succeed.
+        NetworkACL.create(
+            self.apiclient,
+            {"protocol": "TCP", "startport": 22, "endport": 22,
+             "traffictype": "Ingress", "aclid": acl1.id,
+             "cidrlist": ["0.0.0.0/0"], "action": "Allow", "number": 5},
+            networkid=tier1.id
+        )
+        self.logger.info("ACL1 Ingress rule added: SSH Allow")
+
+        # Verify SSH to tier1 now works, since ACL1 allows it
+        self._assert_vm_ssh_accessible(
+            tier1_public_ip, 22,
+            "SSH to tier1 %s should succeed (ACL1 now allows SSH)" % tier1_public_ip)
+        self.logger.info("Verified: SSH to tier1 correctly allowed after ACL1 update")
+
         # ==============================================================
         # E. Cleanup
         # ==============================================================
