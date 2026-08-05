@@ -2222,6 +2222,14 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             "SSH to tier1 %s should succeed (ACL1 now allows SSH)" % tier1_public_ip)
         self.logger.info("Verified: SSH to tier1 correctly allowed after ACL1 update")
 
+        # Updating ACL1 (tier1) must not disturb tier2 — each tier's ACL
+        # chain is jumped to from a namespace-wide FORWARD chain shared by
+        # every tier in the VPC, so tier2 must still be reachable afterwards.
+        self._assert_vm_ssh_accessible(
+            tier2_public_ip, 22,
+            "SSH to tier2 %s should still succeed after ACL1 update" % tier2_public_ip)
+        self.logger.info("Verified: SSH to tier2 still works after ACL1 update")
+
         # ==============================================================
         # E. Cleanup
         # ==============================================================
