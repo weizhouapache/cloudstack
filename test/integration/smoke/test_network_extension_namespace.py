@@ -2082,7 +2082,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         self.logger.info("ACL2 Ingress rule: ICMP Allow")
 
         # Ingress rule: Allow SSH
-        NetworkACL.create(
+        acl2_ssh_rule = NetworkACL.create(
             self.apiclient,
             {"protocol": "TCP", "startport": 22, "endport": 22,
              "traffictype": "Ingress", "aclid": acl2.id,
@@ -2229,6 +2229,23 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
             tier2_public_ip, 22,
             "SSH to tier2 %s should still succeed after ACL1 update" % tier2_public_ip)
         self.logger.info("Verified: SSH to tier2 still works after ACL1 update")
+
+        # Remove the SSH Allow rule from ACL2 (tier2). With that rule gone,
+        # tier2 has no ingress rule permitting SSH, so it should fall back
+        # to the implicit deny; tier1 (unaffected by this change) must
+        # remain reachable.
+        acl2_ssh_rule.delete(self.apiclient)
+        self.logger.info("ACL2 Ingress rule removed: SSH Allow")
+
+        self._assert_vm_ssh_accessible(
+            tier1_public_ip, 22,
+            "SSH to tier1 %s should still succeed (unaffected by ACL2 change)" % tier1_public_ip)
+        self.logger.info("Verified: SSH to tier1 still works after ACL2 SSH rule removal")
+
+        self._assert_vm_ssh_not_accessible(
+            tier2_public_ip, 22,
+            "SSH to tier2 %s should FAIL (ACL2 no longer allows SSH)" % tier2_public_ip)
+        self.logger.info("Verified: SSH to tier2 correctly blocked after ACL2 SSH rule removal")
 
         # ==============================================================
         # E. Cleanup
