@@ -66,11 +66,24 @@ github:
       branches:
         includes:
           - "~DEFAULT_BRANCH"
+          - "4.22"
+          - "4.20"
         excludes: []
       bypass_teams:
         - root
       restrict_deletion: true
       restrict_force_push: true
+
+      required_pull_request_reviews:
+        required_approving_review_count: 2
+
+      required_status_checks:
+        - "Build / build"
+        - "pre-commit / Run pre-commit"
+        - "UI Build / build"
+        - "Simulator CI / build"
+        - "Simulator CI / test"
+        - "License Check / build"
 
   copilot_code_review:
     enabled: true
