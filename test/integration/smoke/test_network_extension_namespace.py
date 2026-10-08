@@ -470,6 +470,7 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         cls._cleanup      = []
         cls.tmp_files     = []
         cls.keypair       = None
+        cls.ipv6_guestprefix = None
 
         cls.logger = logging.getLogger("TestNetworkExtensionNamespace")
         cls.stream_handler = logging.StreamHandler()
@@ -550,12 +551,21 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
 
     @classmethod
     def tearDownClass(cls):
-        super(TestNetworkExtensionNamespace, cls).tearDownClass()
-        for tmp_file in cls.tmp_files:
-            try:
-                os.remove(tmp_file)
-            except Exception:
-                pass
+        try:
+            super(TestNetworkExtensionNamespace, cls).tearDownClass()
+        finally:
+            if cls.ipv6_guestprefix is not None:
+                try:
+                    cmd = deleteGuestNetworkIpv6Prefix.deleteGuestNetworkIpv6PrefixCmd()
+                    cmd.id = cls.ipv6_guestprefix.id
+                    cls.apiclient.deleteGuestNetworkIpv6Prefix(cmd)
+                except Exception as e:
+                    cls.logger.warning("Failed to clean up IPv6 prefix: %s", e)
+            for tmp_file in cls.tmp_files:
+                try:
+                    os.remove(tmp_file)
+                except Exception:
+                    pass
 
     def setUp(self):
         self.cleanup           = []
@@ -2979,6 +2989,9 @@ class TestNetworkExtensionNamespace(cloudstackTestCase):
         cmd.prefix = prefix_str
         prefix_obj = self.apiclient.createGuestNetworkIpv6Prefix(cmd)
         self.logger.info("Created guest IPv6 prefix: %s", prefix_str)
+
+        self.__class__.ipv6_guestprefix = prefix_obj
+
         return prefix_obj, True
 
     # ------------------------------------------------------------------
