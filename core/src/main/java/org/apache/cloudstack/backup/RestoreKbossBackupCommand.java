@@ -23,6 +23,8 @@ import com.cloud.utils.Pair;
 import org.apache.cloudstack.storage.to.BackupDeltaTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class RestoreKbossBackupCommand extends Command {
@@ -34,6 +36,15 @@ public class RestoreKbossBackupCommand extends Command {
     private Set<String> secondaryStorageUrls;
 
     private boolean quickRestore;
+
+    /**
+     * For volumes backed up as {@code rbd export-diff} streams: the whole chain to replay, from the
+     * full anchor up to the backup being restored, keyed by volume uuid and ordered oldest first.
+     *
+     * <p>A diff carries no pointer to the one before it, so unlike a qcow2 backing chain it cannot
+     * be followed from the backup alone — the chain has to be handed over explicitly.</p>
+     */
+    private Map<String, List<BackupDeltaTO>> rbdDiffChains;
 
     public RestoreKbossBackupCommand(Set<BackupDeltaTO> deltasToRemove, Set<Pair<BackupDeltaTO, VolumeObjectTO>> backupAndVolumePairs, Set<String> secondaryStorageUrls,
             boolean quickRestore) {
@@ -58,6 +69,14 @@ public class RestoreKbossBackupCommand extends Command {
 
     public Set<String> getSecondaryStorageUrls() {
         return secondaryStorageUrls;
+    }
+
+    public Map<String, List<BackupDeltaTO>> getRbdDiffChains() {
+        return rbdDiffChains;
+    }
+
+    public void setRbdDiffChains(Map<String, List<BackupDeltaTO>> rbdDiffChains) {
+        this.rbdDiffChains = rbdDiffChains;
     }
 
     public boolean isQuickRestore() {

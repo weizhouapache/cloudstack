@@ -24,6 +24,7 @@ import com.cloud.hypervisor.Hypervisor;
 import com.cloud.hypervisor.kvm.resource.LibvirtComputingResource;
 import com.cloud.hypervisor.kvm.storage.KVMStoragePool;
 import com.cloud.hypervisor.kvm.storage.KVMStoragePoolManager;
+import com.cloud.hypervisor.kvm.storage.RbdDiffHelper;
 import com.cloud.resource.CommandWrapper;
 import com.cloud.resource.ResourceWrapper;
 import com.cloud.utils.Pair;
@@ -71,20 +72,87 @@ public class LibvirtTakeKbossBackupCommandWrapper extends CommandWrapper<TakeKbo
         boolean runningVM = command.isRunningVM();
 
         try {
-            if (runningVM) {
-                resource.createDiskOnlyVmSnapshotForRunningVm(volumeTosAndNewPaths, vmName, UUID.randomUUID().toString(), command.isQuiesceVm());
+            if (isRbdDiffBackup(kbossTOS)) {
+                // A Ceph chain is anchored on an `rbd snap` taken inside the cluster, so none of
+                // the qcow2 machinery applies: no external snapshot, no delta on primary, no merge,
+                // and the volume keeps the path it already has.
+                backupRbdVolumes(storagePoolManager, kbossTOS, command, mapVolumeUuidToDeltaPathOnSecondaryAndDeltaSize);
             } else {
-                resource.createDiskOnlyVMSnapshotOfStoppedVm(volumeTosAndNewPaths, vmName);
+                if (runningVM) {
+                    resource.createDiskOnlyVmSnapshotForRunningVm(volumeTosAndNewPaths, vmName, UUID.randomUUID().toString(), command.isQuiesceVm());
+                } else {
+                    resource.createDiskOnlyVMSnapshotOfStoppedVm(volumeTosAndNewPaths, vmName);
+                }
+
+                backupVolumes(command, resource, storagePoolManager, kbossTOS, volumeTosAndNewPaths, vmName, runningVM, mapVolumeUuidToDeltaPathOnSecondaryAndDeltaSize);
+
+                cleanupVm(command, resource, kbossTOS, vmName, runningVM, mapVolumeUuidToNewVolumePath);
             }
-
-            backupVolumes(command, resource, storagePoolManager, kbossTOS, volumeTosAndNewPaths, vmName, runningVM, mapVolumeUuidToDeltaPathOnSecondaryAndDeltaSize);
-
-            cleanupVm(command, resource, kbossTOS, vmName, runningVM, mapVolumeUuidToNewVolumePath);
         } catch (BackupException ex) {
             return new TakeKbossBackupAnswer(command, ex);
         }
 
         return new TakeKbossBackupAnswer(command, true, mapVolumeUuidToNewVolumePath, mapVolumeUuidToDeltaPathOnSecondaryAndDeltaSize);
+    }
+
+    /** Whether this command backs Ceph volumes up as {@code rbd export-diff} streams. */
+    protected boolean isRbdDiffBackup(List<KbossTO> kbossTOS) {
+        return kbossTOS.stream().anyMatch(KbossTO::isRbdDiff);
+    }
+
+    /**
+     * Snapshot every Ceph volume and stream it onto secondary storage with {@code rbd export-diff}.
+     *
+     * <p>The anchor snapshot lives in Ceph rather than in the QEMU process, so this works the same
+     * whether the Instance is running or stopped, and the volume is never repointed at a delta
+     * file. The previous anchor is only swept once this cycle's export has succeeded, so a failed
+     * backup leaves the chain able to continue from where it was.</p>
+     */
+    protected void backupRbdVolumes(KVMStoragePoolManager storagePoolManager, List<KbossTO> kbossTOS, TakeKbossBackupCommand command,
+            Map<String, Pair<String, Long>> mapVolumeUuidToDeltaPathOnSecondaryAndDeltaSize) {
+        KVMStoragePool imagePool = storagePoolManager.getStoragePoolByURI(command.getImageStoreUrl());
+
+        for (KbossTO kbossTO : kbossTOS) {
+            VolumeObjectTO volumeObjectTO = kbossTO.getVolumeObjectTO();
+            String volumeUuid = volumeObjectTO.getUuid();
+            PrimaryDataStoreTO primaryDataStoreTO = (PrimaryDataStoreTO) volumeObjectTO.getDataStore();
+            KVMStoragePool primaryPool = storagePoolManager.getStoragePool(primaryDataStoreTO.getPoolType(), primaryDataStoreTO.getUuid());
+            String image = RbdDiffHelper.qualifiedImage(primaryPool,
+                    volumeObjectTO.getPath() != null ? volumeObjectTO.getPath() : volumeUuid);
+
+            String target = imagePool.getLocalPathFor(kbossTO.getDeltaPathOnSecondary());
+            createDirsIfNeeded(target, volumeUuid);
+
+            try (RbdDiffHelper rbd = RbdDiffHelper.forPool(primaryPool)) {
+                String parent = kbossTO.getRbdSnapshotParent();
+                if (parent != null && !rbd.hasSnapshot(image, parent)) {
+                    // Exporting a full stream here while the chain records it as an incremental
+                    // would leave a chain that cannot be replayed, so fail loudly instead.
+                    throw new BackupException(String.format("The parent anchor %s of RBD image %s is gone, so an incremental "
+                            + "backup of volume %s cannot be taken. Start a new chain for this Instance.", parent, image, volumeUuid), true);
+                }
+
+                String snapshot = kbossTO.getRbdSnapshotNew();
+                if (!rbd.createSnapshot(image, snapshot)) {
+                    throw new BackupException(String.format("Could not create the backup anchor %s@%s of volume %s.", image, snapshot, volumeUuid), true);
+                }
+
+                if (!rbd.exportDiff(image, snapshot, parent, target)) {
+                    rbd.removeSnapshot(image, snapshot);
+                    throw new BackupException(String.format("Could not export volume %s (image %s) to secondary storage.", volumeUuid, image), true);
+                }
+
+                long size = new File(target).length();
+                mapVolumeUuidToDeltaPathOnSecondaryAndDeltaSize.put(volumeUuid, new Pair<>(kbossTO.getDeltaPathOnSecondary(), size));
+                logger.debug("Exported RBD diff of volume [{}] ({} bytes) to [{}].", volumeUuid, size, target);
+
+                // Only this cycle's anchor is needed from here on; older ones would pin space in
+                // the cluster for chains that can no longer be extended.
+                rbd.sweepStaleSnapshots(image, snapshot);
+            } catch (IOException ex) {
+                throw new BackupException(String.format("Could not prepare the Ceph credentials needed to back volume %s up.", volumeUuid), ex, true);
+            }
+        }
     }
 
     /**

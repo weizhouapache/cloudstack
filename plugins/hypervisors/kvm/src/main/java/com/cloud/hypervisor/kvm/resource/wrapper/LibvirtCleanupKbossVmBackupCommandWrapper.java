@@ -24,6 +24,7 @@ import com.cloud.hypervisor.kvm.resource.LibvirtVMDef;
 import com.cloud.hypervisor.kvm.storage.KVMPhysicalDisk;
 import com.cloud.hypervisor.kvm.storage.KVMStoragePool;
 import com.cloud.hypervisor.kvm.storage.KVMStoragePoolManager;
+import com.cloud.hypervisor.kvm.storage.RbdDiffHelper;
 import com.cloud.resource.CommandWrapper;
 import com.cloud.resource.ResourceWrapper;
 import com.cloud.utils.Pair;
@@ -57,12 +58,46 @@ public class LibvirtCleanupKbossVmBackupCommandWrapper extends CommandWrapper<Cl
         logger.info("Cleaning up backup error for VM [{}].", command.getVmName());
         cleanupBackupDeltasOnSecondary(command, storagePoolManager, kbossTOS);
 
+        if (kbossTOS.stream().anyMatch(KbossTO::isRbdDiff)) {
+            // A Ceph backup never takes a disk-only snapshot and never repoints the volume, so
+            // there is no VM state to recover here — only this cycle's anchor to drop, if it got
+            // as far as being created.
+            cleanupRbdAnchors(storagePoolManager, kbossTOS);
+            return new CleanupKbossBackupErrorAnswer(command, new ArrayList<>(), command.isRunningVM());
+        }
+
         if (command.isRunningVM()) {
             Pair<List<VolumeObjectTO>, Boolean> volumeTosAndIsVmRunning = cleanupRunningVm(command, serverResource);
             return new CleanupKbossBackupErrorAnswer(command, volumeTosAndIsVmRunning.first(), volumeTosAndIsVmRunning.second());
         }
 
         return new CleanupKbossBackupErrorAnswer(command, mergeDeltasForStoppedVmIfNeeded(command, serverResource), false);
+    }
+
+    /**
+     * Drop the anchor this failed cycle created, so a retry is not blocked by a snapshot that no
+     * backup refers to. Anchors of earlier, successful backups are left alone — the chain must
+     * still be able to continue from where it was.
+     */
+    protected void cleanupRbdAnchors(KVMStoragePoolManager storagePoolManager, List<KbossTO> kbossTOS) {
+        for (KbossTO kbossTO : kbossTOS) {
+            if (!kbossTO.isRbdDiff()) {
+                continue;
+            }
+            VolumeObjectTO volumeObjectTO = kbossTO.getVolumeObjectTO();
+            PrimaryDataStoreTO primaryDataStoreTO = (PrimaryDataStoreTO) volumeObjectTO.getDataStore();
+            KVMStoragePool primaryPool = storagePoolManager.getStoragePool(primaryDataStoreTO.getPoolType(), primaryDataStoreTO.getUuid());
+            try (RbdDiffHelper rbd = RbdDiffHelper.forPool(primaryPool)) {
+                String image = RbdDiffHelper.qualifiedImage(primaryPool,
+                        volumeObjectTO.getPath() != null ? volumeObjectTO.getPath() : volumeObjectTO.getUuid());
+                if (rbd.hasSnapshot(image, kbossTO.getRbdSnapshotNew())) {
+                    logger.debug("Dropping the anchor [{}@{}] left by the failed backup.", image, kbossTO.getRbdSnapshotNew());
+                    rbd.removeSnapshot(image, kbossTO.getRbdSnapshotNew());
+                }
+            } catch (IOException ex) {
+                logger.warn("Could not clean up the Ceph anchor of volume [{}] after a failed backup.", volumeObjectTO.getUuid(), ex);
+            }
+        }
     }
 
     private Pair<List<VolumeObjectTO>, Boolean> cleanupRunningVm(CleanupKbossBackupErrorCommand command, LibvirtComputingResource serverResource) {

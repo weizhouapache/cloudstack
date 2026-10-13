@@ -35,6 +35,19 @@ public class KbossTO {
 
     private List<String> vmSnapshotDeltaPaths;
 
+    /**
+     * Chain anchor to create for this cycle, when the volume is on Ceph and the backup is taken as
+     * an {@code rbd export-diff} stream. Null for the qcow2 delta path, which anchors a chain on an
+     * external snapshot of the volume file instead.
+     */
+    private String rbdSnapshotNew;
+
+    /**
+     * Anchor the previous backup in the chain left behind, used as {@code --from-snap}. Null on a
+     * full, where the whole allocated image is exported.
+     */
+    private String rbdSnapshotParent;
+
     public KbossTO(VolumeObjectTO volumeObjectTO, List<SnapshotDataStoreVO> snapshotDataStoreVOs) {
         this.volumeObjectTO = volumeObjectTO;
         this.vmSnapshotDeltaPaths = snapshotDataStoreVOs.stream().map(SnapshotDataStoreVO::getInstallPath).collect(Collectors.toList());
@@ -44,6 +57,27 @@ public class KbossTO {
         this.volumeObjectTO = volumeObjectTO;
         this.deltaPathOnPrimary = deltaPathOnPrimary;
         this.deltaPathOnSecondary = deltaPathOnSecondary;
+    }
+
+    /** Whether this volume is backed up as an {@code rbd export-diff} stream. */
+    public boolean isRbdDiff() {
+        return rbdSnapshotNew != null;
+    }
+
+    public String getRbdSnapshotNew() {
+        return rbdSnapshotNew;
+    }
+
+    public void setRbdSnapshotNew(String rbdSnapshotNew) {
+        this.rbdSnapshotNew = rbdSnapshotNew;
+    }
+
+    public String getRbdSnapshotParent() {
+        return rbdSnapshotParent;
+    }
+
+    public void setRbdSnapshotParent(String rbdSnapshotParent) {
+        this.rbdSnapshotParent = rbdSnapshotParent;
     }
 
     public String getPathBackupParentOnSecondary() {

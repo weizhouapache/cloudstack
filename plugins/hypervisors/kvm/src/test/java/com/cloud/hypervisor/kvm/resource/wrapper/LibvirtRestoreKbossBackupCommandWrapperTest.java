@@ -110,7 +110,7 @@ public class LibvirtRestoreKbossBackupCommandWrapperTest {
         doReturn(primaryDataStoreToMock).when(backupDeltaTOMock).getDataStore();
         doReturn(Set.of(new Pair<>(backupDeltaTOMock, volumeObjectToMock1))).when(cmdMock).getBackupAndVolumePairs();
         doReturn(null).when(libvirtRestoreKbossBackupCommandWrapperSpy).mountSecondaryStorages(any(), any(), any(), any());
-        doThrow(new QemuImgException("asd")).when(libvirtRestoreKbossBackupCommandWrapperSpy).restoreVolumes(any(), any(), any(), anyBoolean(), anyInt());
+        doThrow(new QemuImgException("asd")).when(libvirtRestoreKbossBackupCommandWrapperSpy).restoreVolumes(any(), any(), any(), anyBoolean(), anyInt(), any());
 
         RestoreKbossBackupAnswer answer = (RestoreKbossBackupAnswer)libvirtRestoreKbossBackupCommandWrapperSpy.execute(cmdMock, libvirtComputingResourceMock);
         assertFalse(answer.getResult());
@@ -124,7 +124,7 @@ public class LibvirtRestoreKbossBackupCommandWrapperTest {
         doReturn(kvmStoragePoolManagerMock).when(libvirtComputingResourceMock).getStoragePoolMgr();
         doReturn(kvmStoragePool1).when(kvmStoragePoolManagerMock).getStoragePoolByURI(any());
         doReturn("uuid").when(kvmStoragePool1).getUuid();
-        doNothing().when(libvirtRestoreKbossBackupCommandWrapperSpy).restoreVolumes(any(), any(), any(), anyBoolean(), anyInt());
+        doNothing().when(libvirtRestoreKbossBackupCommandWrapperSpy).restoreVolumes(any(), any(), any(), anyBoolean(), anyInt(), any());
         doNothing().when(libvirtRestoreKbossBackupCommandWrapperSpy).deleteDeltas(any(), any());
 
         doReturn(false).when(cmdMock).isQuickRestore();
@@ -142,7 +142,7 @@ public class LibvirtRestoreKbossBackupCommandWrapperTest {
         doReturn(kvmStoragePoolManagerMock).when(libvirtComputingResourceMock).getStoragePoolMgr();
         doReturn(kvmStoragePool1).when(kvmStoragePoolManagerMock).getStoragePoolByURI(any());
         doReturn("uuid").when(kvmStoragePool1).getUuid();
-        doNothing().when(libvirtRestoreKbossBackupCommandWrapperSpy).restoreVolumes(any(), any(), any(), anyBoolean(), anyInt());
+        doNothing().when(libvirtRestoreKbossBackupCommandWrapperSpy).restoreVolumes(any(), any(), any(), anyBoolean(), anyInt(), any());
         doNothing().when(libvirtRestoreKbossBackupCommandWrapperSpy).deleteDeltas(any(), any());
 
         doReturn(true).when(cmdMock).isQuickRestore();
@@ -160,7 +160,7 @@ public class LibvirtRestoreKbossBackupCommandWrapperTest {
         doReturn(qemuImgMock).when(libvirtRestoreKbossBackupCommandWrapperSpy).getQemuImg(anyInt());
 
         libvirtRestoreKbossBackupCommandWrapperSpy.restoreVolumes(Set.of(new Pair<>(backupDeltaTOMock, volumeObjectToMock1)), kvmStoragePool1, kvmStoragePoolManagerMock,
-                true, 1000);
+                true, 1000, null);
 
         verify(qemuImgMock).create(any(), (QemuImgFile)any());
     }
@@ -173,7 +173,7 @@ public class LibvirtRestoreKbossBackupCommandWrapperTest {
         doReturn(qemuImgMock).when(libvirtRestoreKbossBackupCommandWrapperSpy).getQemuImg(anyInt());
 
         libvirtRestoreKbossBackupCommandWrapperSpy.restoreVolumes(Set.of(new Pair<>(backupDeltaTOMock, volumeObjectToMock1)), kvmStoragePool1, kvmStoragePoolManagerMock,
-                false, 1000);
+                false, 1000, null);
 
         verify(qemuImgMock).convert(any(), any());
     }

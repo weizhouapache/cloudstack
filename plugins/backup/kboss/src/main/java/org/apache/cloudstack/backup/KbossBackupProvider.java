@@ -86,6 +86,7 @@ import org.apache.cloudstack.storage.heuristics.HeuristicRuleHelper;
 import org.apache.cloudstack.storage.to.BackupDeltaTO;
 import org.apache.cloudstack.storage.to.DeltaMergeTreeTO;
 import org.apache.cloudstack.storage.to.KbossTO;
+import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
 import org.apache.cloudstack.storage.vmsnapshot.VMSnapshotHelper;
 import org.apache.cloudstack.storage.volume.VolumeObject;
@@ -275,7 +276,21 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
     protected final List<Backup.Status> validChildStatesToRemoveBackup = List.of(Backup.Status.Expunged, Backup.Status.Error, Backup.Status.Failed);
 
     private final List<Storage.StoragePoolType> supportedStoragePoolTypes = List.of(Storage.StoragePoolType.Filesystem, Storage.StoragePoolType.NetworkFilesystem,
-            Storage.StoragePoolType.SharedMountPoint);
+            Storage.StoragePoolType.SharedMountPoint, Storage.StoragePoolType.RBD);
+
+    /**
+     * Prefix every Ceph chain anchor is named with, matching
+     * {@code com.cloud.hypervisor.kvm.storage.RbdDiffHelper.SNAPSHOT_PREFIX}. A snapshot carrying
+     * it belongs to a backup chain and to nothing else, which is what makes the agent's sweep of
+     * stale anchors safe.
+     */
+    protected static final String RBD_SNAPSHOT_PREFIX = "csbackup-";
+
+    /** Per-volume backup detail holding the chain anchor a Ceph backup left behind. */
+    protected static final String RBD_ANCHOR_DETAIL_PREFIX = "rbd_anchor_";
+
+    /** Extension the agent writes Ceph diff streams with, so the format is visible on disk. */
+    protected static final String RBD_DIFF_EXTENSION = "rbddiff";
 
     private final List<Backup.Status> allowedBackupStatesToRemove = List.of(Backup.Status.BackedUp, Backup.Status.Failed, Backup.Status.Error);
 
@@ -416,6 +431,14 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
         }
         InternalBackupJoinVO newBackupJoin = internalBackupJoinDao.findById(backup.getId());
         boolean fullBackup = parentBackup == null;
+
+        boolean rbdChain = usesRbdChain(volumeTOs, userVm.getUuid());
+        if (rbdChain) {
+            validateOfferingSupportsRbd(newBackupJoin, userVm.getUuid());
+        }
+        // One anchor per cycle, shared by every volume of the Instance, so a chain position is a
+        // single name rather than one per disk.
+        String rbdSnapshot = rbdChain ? RBD_SNAPSHOT_PREFIX + (System.currentTimeMillis() / 1000L) : null;
         List<InternalBackupStoragePoolVO> parentBackupDeltasOnPrimary = new ArrayList<>();
         List<InternalBackupDataStoreVO> parentBackupDeltasOnSecondary = new ArrayList<>();
         List<String> chainImageStoreUrls = null;
@@ -444,8 +467,16 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
         for (VolumeObjectTO volumeObjectTO : volumeTOs) {
             KbossTO kbossTO = new KbossTO(volumeObjectTO, volumeIdToSnapshotDataStoreList.getOrDefault(volumeObjectTO.getId(), new ArrayList<>()));
             kbossTOs.add(kbossTO);
-            createDeltaReferences(fullBackup, !succeedingVmSnapshotList.isEmpty(), runningVm, backup, parentBackupDeltasOnSecondary,
-                    parentBackupDeltasOnPrimary, volumeUuidToDeltaPrimaryRef, volumeUuidToDeltaSecondaryRef, succeedingVmSnapshot, kbossTO);
+            if (rbdChain) {
+                kbossTO.setRbdSnapshotNew(rbdSnapshot);
+                if (!fullBackup) {
+                    kbossTO.setRbdSnapshotParent(getRbdAnchor(parentBackup.getId(), volumeObjectTO.getUuid()));
+                }
+                createRbdDeltaReference(backup, volumeUuidToDeltaSecondaryRef, kbossTO);
+            } else {
+                createDeltaReferences(fullBackup, !succeedingVmSnapshotList.isEmpty(), runningVm, backup, parentBackupDeltasOnSecondary,
+                        parentBackupDeltasOnPrimary, volumeUuidToDeltaPrimaryRef, volumeUuidToDeltaSecondaryRef, succeedingVmSnapshot, kbossTO);
+            }
         }
 
         TakeKbossBackupCommand command = new TakeKbossBackupCommand(quiesceVm, runningVm, newBackupJoin.getEndOfChain(), userVm.getInstanceName(), imageStore.getUri(),
@@ -460,6 +491,10 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
 
         processBackupSuccess(runningVm, volumeTOs, volumeUuidToDeltaPrimaryRef, volumeUuidToDeltaSecondaryRef, (TakeKbossBackupAnswer)answer, parentBackupDeltasOnPrimary,
                 succeedingVmSnapshotList, backupVO, fullBackup, userVm, hostId, newBackupJoin.getEndOfChain(), isolated);
+
+        if (rbdChain) {
+            persistRbdAnchors(backupVO, kbossTOs);
+        }
 
         if (!isolated) {
             updateCurrentBackup(newBackupJoin);
@@ -645,7 +680,9 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
         Set<String> secondaryStorageUrls = getParentSecondaryStorageUrls(backupVO);
 
         Commands commands = new Commands(Command.OnError.Stop);
-        commands.addCommand(new RestoreKbossBackupCommand(deltasToRemove, backupAndVolumePairs, secondaryStorageUrls, quickRestore));
+        RestoreKbossBackupCommand restoreCommand = new RestoreKbossBackupCommand(deltasToRemove, backupAndVolumePairs, secondaryStorageUrls, quickRestore);
+        restoreCommand.setRbdDiffChains(buildRbdDiffChains(backupVO, backupAndVolumePairs));
+        commands.addCommand(restoreCommand);
         commands.addCommand(new MergeDiskOnlyVmSnapshotCommand(deltasToBeMerged, vm.getState().equals(VirtualMachine.State.Running), vm.getInstanceName()));
 
         Answer[] answers;
@@ -727,6 +764,7 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
         Set<String> secondaryStorageUrls = getParentSecondaryStorageUrls(backupVO);
 
         RestoreKbossBackupCommand cmd = new RestoreKbossBackupCommand(Set.of(), Set.of(backupAndVolumePair), secondaryStorageUrls, quickRestore);
+        cmd.setRbdDiffChains(buildRbdDiffChains(backupVO, Set.of(backupAndVolumePair)));
 
         Answer answer = sendBackupCommand(hostVo.getId(), cmd);
 
@@ -1606,6 +1644,89 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
         volumeUuidToDeltaPrimaryRef.put(volumeObjectTO.getUuid(), referenceOnPrimary);
     }
 
+    /**
+     * Record where this cycle's diff will land on secondary storage.
+     *
+     * <p>Unlike the qcow2 path there is no delta on primary storage to track: the chain is
+     * anchored on an {@code rbd snap} inside Ceph, the volume keeps the path it already has, and
+     * nothing has to be merged back when the chain ends.</p>
+     */
+    protected void createRbdDeltaReference(Backup backup, HashMap<String, InternalBackupDataStoreVO> volumeUuidToDeltaSecondaryRef, KbossTO kbossTO) {
+        VolumeObjectTO volumeObjectTO = kbossTO.getVolumeObjectTO();
+        String relativePathOnSecondary = String.format("%s%s%s%s%s%s%s.%s", "backups", File.separator, volumeObjectTO.getAccountId(), File.separator,
+                volumeObjectTO.getId(), File.separator, UUID.randomUUID(), RBD_DIFF_EXTENSION);
+        kbossTO.setDeltaPathOnSecondary(relativePathOnSecondary);
+
+        InternalBackupDataStoreVO reference = internalBackupDataStoreDao.persist(
+                new InternalBackupDataStoreVO(backup.getId(), volumeObjectTO.getVolumeId(), volumeObjectTO.getDeviceId(), relativePathOnSecondary));
+        logger.trace("Created reference [{}] for Ceph backup [{}] of volume [{}].", reference, backup, volumeObjectTO);
+        volumeUuidToDeltaSecondaryRef.put(volumeObjectTO.getUuid(), reference);
+    }
+
+    /**
+     * Assemble, per target volume, the whole chain of Ceph diffs that has to be replayed.
+     *
+     * <p>An {@code rbd export-diff} stream carries no pointer to the diff before it, so — unlike a
+     * qcow2 backing chain, which the agent can walk from the backup alone — the chain has to be
+     * handed over explicitly, ordered from the full anchor up to the backup being restored.</p>
+     *
+     * <p>Returns an empty map for qcow2 backups, which leaves the agent on its existing path.</p>
+     */
+    protected Map<String, List<BackupDeltaTO>> buildRbdDiffChains(BackupVO backupVO, Set<Pair<BackupDeltaTO, VolumeObjectTO>> backupAndVolumePairs) {
+        Map<String, List<BackupDeltaTO>> chains = new HashMap<>();
+        if (CollectionUtils.isEmpty(backupAndVolumePairs)) {
+            return chains;
+        }
+
+        // Oldest first: the ancestors come back newest first and stop at the chain's end marker.
+        List<InternalBackupJoinVO> ancestors = new ArrayList<>(getBackupJoinParents(backupVO, true));
+        Collections.reverse(ancestors);
+        List<Long> chainBackupIds = ancestors.stream().map(InternalBackupJoinVO::getId).collect(Collectors.toList());
+        chainBackupIds.add(backupVO.getId());
+
+        for (Pair<BackupDeltaTO, VolumeObjectTO> pair : backupAndVolumePairs) {
+            VolumeObjectTO volumeObjectTO = pair.second();
+            if (pair.first() == null || volumeObjectTO == null || !isRbdDiffPath(pair.first().getPath())) {
+                continue;
+            }
+            List<BackupDeltaTO> chain = new ArrayList<>();
+            for (Long chainBackupId : chainBackupIds) {
+                InternalBackupDataStoreVO delta = findDeltaForDevice(chainBackupId, volumeObjectTO.getDeviceId());
+                if (delta == null) {
+                    // The volume was attached partway through the chain: its diffs start here.
+                    continue;
+                }
+                chain.add(new BackupDeltaTO(getImageStoreTOForBackup(chainBackupId), Hypervisor.HypervisorType.KVM, delta.getBackupPath()));
+            }
+            if (!chain.isEmpty()) {
+                chains.put(volumeObjectTO.getUuid(), chain);
+            }
+        }
+        return chains;
+    }
+
+    /** A backup artefact written by the Ceph path rather than as a qcow2 delta. */
+    protected boolean isRbdDiffPath(String path) {
+        return path != null && path.endsWith("." + RBD_DIFF_EXTENSION);
+    }
+
+    protected InternalBackupDataStoreVO findDeltaForDevice(long backupId, Long deviceId) {
+        if (deviceId == null) {
+            return null;
+        }
+        return internalBackupDataStoreDao.listByBackupId(backupId).stream()
+                .filter(delta -> delta.getDeviceId() == deviceId.longValue())
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** The image store a given backup in the chain was written to. */
+    protected DataStoreTO getImageStoreTOForBackup(long backupId) {
+        BackupDetailVO detail = backupDetailDao.findDetail(backupId, BackupDetailsDao.IMAGE_STORE_ID);
+        ImageStoreVO imageStore = detail == null ? null : imageStoreDao.findById(Long.valueOf(detail.getValue()));
+        return imageStore == null ? null : dataStoreManager.getDataStore(imageStore.getId(), DataStoreRole.Image).getTO();
+    }
+
     protected HostVO getHostToRestore(VirtualMachine vm, boolean quickRestore, Long hostId) throws AgentUnavailableException {
         HostVO host;
         if (quickRestore) {
@@ -1735,8 +1856,11 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
             HashMap<String, InternalBackupDataStoreVO> volumeUuidToDeltaSecondaryRef, TakeKbossBackupAnswer answer, long physicalBackupSize, boolean endChain, boolean isolated,
             BackupVO backupVO) {
         String volumeUuid = volumeObjectTO.getUuid();
+        boolean rbdVolume = isRbdVolume(volumeObjectTO);
+
+        // A Ceph chain keeps no delta on primary storage, so there is no reference to expunge.
         InternalBackupStoragePoolVO deltaPrimaryRef = volumeUuidToDeltaPrimaryRef.get(volumeUuid);
-        if (endChain || isolated) {
+        if ((endChain || isolated) && deltaPrimaryRef != null) {
             logger.trace("Since backup [{}] is [{}]. We will delete the delta reference on primary at [{}] as it does not exist anymore.", backupVO.getUuid(), endChain ?
                     "end of chain" : "isolated", deltaPrimaryRef.getBackupDeltaPath());
             internalBackupStoragePoolDao.expunge(deltaPrimaryRef.getId());
@@ -1744,12 +1868,18 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
 
         InternalBackupDataStoreVO deltaSecondaryRef = volumeUuidToDeltaSecondaryRef.get(volumeUuid);
 
-        String newVolumePath = answer.getMapVolumeUuidToNewVolumePath().get(volumeUuid);
+        // The qcow2 path repoints the volume at the delta it just created, so the agent reports a
+        // new path for it. A Ceph volume is never repointed -- the chain is anchored on a snapshot
+        // of the image the volume already has -- so the agent reports none, and writing that
+        // absence into the volume would erase the image name it is addressed by.
+        if (!rbdVolume) {
+            String newVolumePath = answer.getMapVolumeUuidToNewVolumePath().get(volumeUuid);
 
-        VolumeVO volumeVO = volumeDao.findById(volumeObjectTO.getId());
-        volumeVO.setPath(newVolumePath);
-        logger.trace("Updating volume [{}] path to [{}].", volumeVO.getUuid(), newVolumePath);
-        volumeDao.update(volumeVO.getId(), volumeVO);
+            VolumeVO volumeVO = volumeDao.findById(volumeObjectTO.getId());
+            volumeVO.setPath(newVolumePath);
+            logger.trace("Updating volume [{}] path to [{}].", volumeVO.getUuid(), newVolumePath);
+            volumeDao.update(volumeVO.getId(), volumeVO);
+        }
 
         Pair<String, Long> deltaPathOnSecondaryAndSize = answer.getMapVolumeUuidToDeltaPathOnSecondaryAndSize().get(volumeUuid);
         logger.trace("Updating delta reference on secondary [{}] path to [{}].", deltaSecondaryRef, deltaPathOnSecondaryAndSize.first());
@@ -2882,6 +3012,72 @@ public class KbossBackupProvider extends AdapterBase implements InternalBackupPr
                 logger.error("Only able to take backups of VMs with volumes in the following storage types [{}]. Throwing an exception.", supportedStoragePoolTypes);
                 throw new BackupProviderException(String.format("Unable to take backup of VM [%s], please check the logs.", vmUuid));
             }
+        }
+    }
+
+    /**
+     * Whether this Instance's volumes are backed up as {@code rbd export-diff} streams.
+     *
+     * <p>A Ceph chain and a qcow2 chain are different formats and cannot be mixed inside one
+     * backup — the qcow2 path anchors a chain on an external snapshot of the volume file and
+     * replays it with {@code qemu-img}, while a Ceph chain is anchored on an {@code rbd snap} and
+     * replayed with {@code rbd import-diff} — so an Instance with volumes on both is refused
+     * rather than silently backed up half one way and half the other.</p>
+     */
+    protected boolean usesRbdChain(List<VolumeObjectTO> volumeTOs, String vmUuid) {
+        int rbdVolumes = 0;
+        for (VolumeObjectTO volumeObjectTO : volumeTOs) {
+            // Read the pool type off the TO the orchestration already carries rather than going
+            // back to the database for something it has in hand.
+            if (isRbdVolume(volumeObjectTO)) {
+                rbdVolumes++;
+            }
+        }
+        if (rbdVolumes > 0 && rbdVolumes != volumeTOs.size()) {
+            throw new BackupProviderException(String.format("Unable to take backup of VM [%s]: %s of its %s volumes are on Ceph. A backup cannot mix Ceph diffs with "
+                    + "qcow2 deltas, so every volume of the Instance must be on the same kind of storage.", vmUuid, rbdVolumes, volumeTOs.size()));
+        }
+        return rbdVolumes > 0;
+    }
+
+    /** Whether this volume is backed up as an {@code rbd export-diff} stream. */
+    protected boolean isRbdVolume(VolumeObjectTO volumeObjectTO) {
+        DataStoreTO dataStore = volumeObjectTO.getDataStore();
+        return dataStore instanceof PrimaryDataStoreTO && Storage.StoragePoolType.RBD.equals(((PrimaryDataStoreTO) dataStore).getPoolType());
+    }
+
+    /**
+     * Compression, hash validation and boot validation all operate on a qcow2 image sitting on
+     * secondary storage. An {@code rbd export-diff} stream is not a disk image, so these are
+     * refused up front rather than silently skipped, which would leave an offering claiming
+     * guarantees it is not providing.
+     */
+    protected void validateOfferingSupportsRbd(InternalBackupJoinVO backupJoin, String vmUuid) {
+        List<String> unsupported = new ArrayList<>();
+        if (offeringSupportsCompression(backupJoin)) {
+            unsupported.add(ApiConstants.COMPRESS);
+        }
+        if (offeringSupportsValidation(backupJoin)) {
+            unsupported.add(ApiConstants.VALIDATE);
+        }
+        if (!unsupported.isEmpty()) {
+            throw new BackupProviderException(String.format("Unable to take backup of VM [%s]: its volumes are on Ceph, which is backed up as rbd diff streams, and the "
+                    + "backup offering enables %s. Those operate on qcow2 images and cannot be applied to a diff stream. Use an offering without them for Ceph "
+                    + "Instances.", vmUuid, unsupported));
+        }
+    }
+
+    /** The chain anchor the given backup left on {@code volumeUuid}, or null when it has none. */
+    protected String getRbdAnchor(long backupId, String volumeUuid) {
+        BackupDetailVO detail = backupDetailDao.findDetail(backupId, RBD_ANCHOR_DETAIL_PREFIX + volumeUuid);
+        return detail == null ? null : detail.getValue();
+    }
+
+    /** Remember the anchor each volume now carries, so the next incremental can diff against it. */
+    protected void persistRbdAnchors(Backup backup, List<KbossTO> kbossTOs) {
+        for (KbossTO kbossTO : kbossTOs) {
+            backupDetailDao.persist(new BackupDetailVO(backup.getId(), RBD_ANCHOR_DETAIL_PREFIX + kbossTO.getVolumeObjectTO().getUuid(),
+                    kbossTO.getRbdSnapshotNew(), false));
         }
     }
 

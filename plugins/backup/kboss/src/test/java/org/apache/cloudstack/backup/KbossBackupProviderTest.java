@@ -74,6 +74,7 @@ import org.apache.cloudstack.storage.to.BackupDeltaTO;
 import org.apache.cloudstack.storage.to.DeltaMergeTreeTO;
 import org.apache.cloudstack.storage.to.KbossTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
+import org.apache.cloudstack.storage.to.PrimaryDataStoreTO;
 import org.apache.cloudstack.storage.vmsnapshot.VMSnapshotHelper;
 import org.apache.cloudstack.storage.volume.VolumeObject;
 import org.junit.Before;
@@ -112,6 +113,7 @@ import com.cloud.storage.VolumeVO;
 import com.cloud.storage.dao.VolumeDao;
 import com.cloud.utils.DateUtil;
 import com.cloud.utils.Pair;
+import com.cloud.storage.Storage;
 import com.cloud.utils.exception.BackupException;
 import com.cloud.utils.exception.BackupProviderException;
 import com.cloud.utils.exception.CloudRuntimeException;
@@ -3111,6 +3113,125 @@ public class KbossBackupProviderTest {
 
         assertTrue(result);
         verify(kbossBackupProviderSpy).releaseBackup(backupId);
+    }
+
+    private VolumeObjectTO volumeOn(Storage.StoragePoolType poolType) {
+        VolumeObjectTO volume = Mockito.mock(VolumeObjectTO.class);
+        PrimaryDataStoreTO dataStore = Mockito.mock(PrimaryDataStoreTO.class);
+        Mockito.doReturn(poolType).when(dataStore).getPoolType();
+        Mockito.doReturn(dataStore).when(volume).getDataStore();
+        return volume;
+    }
+
+    @Test
+    public void usesRbdChainTestAllVolumesOnCephReturnsTrue() {
+        List<VolumeObjectTO> volumes = List.of(volumeOn(Storage.StoragePoolType.RBD), volumeOn(Storage.StoragePoolType.RBD));
+
+        assertTrue(kbossBackupProviderSpy.usesRbdChain(volumes, "vm-uuid"));
+    }
+
+    @Test
+    public void usesRbdChainTestNoVolumeOnCephReturnsFalse() {
+        List<VolumeObjectTO> volumes = List.of(volumeOn(Storage.StoragePoolType.NetworkFilesystem), volumeOn(Storage.StoragePoolType.SharedMountPoint));
+
+        assertFalse(kbossBackupProviderSpy.usesRbdChain(volumes, "vm-uuid"));
+    }
+
+    @Test(expected = BackupProviderException.class)
+    public void usesRbdChainTestMixedStorageThrows() {
+        // A Ceph diff and a qcow2 delta are different chain formats and cannot share one backup.
+        List<VolumeObjectTO> volumes = List.of(volumeOn(Storage.StoragePoolType.RBD), volumeOn(Storage.StoragePoolType.NetworkFilesystem));
+
+        kbossBackupProviderSpy.usesRbdChain(volumes, "vm-uuid");
+    }
+
+    @Test
+    public void validateOfferingSupportsRbdTestPlainOfferingIsAccepted() {
+        InternalBackupJoinVO backupJoin = Mockito.mock(InternalBackupJoinVO.class);
+        Mockito.doReturn(false).when(kbossBackupProviderSpy).offeringSupportsCompression(backupJoin);
+        Mockito.doReturn(false).when(kbossBackupProviderSpy).offeringSupportsValidation(backupJoin);
+
+        kbossBackupProviderSpy.validateOfferingSupportsRbd(backupJoin, "vm-uuid");
+    }
+
+    @Test(expected = BackupProviderException.class)
+    public void validateOfferingSupportsRbdTestCompressionIsRejected() {
+        // Compression operates on a qcow2 image; an rbd export-diff stream is not one.
+        InternalBackupJoinVO backupJoin = Mockito.mock(InternalBackupJoinVO.class);
+        Mockito.doReturn(true).when(kbossBackupProviderSpy).offeringSupportsCompression(backupJoin);
+        Mockito.doReturn(false).when(kbossBackupProviderSpy).offeringSupportsValidation(backupJoin);
+
+        kbossBackupProviderSpy.validateOfferingSupportsRbd(backupJoin, "vm-uuid");
+    }
+
+    @Test(expected = BackupProviderException.class)
+    public void validateOfferingSupportsRbdTestValidationIsRejected() {
+        InternalBackupJoinVO backupJoin = Mockito.mock(InternalBackupJoinVO.class);
+        Mockito.doReturn(false).when(kbossBackupProviderSpy).offeringSupportsCompression(backupJoin);
+        Mockito.doReturn(true).when(kbossBackupProviderSpy).offeringSupportsValidation(backupJoin);
+
+        kbossBackupProviderSpy.validateOfferingSupportsRbd(backupJoin, "vm-uuid");
+    }
+
+    @Test
+    public void isRbdDiffPathTestRecognisesOnlyDiffArtefacts() {
+        assertTrue(kbossBackupProviderSpy.isRbdDiffPath("backups/2/7/c0ffee.rbddiff"));
+        assertFalse(kbossBackupProviderSpy.isRbdDiffPath("backups/2/7/c0ffee"));
+        assertFalse(kbossBackupProviderSpy.isRbdDiffPath(null));
+    }
+
+    @Test
+    public void buildRbdDiffChainsTestQcow2BackupGetsNoChain() {
+        // A qcow2 delta is followed through its backing file, so the agent needs no chain handed over.
+        BackupDeltaTO delta = Mockito.mock(BackupDeltaTO.class);
+        Mockito.doReturn("backups/2/7/c0ffee").when(delta).getPath();
+        Set<Pair<BackupDeltaTO, VolumeObjectTO>> pairs = Set.of(new Pair<>(delta, Mockito.mock(VolumeObjectTO.class)));
+        Mockito.doReturn(List.of()).when(kbossBackupProviderSpy).getBackupJoinParents(any(), anyBoolean());
+
+        assertTrue(kbossBackupProviderSpy.buildRbdDiffChains(backupVoMock, pairs).isEmpty());
+    }
+
+    @Test
+    public void buildRbdDiffChainsTestEmptyPairsReturnsEmptyMap() {
+        assertTrue(kbossBackupProviderSpy.buildRbdDiffChains(backupVoMock, Set.of()).isEmpty());
+    }
+
+    @Test
+    public void isRbdVolumeTestDistinguishesCephFromFileStorage() {
+        assertTrue(kbossBackupProviderSpy.isRbdVolume(volumeOn(Storage.StoragePoolType.RBD)));
+        assertFalse(kbossBackupProviderSpy.isRbdVolume(volumeOn(Storage.StoragePoolType.NetworkFilesystem)));
+    }
+
+    @Test
+    public void isRbdVolumeTestVolumeWithoutAPrimaryDataStoreIsNotCeph() {
+        VolumeObjectTO volume = Mockito.mock(VolumeObjectTO.class);
+        Mockito.doReturn(null).when(volume).getDataStore();
+
+        assertFalse(kbossBackupProviderSpy.isRbdVolume(volume));
+    }
+
+    @Test
+    public void updateDeltaReferencesTestCephVolumeKeepsItsPath() {
+        // Regression: the agent reports no new path for a Ceph volume, because the volume is never
+        // repointed at a delta. Writing that absence into the volume erased the image name it is
+        // addressed by, which then broke every restore of that Instance.
+        VolumeObjectTO volume = volumeOn(Storage.StoragePoolType.RBD);
+        Mockito.doReturn("uuid-rbd").when(volume).getUuid();
+
+        TakeKbossBackupAnswer answer = Mockito.mock(TakeKbossBackupAnswer.class);
+        Mockito.doReturn(Map.of("uuid-rbd", new Pair<>("backups/2/7/x.rbddiff", 4096L)))
+                .when(answer).getMapVolumeUuidToDeltaPathOnSecondaryAndSize();
+
+        HashMap<String, InternalBackupDataStoreVO> secondaryRefs = new HashMap<>();
+        secondaryRefs.put("uuid-rbd", Mockito.mock(InternalBackupDataStoreVO.class));
+
+        long size = kbossBackupProviderSpy.updateDeltaReferencesAndCalculateBackupPhysicalSize(volume, new HashMap<>(), secondaryRefs,
+                answer, 0L, false, false, backupVoMock);
+
+        assertEquals(4096L, size);
+        // The volume row is left alone, and the agent's path map is never even consulted.
+        Mockito.verify(volumeDaoMock, Mockito.never()).update(Mockito.anyLong(), Mockito.any());
+        Mockito.verify(answer, Mockito.never()).getMapVolumeUuidToNewVolumePath();
     }
 
 }
