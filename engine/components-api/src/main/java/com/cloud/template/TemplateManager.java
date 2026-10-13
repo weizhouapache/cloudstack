@@ -37,6 +37,7 @@ import com.cloud.storage.VMTemplateStoragePoolVO;
 import com.cloud.storage.VMTemplateVO;
 import com.cloud.storage.VolumeVO;
 import com.cloud.utils.Pair;
+import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineProfile;
 
 /**
@@ -69,6 +70,25 @@ public interface TemplateManager {
 
     // KVM/libvirt maps deviceSeq=3 to hdc (hda/hdb are taken by the root volume on i440fx/IDE).
     int CDROM_PRIMARY_DEVICE_SEQ = 3;
+
+    /**
+     * Returns the number of CD-ROM devices of the Instance. The CD-ROM devices occupy the device ids starting from
+     * {@link #CDROM_PRIMARY_DEVICE_SEQ}, which therefore cannot be used by the volumes of the Instance.
+     *
+     * @param vm the Instance
+     * @return the number of CD-ROM devices, including the one of the config drive ISO if the Instance uses config drive
+     */
+    int getVmCdromCount(VirtualMachine vm);
+
+    /**
+     * Returns the device id of the config drive ISO of the Instance. The config drive ISO is attached as the CD-ROM
+     * following the ones of the ISOs, so it is {@link #CDROM_PRIMARY_DEVICE_SEQ} plus the number of the CD-ROMs of the ISOs.
+     *
+     * @param vm the Instance
+     * @param hostId the host the Instance is (to be) deployed on, not used as the number of CD-ROMs does not depend on it
+     * @return the device id of the config drive ISO
+     */
+    int getConfigDriveDeviceId(VirtualMachine vm, Long hostId);
 
     /**
      * Prepares a template for vm creation for a certain storage pool.

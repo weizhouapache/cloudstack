@@ -151,6 +151,9 @@ import com.cloud.hypervisor.Hypervisor;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.hypervisor.HypervisorGuru;
 import com.cloud.hypervisor.HypervisorGuruManager;
+import com.cloud.network.Network.Provider;
+import com.cloud.network.Network.Service;
+import com.cloud.network.NetworkModel;
 import com.cloud.projects.Project;
 import com.cloud.projects.ProjectManager;
 import com.cloud.resourcelimit.CheckedReservation;
@@ -215,6 +218,7 @@ import com.cloud.utils.db.Transaction;
 import com.cloud.utils.db.TransactionCallbackNoReturn;
 import com.cloud.utils.db.TransactionStatus;
 import com.cloud.utils.exception.CloudRuntimeException;
+import com.cloud.vm.NicVO;
 import com.cloud.vm.UserVmManager;
 import com.cloud.vm.UserVmVO;
 import com.cloud.vm.VMInstanceVO;
@@ -223,8 +227,10 @@ import com.cloud.vm.VirtualMachine.State;
 import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.VirtualMachineProfileImpl;
 import com.cloud.vm.VmDetailConstants;
+import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.UserVmDao;
 import com.cloud.vm.dao.VMInstanceDao;
+import com.cloud.vm.dao.VMInstanceDetailsDao;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
@@ -256,6 +262,12 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
     private DataCenterDao _dcDao;
     @Inject
     private UserVmDao _userVmDao;
+    @Inject
+    private NicDao _nicDao;
+    @Inject
+    private NetworkModel _networkModel;
+    @Inject
+    private VMInstanceDetailsDao _vmInstanceDetailsDao;
     @Inject
     private VolumeDao _volumeDao;
     @Inject
@@ -684,6 +696,49 @@ public class TemplateManagerImpl extends ManagerBase implements TemplateManager,
         tmpltStoreRef.setExtractUrlCreated(DateUtil.now());
         _tmplStoreDao.update(tmpltStoreRef.getId(), tmpltStoreRef);
         return extractUrl;
+    }
+
+    /**
+     * The number of CD-ROM devices of the Instance which are used for ISOs.
+     */
+    private int getIsoCdromCount(VirtualMachine vm) {
+        return 1;
+    }
+
+    @Override
+    public int getVmCdromCount(VirtualMachine vm) {
+        // the config drive ISO is attached as the CD-ROM following the ones of the ISOs
+        return getIsoCdromCount(vm) + (isConfigDriveUsed(vm) ? 1 : 0);
+    }
+
+    @Override
+    public int getConfigDriveDeviceId(VirtualMachine vm, Long hostId) {
+        // the config drive ISO is attached as the CD-ROM following the ones of the ISOs
+        return CDROM_PRIMARY_DEVICE_SEQ + getIsoCdromCount(vm);
+    }
+
+    /**
+     * Checks if a config drive ISO is (or will be) attached to the Instance, which is the case when any of its networks
+     * has ConfigDrive as the provider of the Dhcp, Dns or UserData service. Checking the network providers (instead of
+     * only the config drive location detail, which is added when the ISO is created) also covers Instances which have
+     * never been started.
+     */
+    boolean isConfigDriveUsed(VirtualMachine vm) {
+        if (_vmInstanceDetailsDao.findDetail(vm.getId(), VmDetailConstants.CONFIG_DRIVE_LOCATION) != null) {
+            return true;
+        }
+        List<NicVO> nics = _nicDao.listByVmId(vm.getId());
+        if (CollectionUtils.isEmpty(nics)) {
+            return false;
+        }
+        for (NicVO nic : nics) {
+            for (Service service : Arrays.asList(Service.UserData, Service.Dhcp, Service.Dns)) {
+                if (_networkModel.isProviderSupportServiceInNetwork(nic.getNetworkId(), service, Provider.ConfigDrive)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @Override
