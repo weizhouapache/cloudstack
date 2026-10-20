@@ -19,7 +19,7 @@
 
 # Commit to apache/cloudstack PR mapping
 
-Range: `6fd8ddabe73` .. `c101689b6da` on `4.23.0-ceph` (50 commits, oldest first). No commit of the first 49 was changed.
+Range: `6fd8ddabe73` .. `1541e17019a` on `4.23.0-ceph` (59 commits, oldest first). No commit of the first 49 was changed.
 
 | # | Commit | PR | Subject | Note |
 |---|---|---|---|---|
@@ -41,8 +41,8 @@ Range: `6fd8ddabe73` .. `c101689b6da` on `4.23.0-ceph` (50 commits, oldest first
 | 16 | `e64a8d5f69e` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: support Host HA on Ceph RBD primary storage |  |
 | 17 | `cfdd7fcd402` | [#11931](https://github.com/apache/cloudstack/pull/11931) | test: support zone-wide storage pools in test_list_storage_pools |  |
 | 18 | `27d316ee542` | [#14362](https://github.com/apache/cloudstack/pull/14362) | KVM: allow cluster-wide storage pools for VM deployment from volumes |  |
-| 19 | `270d76a24c4` | (none yet) | KVM: live volume migration on ceph | live volume migration between Ceph RBD: PR is still todo |
-| 20 | `3bb8cc024c9` | (none yet) | smoke tests: exercise online volume migration for KVM on RBD | live volume migration between Ceph RBD: PR is still todo |
+| 19 | `270d76a24c4` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: live volume migration on ceph | live volume migration between Ceph RBD; on the PR branch as `6cc5a182ea3` |
+| 20 | `3bb8cc024c9` | [#14426](https://github.com/apache/cloudstack/pull/14426) | smoke tests: exercise online volume migration for KVM on RBD | live volume migration between Ceph RBD; on the PR branch as `187ee3c3d44` |
 | 21 | `3a9e6091e93` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: address review comments on Host HA for Ceph RBD |  |
 | 22 | `2296fb08d30` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: validate input of the RBD Host HA scripts and the Ceph settings of the pool |  |
 | 23 | `be60d18dc8b` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: keep the Ceph key out of the logs and process list of the RBD Host HA checks, and harden the parsing |  |
@@ -63,7 +63,7 @@ Range: `6fd8ddabe73` .. `c101689b6da` on `4.23.0-ceph` (50 commits, oldest first
 | 38 | `52cfddb59b8` | [#14393](https://github.com/apache/cloudstack/pull/14393) | kvm: remove the partial RBD image when a template copy fails |  |
 | 39 | `1635bf004e0` | [#13877](https://github.com/apache/cloudstack/pull/13877) | kvm: test the NAS take-backup arguments with StringUtils and CollectionUtils | per the author: follow-up to the incremental NAS backup code from abh1sar's 4.22 backport (no commit title matches) |
 | 40 | `a9505139484` | [#14386](https://github.com/apache/cloudstack/pull/14386) | nasbackup: carry the backup method separately from the mode |  |
-| 41 | `c521e4c7c35` | [#14402](https://github.com/apache/cloudstack/pull/14402) | utils: add RbdUtils for the Ceph monitors of an RBD pool | owner is 14402; also stacked in 14320 and 14386 |
+| 41 | `c521e4c7c35` | [#14402](https://github.com/apache/cloudstack/pull/14402) | utils: add RbdUtils for the Ceph monitors of an RBD pool | owner is 14402; also stacked in 14320, 14386 and 14426 (as `efe1db7cd1f`) |
 | 42 | `3472c0cece7` | [#14402](https://github.com/apache/cloudstack/pull/14402) | kvm: build every Ceph monitor list with RbdUtils |  |
 | 43 | `a4fc4945c67` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: build the storage pool's Ceph monitors with RbdUtils |  |
 | 44 | `91ee2e4cc71` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: tell a missing object apart from an unreachable cluster in the RBD HA scripts |  |
@@ -73,6 +73,15 @@ Range: `6fd8ddabe73` .. `c101689b6da` on `4.23.0-ceph` (50 commits, oldest first
 | 48 | `f9b1fb9dbed` | [#14386](https://github.com/apache/cloudstack/pull/14386) | kvm: refuse an RBD restore that would destroy a snapshot we did not take |  |
 | 49 | `ae74fa267a7` | [#14386](https://github.com/apache/cloudstack/pull/14386) | kvm: drop the cephx key file from a trap in nasbackup.sh |  |
 | 50 | `c101689b6da` | [#14402](https://github.com/apache/cloudstack/pull/14402) | utils: test the escaped colons of an IPv6 Ceph monitor without a port | owner is 14402 (RbdUtils); the same change is the head commit of the other two PR branches that contain RbdUtils, as `708ba29888d` on #14402, `e9b6dda7d77` on [#14320](https://github.com/apache/cloudstack/pull/14320) and `39cc1041aeb` on [#14386](https://github.com/apache/cloudstack/pull/14386) |
+| 51 | `bb78bf7b4f5` | (none) | docs: map the commits of the Ceph work to their pull requests | this file; not part of any PR |
+| 52 | `ae81a0a3e1e` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: live migrate volumes between RBD, NFS, SharedMountPoint and local pools | on the PR branch as `b62125c052d` |
+| 53 | `baf10e508b7` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: name the RBD heartbeat objects after the GUID of the host | on the PR branch as `324d2d8092a` |
+| 54 | `b47e6d7fbec` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: name the host id of the heartbeat checks heartBeatHostId | on the PR branch as `78e4a2f8f7d` |
+| 55 | `9c858d3a3eb` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: copy a volume of a SharedMountPoint pool directly between primary storages | on the PR branch as `2563acdd980` |
+| 56 | `27968b3fb4b` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: do not fail a volume migration whose block copy was pivoted | on the PR branch as `abdaa03f0e0` |
+| 57 | `5e9be0035ba` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: leave the format detection of libvirt volumes and the pool refresh out of the migration | on the PR branch as `dac5d81dbe0` |
+| 58 | `6cf6e9d30bf` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: do not name an RBD volume copied between primary storages after a format | on the PR branch as `c8b302d6a30` |
+| 59 | `1541e17019a` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: limit live volume migration to RBD pools and RBD to file based pools | on the PR branch as `3a1a22c9445` |
 
 ## PRs
 
@@ -86,10 +95,13 @@ Range: `6fd8ddabe73` .. `c101689b6da` on `4.23.0-ceph` (50 commits, oldest first
 | [#14386](https://github.com/apache/cloudstack/pull/14386) | NAS backup: support incremental backups of RBD volumes | main | weizhouapache |
 | [#14393](https://github.com/apache/cloudstack/pull/14393) | kvm: remove the partial RBD image when a template copy fails | 4.22 | weizhouapache |
 | [#14402](https://github.com/apache/cloudstack/pull/14402) | utils,kvm: build every Ceph monitor list with RbdUtils | main | weizhouapache |
+| [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: live volume migration on Ceph RBD, and between RBD, NFS, SharedMountPoint and local pools | main | weizhouapache |
 | [#14132](https://github.com/apache/cloudstack/pull/14132) | kvm: delete primary-only RBD snapshots before the volume | 4.22 | weizhouapache |
 | [#13877](https://github.com/apache/cloudstack/pull/13877) | backport: Incremental NAS backup support for KVM (#13074) | 4.22 | abh1sar (merged) |
 | [#14188](https://github.com/apache/cloudstack/pull/14188) | kvm: look RBD volumes up through librbd instead of refreshing the whole pool | 4.22 | bhouse-nexthop (merged) |
 
-PR 14132 has no commit in this range. Live volume migration between Ceph RBD has no PR yet (todo).
+PR 14132 has no commit in this range. Live volume migration between Ceph RBD and the other pools is in [#14426](https://github.com/apache/cloudstack/pull/14426).
 
 Commit 50 was added after the first version of this table. Its three copies were pushed to the heads of PRs 14402, 14320 and 14386.
+
+Commits 51 to 59 were added later. The commits of PR [#14426](https://github.com/apache/cloudstack/pull/14426) (52, 55 to 59, and 19 and 20 above) are the ones on its branch `24-ceph-volumes-migrations`, which also carries `efe1db7cd1f` (RbdUtils, row 41). Commits 53 and 54 are the last two commits of PR [#14320](https://github.com/apache/cloudstack/pull/14320).
