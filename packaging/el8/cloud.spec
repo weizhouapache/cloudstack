@@ -130,7 +130,7 @@ Requires: sysstat
 Requires: python3-libnbd
 Requires: python3-rados
 Requires: python3-rbd
-Requires: ceph-common
+Suggests: ceph-common
 Requires: socat
 Requires: openssl
 Requires: bzip2
