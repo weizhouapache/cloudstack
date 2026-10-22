@@ -19,7 +19,7 @@
 
 # Commit to apache/cloudstack PR mapping
 
-Range: `6fd8ddabe73` .. `1541e17019a` on `4.23.0-ceph` (59 commits, oldest first). No commit of the first 49 was changed.
+Range: `6fd8ddabe73` .. `06b5ef51273` on `4.23.0-ceph` (63 commits, oldest first). No commit of the first 49 was changed.
 
 | # | Commit | PR | Subject | Note |
 |---|---|---|---|---|
@@ -82,6 +82,10 @@ Range: `6fd8ddabe73` .. `1541e17019a` on `4.23.0-ceph` (59 commits, oldest first
 | 57 | `5e9be0035ba` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: leave the format detection of libvirt volumes and the pool refresh out of the migration | on the PR branch as `dac5d81dbe0` |
 | 58 | `6cf6e9d30bf` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: do not name an RBD volume copied between primary storages after a format | on the PR branch as `c8b302d6a30` |
 | 59 | `1541e17019a` | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: limit live volume migration to RBD pools and RBD to file based pools | on the PR branch as `3a1a22c9445` |
+| 60 | `3bf87f48bba` | [#14456](https://github.com/apache/cloudstack/pull/14456) | kvm: fix delete of failed Instance Snapshot on stopped VM with RBD storage | fixes issue #13972 |
+| 61 | `f5d38d8f64a` | [#14386](https://github.com/apache/cloudstack/pull/14386) | kvm: remove the backup anchor once the chain it anchors is gone |  |
+| 62 | `4d7bfacb5bc` | [#14386](https://github.com/apache/cloudstack/pull/14386) | nas: decide a chain from its flavour rather than from an rbd flag |  |
+| 63 | `06b5ef51273` | [#13922](https://github.com/apache/cloudstack/pull/13922) | kvm: restore backups into the volume they were taken from (#13922) | cherry-pick of upstream commit `90ef9b98cad`, merged to 4.22 |
 
 ## PRs
 
@@ -93,15 +97,21 @@ Range: `6fd8ddabe73` .. `1541e17019a` on `4.23.0-ceph` (59 commits, oldest first
 | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: support Host HA on Ceph RBD primary storage | main | weizhouapache |
 | [#14362](https://github.com/apache/cloudstack/pull/14362) | KVM: allow cluster-wide storage pools for VM deployment from volumes | main | weizhouapache |
 | [#14386](https://github.com/apache/cloudstack/pull/14386) | NAS backup: support incremental backups of RBD volumes | main | weizhouapache |
+| [#14456](https://github.com/apache/cloudstack/pull/14456) | kvm: fix delete of failed Instance Snapshot on stopped VM with RBD storage | 4.22 | weizhouapache |
 | [#14393](https://github.com/apache/cloudstack/pull/14393) | kvm: remove the partial RBD image when a template copy fails | 4.22 | weizhouapache |
 | [#14402](https://github.com/apache/cloudstack/pull/14402) | utils,kvm: build every Ceph monitor list with RbdUtils | main | weizhouapache |
 | [#14426](https://github.com/apache/cloudstack/pull/14426) | KVM: live volume migration on Ceph RBD, and between RBD, NFS, SharedMountPoint and local pools | main | weizhouapache |
 | [#14132](https://github.com/apache/cloudstack/pull/14132) | kvm: delete primary-only RBD snapshots before the volume | 4.22 | weizhouapache |
 | [#13877](https://github.com/apache/cloudstack/pull/13877) | backport: Incremental NAS backup support for KVM (#13074) | 4.22 | abh1sar (merged) |
 | [#14188](https://github.com/apache/cloudstack/pull/14188) | kvm: look RBD volumes up through librbd instead of refreshing the whole pool | 4.22 | bhouse-nexthop (merged) |
+| [#13922](https://github.com/apache/cloudstack/pull/13922) | kvm: restore backups into the volume they were taken from | 4.22 | calvix (merged) |
 
-PR 14132 has no commit in this range. Live volume migration between Ceph RBD and the other pools is in [#14426](https://github.com/apache/cloudstack/pull/14426).
 
-Commit 50 was added after the first version of this table. Its three copies were pushed to the heads of PRs 14402, 14320 and 14386.
+## Notes
 
-Commits 51 to 59 were added later. The commits of PR [#14426](https://github.com/apache/cloudstack/pull/14426) (52, 55 to 59, and 19 and 20 above) are the ones on its branch `24-ceph-volumes-migrations`, which also carries `efe1db7cd1f` (RbdUtils, row 41). Commits 53 and 54 are the last two commits of PR [#14320](https://github.com/apache/cloudstack/pull/14320).
+- PR [#14132](https://github.com/apache/cloudstack/pull/14132) has no commit in this range.
+- Commit 50 is owned by [#14402](https://github.com/apache/cloudstack/pull/14402) (RbdUtils); its three copies were pushed to the heads of PRs 14402, 14320 and 14386.
+- PR [#14426](https://github.com/apache/cloudstack/pull/14426) (live volume migration) has commits 19, 20, 52 and 55 to 59. They are on its branch `24-ceph-volumes-migrations`, which also carries `efe1db7cd1f` (RbdUtils, row 41).
+- Commits 53 and 54 are the last two commits of PR [#14320](https://github.com/apache/cloudstack/pull/14320).
+- Commits 61 and 62 belong to PR [#14386](https://github.com/apache/cloudstack/pull/14386) (incremental NAS backup of RBD volumes).
+- Commit 51 maps the commits and belongs to no PR. Later commits that only update this file are not listed.
