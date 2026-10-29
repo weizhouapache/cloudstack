@@ -19,7 +19,7 @@
 
 # Commit to apache/cloudstack PR mapping
 
-Range: `6fd8ddabe73` .. `06b5ef51273` on `4.23.0-ceph` (63 commits, oldest first). No commit of the first 49 was changed.
+Range: `6fd8ddabe73` .. `c21efafa2aa` on `4.23.0-ceph` (70 commits, oldest first). No commit of the first 49 was changed.
 
 | # | Commit | PR | Subject | Note |
 |---|---|---|---|---|
@@ -86,6 +86,13 @@ Range: `6fd8ddabe73` .. `06b5ef51273` on `4.23.0-ceph` (63 commits, oldest first
 | 61 | `f5d38d8f64a` | [#14386](https://github.com/apache/cloudstack/pull/14386) | kvm: remove the backup anchor once the chain it anchors is gone |  |
 | 62 | `4d7bfacb5bc` | [#14386](https://github.com/apache/cloudstack/pull/14386) | nas: decide a chain from its flavour rather than from an rbd flag |  |
 | 63 | `06b5ef51273` | [#13922](https://github.com/apache/cloudstack/pull/13922) | kvm: restore backups into the volume they were taken from (#13922) | cherry-pick of upstream commit `90ef9b98cad`, merged to 4.22 |
+| 64 | `d982a772d14` | [#14386](https://github.com/apache/cloudstack/pull/14386) | packaging: suggest ceph-common instead of requiring it | on the PR branch as `95a7402dd8f` |
+| 65 | `e0bef067020` | [#14386](https://github.com/apache/cloudstack/pull/14386) | nas: address review of the RBD incremental backups | on the PR branch as `729de6ed56a` |
+| 66 | `26989eff097` | [#14386](https://github.com/apache/cloudstack/pull/14386) | nas: run RBD backups on a host that has the rbd command | on the PR branch as `fcceb02c1cc` |
+| 67 | `c3bbda32189` | [#14386](https://github.com/apache/cloudstack/pull/14386) | nas: restore RBD backups on a host that has the rbd command | on the PR branch as `5bd6a26a22c` |
+| 68 | `9c697f2ae73` | [#14320](https://github.com/apache/cloudstack/pull/14320) | kvm: check first that the Python bindings of librados and librbd are installed in the RBD HA scripts | on the PR branch as `bbe5c928997` |
+| 69 | `6098adadf9c` | [#14320](https://github.com/apache/cloudstack/pull/14320) | packaging: suggest, instead of require, the Python bindings of librados and librbd | on the PR branch as `e3d603c3291` |
+| 70 | `c21efafa2aa` | [#11931](https://github.com/apache/cloudstack/pull/11931) | test: address review comments on the Ceph smoke tests | on the PR branch as `9b1c126806d` |
 
 ## PRs
 
@@ -112,6 +119,7 @@ Range: `6fd8ddabe73` .. `06b5ef51273` on `4.23.0-ceph` (63 commits, oldest first
 - PR [#14132](https://github.com/apache/cloudstack/pull/14132) has no commit in this range.
 - Commit 50 is owned by [#14402](https://github.com/apache/cloudstack/pull/14402) (RbdUtils); its three copies were pushed to the heads of PRs 14402, 14320 and 14386.
 - PR [#14426](https://github.com/apache/cloudstack/pull/14426) (live volume migration) has commits 19, 20, 52 and 55 to 59. They are on its branch `24-ceph-volumes-migrations`, which also carries `efe1db7cd1f` (RbdUtils, row 41).
-- Commits 53 and 54 are the last two commits of PR [#14320](https://github.com/apache/cloudstack/pull/14320).
-- Commits 61 and 62 belong to PR [#14386](https://github.com/apache/cloudstack/pull/14386) (incremental NAS backup of RBD volumes).
+- Commits 53, 54, 68 and 69 belong to PR [#14320](https://github.com/apache/cloudstack/pull/14320) (Host HA on Ceph).
+- Commits 61, 62 and 64 to 67 belong to PR [#14386](https://github.com/apache/cloudstack/pull/14386) (incremental NAS backup of RBD volumes).
+- Commit 70 holds the review fixes of PR [#11931](https://github.com/apache/cloudstack/pull/11931) (smoke tests on Ceph).
 - Commit 51 maps the commits and belongs to no PR. Later commits that only update this file are not listed.
